@@ -11,14 +11,20 @@
  * Method, per function: build a deterministic starting state, snapshot it, run
  * one side, capture the result, restore, run the other, compare.
  *
- * Two things are deliberately excluded:
+ * Firmware calls used to be excluded: the recompiled stub called psp_hle_call()
+ * while the interpreter ran the unlinked `jr $ra` still sitting in the module,
+ * so the two disagreed at every import by construction. The interpreter now
+ * routes thunk hits into HLE as well (psp_interp_set_imports), and both sides
+ * cross the boundary identically.
  *
- *   Imports. The recompiled stubs call psp_hle_call(); the interpreter is
- *   running the *unlinked* module, where the same stub is a bare `jr $ra`.
- *   That is a guaranteed disagreement that says nothing about codegen, so any
- *   function reaching the stub region is reported as skipped rather than
- *   counted as a divergence. Routing the interpreter's stub hits into HLE
- *   would lift this restriction and is the obvious next step.
+ * Two things are still excluded:
+ *
+ *   Guest re-entry from HLE. A few handlers call back into guest code — a
+ *   thread entry point, a registered callback — through psp_dispatch(), which
+ *   only knows about *recompiled* functions. On the interpreter's side of the
+ *   comparison that would quietly run recompiled code, so the run is no longer
+ *   independent and the result proves nothing. Detected by watching the
+ *   dispatch counter and skipped.
  *
  *   Traps. Either side may hit an unimplemented instruction. A trap on both
  *   sides at the same place is agreement, not a finding.
@@ -31,10 +37,12 @@
 #include "psprecomp/cpu.h"
 #include "psprecomp/mem.h"
 #include "psprecomp/dispatch.h"
+#include "psprecomp/hle.h"
 
 #include <setjmp.h>
 #include <signal.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,10 +87,47 @@ void psp_syscall(uint32_t id) {
  * So: a wall-clock watchdog. Jumping out of a signal handler is not something
  * to do in shipped code, but this is a development harness and the alternative
  * is no result at all. */
+/* psp_dispatch's default miss handler aborts. That is right for a real host and
+ * wrong here: the seeded argument registers mean an HLE handler can be handed a
+ * garbage function pointer and try to dispatch on it, which is a property of
+ * the test inputs rather than a defect. Record and continue; the caller treats
+ * any dispatch activity during an interpreter run as grounds to skip. */
+static uint64_t g_miss_count;
+
+/* Phase markers for diagnosing a hang. write(2) rather than stdio: this has to
+ * work when the question is whether stdio itself is wedged. */
+static int g_phase_trace;
+static void phase(const char *tag) {
+    if (g_phase_trace) { write(2, "[", 1); write(2, tag, strlen(tag)); write(2, "]\n", 2); }
+}
+
+static void note_miss(uint32_t addr) {
+    (void)addr;
+    g_miss_count++;
+}
+
 static void watchdog(int sig) {
     (void)sig;
     g_trapped = 2;
     siglongjmp(g_trap, 1);
+}
+
+/* alarm(2) was the first attempt and made a 400-function run take longer than
+ * ten minutes: once firmware calls started doing real work, far more functions
+ * ran long enough to reach the timeout, and each one then cost a full two
+ * seconds of wall clock. setitimer gives sub-second granularity. A function
+ * the interpreter finished in under 200k instructions has no business taking
+ * this long as native code. */
+#define WATCHDOG_USEC  200000
+
+static void watchdog_arm(void) {
+    struct itimerval t = {{0, 0}, {0, WATCHDOG_USEC}};
+    setitimer(ITIMER_REAL, &t, NULL);
+}
+
+static void watchdog_disarm(void) {
+    struct itimerval t = {{0, 0}, {0, 0}};
+    setitimer(ITIMER_REAL, &t, NULL);
 }
 
 /* ---- state snapshots ------------------------------------------------------
@@ -217,7 +262,7 @@ static int compare(const snapshot *a, const snapshot *b, uint32_t addr, int verb
 
 /* ---- one function --------------------------------------------------------- */
 
-typedef enum { R_MATCH, R_DIFF, R_SKIP_IMPORT, R_SKIP_NOFN, R_SKIP_TRAP, R_HANG, R_SKIP_UNBALANCED } result;
+typedef enum { R_MATCH, R_DIFF, R_SKIP_IMPORT, R_SKIP_NOFN, R_SKIP_TRAP, R_HANG, R_SKIP_UNBALANCED, R_SKIP_REENTRY, R_HANG_INTERP } result;
 
 static uint32_t g_stub_lo, g_stub_hi;
 
@@ -242,12 +287,36 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     /* --- interpreter --- */
     psp_interp it;
     psp_interp_init(&it, addr, RA_DONE, 200000);
-    int hit_import = 0;
-    while (psp_interp_step(&it) == I_RUNNING) {
-        if (it.pc >= g_stub_lo && it.pc < g_stub_hi) { hit_import = 1; break; }
+
+    /* Thunk hits now go through HLE inside psp_interp_step, so the stub region
+     * is no longer a stopping condition. What still is: an HLE handler calling
+     * psp_dispatch() to re-enter guest code, which runs the *recompiled*
+     * version and destroys this side's independence. The dispatch counter is
+     * how that shows up afterwards.
+     *
+     * Afterwards is not always soon enough. The interpreter bounds itself with
+     * an instruction budget, but that budget does not cover time spent inside
+     * an HLE handler — and a handler that re-enters guest code can land in a
+     * recompiled function that never returns. The interpreter then never gets
+     * its own loop back and the budget is never consulted. So the wall-clock
+     * watchdog has to cover this side too, not just the recompiled run. */
+    phase("interp-start");
+    const uint64_t dispatch_before = psp_dispatch_calls();
+    const uint64_t miss_before     = g_miss_count;
+    g_trapped = 0;
+    if (sigsetjmp(g_trap, 1) == 0) {
+        watchdog_arm();
+        psp_interp_run(&it);
+        watchdog_disarm();
+    } else {
+        watchdog_disarm();
     }
-    if (hit_import)              return R_SKIP_IMPORT;
-    if (it.status != I_OK_RETURN) return R_SKIP_TRAP;
+    phase("interp-done");
+    if (g_trapped == 2) return R_HANG_INTERP;
+    if (g_trapped)      return R_SKIP_TRAP;
+    if (psp_dispatch_calls() != dispatch_before || g_miss_count != miss_before)
+        return R_SKIP_REENTRY;
+    if (it.status != I_OK_RETURN)                return R_SKIP_TRAP;
 
     /* Stack balance is the test for "was this address really callable?".
      *
@@ -265,20 +334,24 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
      * see PSP_SP_CHECK in the generated code.) */
     if (psp_cpu.r[PSP_REG_SP] != STACK_TOP) return R_SKIP_UNBALANCED;
 
+    phase("snap-si");
     snap_take(si);
 
+    phase("recomp-start");
     /* --- recompiled --- */
     snap_restore(base);
     g_trapped = 0;
     if (sigsetjmp(g_trap, 1) == 0) {
-        alarm(2);
+        watchdog_arm();
         fn();
-        alarm(0);
+        watchdog_disarm();
     } else {
-        alarm(0);
+        watchdog_disarm();
     }
+    phase("recomp-done");
     if (g_trapped == 2) return R_HANG;
     if (g_trapped)      return R_SKIP_TRAP;
+    phase("snap-sr");
     snap_take(sr);
 
     return compare(si, sr, addr, verbose) ? R_DIFF : R_MATCH;
@@ -297,12 +370,13 @@ int main(int argc, char **argv) {
     }
     const char *path = argv[1];
     long limit = 2000;
-    uint32_t only = 0;
+    uint32_t only = 0; int have_only = 0;
     int verbose = 0;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--limit") && i + 1 < argc) limit = strtol(argv[++i], NULL, 0);
-        else if (!strcmp(argv[i], "--from") && i + 1 < argc) only = (uint32_t)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--from") && i + 1 < argc) { only = (uint32_t)strtoul(argv[++i], NULL, 0); have_only = 1; }
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
+        else if (!strcmp(argv[i], "--phase")) g_phase_trace = 1;
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
     }
 
@@ -331,7 +405,32 @@ int main(int argc, char **argv) {
     g_stub_hi = e.stub_addr + e.stub_size;
 
     signal(SIGALRM, watchdog);
+    psp_set_miss_handler(note_miss);
     psp_recomp_register();
+    psp_hle_init();
+    /* Millions of firmware calls follow, and the watchdog longjmps out of a
+     * signal handler -- an fprintf interrupted mid-call would leave stdio's
+     * lock held and deadlock the next one. See psp_hle_set_quiet in hle.c. */
+    psp_hle_set_quiet(1);
+
+    /* Give the interpreter the same firmware boundary the recompiled stubs
+     * have. Without this every function reaching an import is uncomparable. */
+    int nimp = 0;
+    psp_module_info mi;
+    if (e.modinfo_size && psp_modinfo_parse(b.data, b.size, e.modinfo_offset, &mi) == 0) {
+        const uint32_t bias = e.nsegments ? e.seg[0].offset - e.seg[0].addr : 0;
+        int n = psp_collect_imports(b.data, b.size, &mi, bias, NULL, 0);
+        if (n > 0) {
+            psp_import_entry *imp = malloc((size_t)n * sizeof *imp);
+            psp_interp_import *tbl = malloc((size_t)n * sizeof *tbl);
+            if (imp && tbl) {
+                n = psp_collect_imports(b.data, b.size, &mi, bias, imp, n);
+                for (int i = 0; i < n; i++) { tbl[i].addr = imp[i].addr; tbl[i].nid = imp[i].nid; }
+                nimp = psp_interp_set_imports(tbl, n);
+            }
+            free(imp);
+        }
+    }
 
     snapshot base, si, sr;
     snap_alloc(&base); snap_alloc(&si); snap_alloc(&sr);
@@ -340,13 +439,13 @@ int main(int argc, char **argv) {
 
     printf("module:   %s\n", path);
     printf("mapped:   0x%08X + %u bytes\n", lo, g_module_size);
-    printf("stubs:    0x%08X..0x%08X (import boundary, %u bytes)\n",
-           g_stub_lo, g_stub_hi, e.stub_size);
+    printf("stubs:    0x%08X..0x%08X (%u bytes, %d routed to HLE)\n",
+           g_stub_lo, g_stub_hi, e.stub_size, nimp);
     printf("text:     0x%08X + %u bytes\n", e.text_addr, e.text_size);
     printf("---\n");
 
     long attempted = 0, match = 0, diff = 0;
-    long skip_import = 0, skip_trap = 0, skip_nofn = 0, hang = 0, skip_unbal = 0;
+    long skip_import = 0, skip_trap = 0, skip_nofn = 0, hang = 0, skip_unbal = 0, skip_reentry = 0, hang_interp = 0;
 
     /* Walk .text on instruction boundaries and test whatever the dispatch
      * table knows about. Using the dispatch table as the work-list means the
@@ -358,7 +457,7 @@ int main(int argc, char **argv) {
      * excluded — and the harness then grinds through all 26,487 functions
      * running each one to its instruction budget first. */
     const uint32_t text_lo = e.text_addr, text_hi = e.text_addr + e.text_size;
-    for (uint32_t a = only ? only : text_lo; a < text_hi && attempted < limit; a += 4) {
+    for (uint32_t a = have_only ? only : text_lo; a < text_hi && attempted < limit; a += 4) {
         if (!psp_lookup(a)) continue;
         attempted++;
         switch (check_one(a, &base, &si, &sr, verbose)) {
@@ -369,8 +468,10 @@ int main(int argc, char **argv) {
         case R_SKIP_NOFN:    skip_nofn++;   break;
         case R_HANG:         hang++;        break;
         case R_SKIP_UNBALANCED: skip_unbal++; break;
+        case R_SKIP_REENTRY: skip_reentry++; break;
+        case R_HANG_INTERP:  hang_interp++;  break;
         }
-        if (only) break;
+        if (have_only) break;
         if ((attempted % 200) == 0) {
             printf("... %ld attempted, %ld compared\n", attempted, match + diff);
             fflush(stdout);
@@ -383,9 +484,10 @@ int main(int argc, char **argv) {
     printf("  match:  %ld\n", match);
     printf("  differ: %ld\n", diff);
     printf("skipped:\n");
-    printf("  import boundary: %ld  (interpreter runs the unlinked stub)\n", skip_import);
+    printf("  HLE re-entry:    %ld  (handler called back into guest code)\n", skip_reentry);
     printf("  trapped:         %ld  (unimplemented instruction on one side)\n", skip_trap);
     printf("  recomp hung:     %ld  (interpreter returned; recompiled C did not)\n", hang);
+    printf("  interp hung:     %ld  (watchdog fired inside the interpreter run)\n", hang_interp);
     printf("  unbalanced $sp:  %ld  (entry was not independently callable)\n", skip_unbal);
 
     psp_mem_free();

@@ -1,0 +1,63 @@
+diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
+index 780f40f..4124cd0 100644
+--- a/include/psprecomp/hle.h
++++ b/include/psprecomp/hle.h
+@@ -40,6 +40,10 @@ int psp_hle_is_named(int index);
+  * where possible and by number otherwise, rather than failing silently. */
+ void psp_hle_call(uint32_t nid);
+ 
++/* Silence the per-call "unimplemented firmware call" message. Intended for
++ * batch callers making millions of calls; see the note in hle.c. */
++void psp_hle_set_quiet(int quiet);
++
+ /* Look up what is registered, for reporting. Returns NULL if absent. */
+ const char *psp_hle_name(uint32_t nid);
+ int         psp_hle_count(void);
+diff --git a/src/hle/hle.c b/src/hle/hle.c
+index cc19336..7e16f81 100644
+--- a/src/hle/hle.c
++++ b/src/hle/hle.c
+@@ -72,6 +72,24 @@ const psp_hle_entry *psp_hle_entries(int *count) {
+ static struct { uint32_t nid; const char *name; } g_zero[ZERO_HISTORY];
+ static int g_zero_n;
+ 
++/* Suppresses the unimplemented-call message. Two reasons a batch caller wants
++ * this, and the second one matters more than it looks:
++ *
++ *   Volume. A differential run makes millions of firmware calls. One line of
++ *   stderr each is slower than the work being measured.
++ *
++ *   Deadlock. A harness that puts a wall-clock watchdog around recompiled code
++ *   has to longjmp out of a signal handler. If that handler interrupts an
++ *   fprintf, stdio's stream lock is still held, and the next fprintf blocks on
++ *   it forever -- a hang no timeout escapes, because the timeout is the thing
++ *   that caused it.
++ *
++ * The history behind psp_hle_dump_recent() is still recorded either way, so
++ * quiet mode loses the noise and keeps the diagnosis. */
++static int g_quiet;
++
++void psp_hle_set_quiet(int quiet) { g_quiet = quiet; }
++
+ static void note_zero(uint32_t nid, const char *name) {
+     g_zero[g_zero_n % ZERO_HISTORY].nid = nid;
+     g_zero[g_zero_n % ZERO_HISTORY].name = name;
+@@ -103,8 +121,6 @@ void psp_hle_dump_recent(FILE *out) {
+ }
+ 
+ void psp_hle_call(uint32_t nid) {
+-    if (nid == 0x237DBD4Fu)
+-        fprintf(stderr, "psp_hle_call ENTERED for 0x237DBD4F (%d entries registered)\n", g_count);
+     for (int i = 0; i < g_count; i++) {
+         if (g_entry[i].nid == nid) {
+             g_fn[i]();
+@@ -122,7 +138,8 @@ void psp_hle_call(uint32_t nid) {
+      * advisory (version reporting, profiling hooks) and a game will run past
+      * them happily. One that genuinely needed the result will fail visibly
+      * soon after, with this line already in the log. */
+-    fprintf(stderr, "psprecomp: unimplemented firmware call 0x%08X\n", nid);
++    if (!g_quiet)
++        fprintf(stderr, "psprecomp: unimplemented firmware call 0x%08X\n", nid);
+     psp_ret(0);
+ }
+ 

@@ -426,10 +426,10 @@ index 481001d..00a2a70 100644
  #endif
 diff --git a/tools/allegrexrecomp/interp.c b/tools/allegrexrecomp/interp.c
 new file mode 100644
-index 0000000..e98e55d
+index 0000000..4308f17
 --- /dev/null
 +++ b/tools/allegrexrecomp/interp.c
-@@ -0,0 +1,439 @@
+@@ -0,0 +1,514 @@
 +/* allegrexrecomp — the Allegrex interpreter oracle. See interp.h.
 + *
 + * The switch below deliberately mirrors emit.c's emit_simple() case for case.
@@ -450,10 +450,12 @@ index 0000000..e98e55d
 +#include "decode.h"
 +
 +#include "psprecomp/cpu.h"
++#include "psprecomp/hle.h"
 +#include "psprecomp/mem.h"
 +#include "psprecomp/recomp_rt.h"
 +#include "psprecomp/vfpu.h"
 +
++#include <stdlib.h>
 +#include <string.h>
 +
 +/* ---- register access ------------------------------------------------------
@@ -467,6 +469,56 @@ index 0000000..e98e55d
 +
 +static void setr(unsigned idx, uint32_t v) {
 +    if (idx != 0) psp_cpu.r[idx] = v;
++}
++
++/* ---- the firmware boundary ------------------------------------------------
++ *
++ * See interp.h. Thunks are dense and 4-aligned inside .sceStub.text, so a flat
++ * array indexed by word offset from the lowest one is both the simplest and the
++ * fastest structure: this is consulted once per instruction, and a linear scan
++ * over a couple of hundred imports would dominate the interpreter's run time. */
++
++static uint32_t *g_imp_nid;    /* [ (addr - lo) / 4 ] -> NID, 0 = not a thunk */
++static uint32_t  g_imp_lo, g_imp_hi;
++
++void psp_interp_free_imports(void) {
++    free(g_imp_nid);
++    g_imp_nid = NULL;
++    g_imp_lo = g_imp_hi = 0;
++}
++
++int psp_interp_set_imports(const psp_interp_import *tbl, int n) {
++    psp_interp_free_imports();
++    if (!tbl || n <= 0) return 0;
++
++    uint32_t lo = UINT32_MAX, hi = 0;
++    for (int i = 0; i < n; i++) {
++        if (tbl[i].addr < lo) lo = tbl[i].addr;
++        if (tbl[i].addr + 4 > hi) hi = tbl[i].addr + 4;
++    }
++    if (lo >= hi) return 0;
++
++    const size_t slots = (hi - lo) / 4;
++    g_imp_nid = (uint32_t *)calloc(slots, sizeof *g_imp_nid);
++    if (!g_imp_nid) return -1;
++    g_imp_lo = lo;
++    g_imp_hi = hi;
++
++    /* A NID of 0 would be indistinguishable from an empty slot. No real import
++     * hashes to 0, but rather than rely on that, such an entry is dropped and
++     * the thunk simply executes as ordinary code. */
++    int kept = 0;
++    for (int i = 0; i < n; i++) {
++        if (!tbl[i].nid) continue;
++        g_imp_nid[(tbl[i].addr - lo) / 4] = tbl[i].nid;
++        kept++;
++    }
++    return kept;
++}
++
++static uint32_t import_nid_at(uint32_t pc) {
++    if (!g_imp_nid || pc < g_imp_lo || pc >= g_imp_hi) return 0;
++    return g_imp_nid[(pc - g_imp_lo) / 4];
 +}
 +
 +/* ---- tracing --------------------------------------------------------------
@@ -782,6 +834,29 @@ index 0000000..e98e55d
 +    if (it->budget && it->executed >= it->budget)
 +        return it->status = I_BUDGET;
 +
++    /* A firmware thunk is intercepted rather than executed. Running it would
++     * follow the unlinked `jr $ra` the linker left behind and return without
++     * doing anything, while the recompiled C calls into HLE — so the two would
++     * disagree at every firmware call for reasons that have nothing to do with
++     * codegen. Both paths now go through psp_hle_call().
++     *
++     * The whole thunk is consumed: control resumes at $ra, not after the two
++     * instructions, because the call has already happened. */
++    const uint32_t nid = import_nid_at(pc);
++    if (nid) {
++        if (it->trace) fprintf(it->trace, "%08X  <hle 0x%08X>", pc, nid);
++        psp_hle_call(nid);
++        it->pc = R(PSP_RA_INDEX);
++        it->executed += 2;
++        if (it->trace) {
++            if (it->trace_regs)
++                fprintf(it->trace, " v0=%08X", R(PSP_REG_V0));
++            fprintf(it->trace, " -> %08X\n", it->pc);
++        }
++        if (it->pc == it->ra_sentinel) return it->status = I_OK_RETURN;
++        return it->status = I_RUNNING;
++    }
++
 +    a_decode(psp_read32(pc), pc, &in);
 +
 +    g_trace = it;
@@ -871,10 +946,10 @@ index 0000000..e98e55d
 +}
 diff --git a/tools/allegrexrecomp/interp.h b/tools/allegrexrecomp/interp.h
 new file mode 100644
-index 0000000..adb8fa7
+index 0000000..64bab69
 --- /dev/null
 +++ b/tools/allegrexrecomp/interp.h
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,123 @@
 +/* allegrexrecomp — the Allegrex interpreter that acts as the bring-up oracle.
 + *
 + * This exists to answer one question during bring-up: when the recompiled game
@@ -943,6 +1018,36 @@ index 0000000..adb8fa7
 +void psp_interp_init(psp_interp *it, uint32_t entry, uint32_t ra_sentinel,
 +                     uint64_t budget);
 +
++/* ---- the firmware boundary ------------------------------------------------
++ *
++ * A module reaches the firmware through one small thunk per imported function,
++ * in .sceStub.text. On a *linked* module the loader has patched each thunk to
++ * jump at the real routine; on the raw module we run here, it is still the
++ * unlinked `jr $ra` the linker left, so executing it returns immediately and
++ * does nothing.
++ *
++ * The recompiled C does not have that problem: the emitter turns each thunk
++ * into a psp_hle_call() on the function's NID. So without this the two paths
++ * disagree at every firmware call by construction, and every function that
++ * reaches one is uncomparable — which was most of them.
++ *
++ * Registering the thunk-to-NID map makes the interpreter cross the boundary
++ * the same way: a pc landing on a thunk calls psp_hle_call() and returns to
++ * $ra, exactly as the generated stub does.
++ *
++ * The table is borrowed, not copied — keep it alive for the run. Passing NULL
++ * (or n == 0) clears it and restores the raw-execution behaviour. */
++
++typedef struct {
++    uint32_t addr;   /* thunk address in .sceStub.text */
++    uint32_t nid;    /* firmware function it stands for */
++} psp_interp_import;
++
++int psp_interp_set_imports(const psp_interp_import *tbl, int n);
++
++/* Frees the lookup index built by psp_interp_set_imports(). */
++void psp_interp_free_imports(void);
++
 +/* Execute one instruction, plus its delay slot if it has one. A branch and its
 + * delay slot are one step: splitting them would let a trace interleave at a
 + * point the hardware never exposes. Returns the status after the step. */
@@ -969,10 +1074,10 @@ index 0000000..adb8fa7
 +
 +#endif /* ALLEGREX_INTERP_H */
 diff --git a/tools/allegrexrecomp/main.c b/tools/allegrexrecomp/main.c
-index 2e9e8f2..86aee6d 100644
+index 2e9e8f2..098299d 100644
 --- a/tools/allegrexrecomp/main.c
 +++ b/tools/allegrexrecomp/main.c
-@@ -14,9 +14,15 @@
+@@ -14,9 +14,17 @@
  #include "decode.h"
  #include "analyze.h"
  #include "emit.h"
@@ -983,12 +1088,14 @@ index 2e9e8f2..86aee6d 100644
 +/* The `interp` verb runs guest code, so the CLI reaches into the runtime the
 + * recompiled game also links against — same CPU state, same memory model. */
 +#include "psprecomp/cpu.h"
++#include "psprecomp/dispatch.h"
++#include "psprecomp/hle.h"
 +#include "psprecomp/mem.h"
 +
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
-@@ -34,6 +40,7 @@ static int usage(void) {
+@@ -34,6 +42,7 @@ static int usage(void) {
          "  allegrexrecomp cover   <file>\n"
          "  allegrexrecomp funcs   <file> [--list]\n"
          "  allegrexrecomp emit    <file> <outdir> [prefix]\n"
@@ -996,7 +1103,7 @@ index 2e9e8f2..86aee6d 100644
          "  allegrexrecomp decrypt <file> [--keys <path>]\n"
          "  allegrexrecomp kirk1   <file> [out] [--keys <path>]\n"
          "\n"
-@@ -825,6 +832,107 @@ static int looks_like_cmd1_meta(const uint8_t *m, size_t avail, uint32_t file_si
+@@ -825,6 +834,170 @@ static int looks_like_cmd1_meta(const uint8_t *m, size_t avail, uint32_t file_si
      return 1;
  }
  
@@ -1017,7 +1124,51 @@ index 2e9e8f2..86aee6d 100644
 + * at a single leaf function, not at _start. */
 +
 +#define INTERP_STACK_TOP  (PSP_RAM_BASE + PSP_RAM_SIZE - 0x100)
-+#define INTERP_RA_DONE    0x0DEAD000u   /* never mapped: the run stops here */
++#define INTERP_RA_DONE    0x0DEAD000u
++
++/* Guest re-entry attempted from inside an HLE handler. Recorded rather than
++ * fatal — see where this is installed. */
++static uint64_t g_reentry_count;
++static uint32_t g_reentry_first;
++
++static void interp_note_reentry(uint32_t addr) {
++    if (!g_reentry_count) g_reentry_first = addr;
++    g_reentry_count++;
++}
++
++/* Hand the interpreter the thunk-to-NID map, so firmware calls reach HLE
++ * instead of running the unlinked `jr $ra` the linker left in the module.
++ * Returns the number of thunks registered; the table is owned by the caller
++ * and must outlive the run, so it is returned through `out_tbl`. */
++static int interp_bind_imports(const psp_blob *b, const elf_info *e,
++                               psp_interp_import **out_tbl) {
++    *out_tbl = NULL;
++    if (!e->modinfo_size) return 0;
++
++    psp_module_info mi;
++    if (psp_modinfo_parse(b->data, b->size, e->modinfo_offset, &mi) != 0) return 0;
++
++    const uint32_t bias = e->nsegments ? e->seg[0].offset - e->seg[0].addr : 0;
++    int n = psp_collect_imports(b->data, b->size, &mi, bias, NULL, 0);
++    if (n <= 0) return 0;
++
++    psp_import_entry *imp = (psp_import_entry *)malloc((size_t)n * sizeof *imp);
++    if (!imp) return 0;
++    n = psp_collect_imports(b->data, b->size, &mi, bias, imp, n);
++
++    psp_interp_import *tbl = (psp_interp_import *)malloc((size_t)n * sizeof *tbl);
++    if (!tbl) { free(imp); return 0; }
++    for (int i = 0; i < n; i++) {
++        tbl[i].addr = imp[i].addr;
++        tbl[i].nid  = imp[i].nid;
++    }
++    free(imp);
++
++    const int bound = psp_interp_set_imports(tbl, n);
++    if (bound <= 0) { free(tbl); return 0; }
++    *out_tbl = tbl;
++    return bound;
++}   /* never mapped: the run stops here */
 +
 +static int cmd_interp(const char *path, uint32_t from, int have_from,
 +                      uint64_t budget, int trace, int trace_regs) {
@@ -1059,6 +1210,18 @@ index 2e9e8f2..86aee6d 100644
 +        psp_mem_write_block(s->addr, b.data + s->offset, s->filesz);
 +    }
 +
++    psp_hle_init();
++    psp_interp_import *imports = NULL;
++    const int nimports = interp_bind_imports(&b, &e, &imports);
++
++    /* Some HLE handlers call back into guest code — a thread entry point, a
++     * registered callback — and they do it through psp_dispatch(), which only
++     * knows about *recompiled* functions. Under the interpreter nothing is
++     * registered, so every such re-entry is a miss, and the default handler
++     * aborts. Counting them and carrying on says how much of the module is out
++     * of reach this way, which is the useful answer; crashing says nothing. */
++    psp_set_miss_handler(interp_note_reentry);
++
 +    const uint32_t entry = have_from ? from : e.entry;
 +
 +    memset(&psp_cpu, 0, sizeof psp_cpu);
@@ -1071,6 +1234,7 @@ index 2e9e8f2..86aee6d 100644
 +
 +    printf("module:   %s\n", path);
 +    printf("mapped:   0x%08X + %u bytes (%d segments)\n", lo, hi - lo, e.nsegments);
++    printf("imports:  %d thunks routed to HLE\n", nimports);
 +    printf("entry:    0x%08X%s\n", entry, have_from ? " (--from)" : " (module entry)");
 +    printf("budget:   %llu instructions\n", (unsigned long long)budget);
 +    printf("---\n");
@@ -1080,6 +1244,10 @@ index 2e9e8f2..86aee6d 100644
 +    printf("---\n");
 +    printf("stopped:  %s\n", psp_interp_status_str(it.status));
 +    printf("executed: %llu instructions\n", (unsigned long long)it.executed);
++    if (g_reentry_count)
++        printf("re-entry: %llu HLE callbacks into guest code, first 0x%08X\n"
++               "          (needs the interpreter to service psp_dispatch)\n",
++               (unsigned long long)g_reentry_count, g_reentry_first);
 +    if (it.status != I_OK_RETURN && it.status != I_BUDGET) {
 +        a_insn in;
 +        a_decode(psp_read32(it.fault_pc), it.fault_pc, &in);
@@ -1089,6 +1257,8 @@ index 2e9e8f2..86aee6d 100644
 +    }
 +    printf("bad mem:  %llu accesses\n", (unsigned long long)psp_mem_bad_access);
 +
++    psp_interp_free_imports();
++    free(imports);
 +    psp_mem_free();
 +    psp_blob_free(&b);
 +    /* A clean return is success. Anything else is a finding, not a crash, so
@@ -1104,7 +1274,7 @@ index 2e9e8f2..86aee6d 100644
  static int cmd_decrypt(const char *path, const char *keypath) {
      psp_blob b;
      if (psp_blob_read(path, &b) != 0) { fprintf(stderr, "cannot read %s\n", path); return 1; }
-@@ -988,6 +1096,25 @@ int main(int argc, char **argv) {
+@@ -988,6 +1161,25 @@ int main(int argc, char **argv) {
      for (int i = 3; i + 1 < argc; i++)
          if (!strcmp(argv[i], "--keys")) keypath = argv[i + 1];
  
