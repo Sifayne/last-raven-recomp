@@ -1,6 +1,7 @@
 # Phase 1 — the differential oracle
 
-**Status: two real emitter bugs found, fixed, and confirmed by measurement.**
+**Status: three real emitter bugs found, fixed, and confirmed by measurement.
+The 400-function sample now agrees completely — 118 of 118.**
 
 Reproduce with `scripts/05-oracle.sh`, then `scripts/06-triage.py`. Measured
 2026-08-27 against `NPUH-10024`, module `ACLR_App`.
@@ -28,13 +29,12 @@ and nowhere else.
 
 ---
 
-## The two bugs
+## The three bugs
 
-Both are the same defect at different depths: **a function whose last block
-falls through into another function silently returns instead of continuing.**
-No dispatch miss, no bad memory access — just less work done than the hardware
-would do. That is the worst failure mode available, and it is exactly what a
-differential oracle is for.
+All three are the same class: **the emitted C silently does less than the
+hardware does.** No dispatch miss, no bad memory access, no crash — just a
+missing instruction. That is the worst failure mode available, and it is
+exactly what a differential oracle is for.
 
 ### 1. Fall-through into a label is dropped
 
@@ -79,17 +79,48 @@ and emission runs in address order.
 +32 is correct, the -64 group is not explained."* The `$sp-0x40` cluster here is
 that −64 group.
 
+### 3. A return's delay slot is dropped when the analyzer does not own it
+
+The delay slot was only emitted when discovery had assigned that word to the
+same function:
+
+```c
+if (in.has_delay_slot && owned_by(an, a + 4, owner)) { ... }
+```
+
+A delay slot executes because the hardware executes it. Whether discovery
+assigned the word to this function is an artifact of the analysis and has no
+bearing on that. Where the two disagreed, the instruction was dropped.
+
+This is the most damaging of the three, because of *which* instruction it
+usually is. A MIPS compiler puts the stack restore in the delay slot of
+`jr $ra`, so the dropped instruction is typically `addiu $sp, $sp, N` — the
+function returns having never released its frame, and the damage lands in the
+caller. `0x0000355C` emitted three instructions and silently discarded the
+fourth:
+
+```
+0000355C  lw    $s0, 0($sp)
+00003560  lw    $ra, 4($sp)
+00003564  jr    $ra
+00003568  addiu $sp, $sp, 16     ← never emitted
+```
+
+Ownership still decides whether the slot also needs a *labelled* copy, which is
+a question about who can jump to it — and that ownership does answer.
+
 ### Effect
 
 Same 400 functions, same seeds, one variable changed at a time:
 
 | | compared | agree | differ |
 |---|---:|---:|---:|
-| before either fix | 118 | 101 | **17** |
-| after fix 1 | 118 | 110 | **8** |
-| after fix 2 | 118 | 111 | **7** |
+| before any fix | 118 | 101 | **17** |
+| after fix 1 (fall-through into a label) | 118 | 110 | **8** |
+| after fix 2 (force the label to exist) | 118 | 111 | **7** |
+| after fix 3 (delay-slot ownership) | 118 | **118** | **0** |
 
-The 27-function `$v0` cluster is gone entirely.
+The 27-function `$v0` cluster and every `$sp` cluster are gone.
 
 ---
 
@@ -137,11 +168,15 @@ the interpreter side.
 
 ## Known gaps
 
-- **No regression test for either bug.** Reproducing them needs discovery to
+- **Bugs 1 and 2 have no regression test.** Reproducing them needs discovery to
   leave a fall-through target as a label inside a neighbouring function, and
   every synthetic shape tried got promoted to its own entry — a test that passes
   before *and* after the fix, which is worse than none. Pinning down
   `a_discover`'s ownership rules is the prerequisite. Noted in `test_emit.c`.
+
+  Bug 3 **does** have one (`test_return_delay_slot_not_owned`), and it was
+  checked the way any regression test should be: reverted the fix, confirmed the
+  test fails, restored it, confirmed it passes.
 - **One input per function.** Argument registers come from a fixed LCG seeded by
   address: reproducible, but one path through each function, not a range.
 - **Caller-saved registers are not compared.** `$t*` and `$a*` are excluded by

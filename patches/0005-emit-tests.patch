@@ -1,0 +1,106 @@
+diff --git a/tests/test_emit.c b/tests/test_emit.c
+index f0f8805..8e39a22 100644
+--- a/tests/test_emit.c
++++ b/tests/test_emit.c
+@@ -71,6 +71,92 @@ static void expect_contains(const char *hay, const char *needle, const char *why
+     }
+ }
+ 
++
++/* NOTE: the fall-through-into-a-label bug that the differential oracle found in
++ * memset (see the comment at the fix site in emit.c) has no test here.
++ *
++ * Reproducing it needs discovery to leave the fall-through target as a *label*
++ * inside a neighbouring function. Several synthetic shapes were tried and
++ * discovery promoted the target to its own entry every time, which exercises
++ * the path that always worked -- a test that passes both before and after the
++ * fix, which is worse than no test because it implies coverage that is not
++ * there. Building one needs a_discover's ownership rules pinned down first.
++ *
++ * The fix is verified against the real module instead: memset returned $v0 = 0
++ * before and $v0 = $a0 after, and corpus divergences fell from 17 to 8 over the
++ * same 400 functions. */
++
++
++/* ---- a return's delay slot must be emitted even when another function owns it
++ *
++ * Regression test for the third bug the differential oracle found.
++ *
++ * The delay slot used to be emitted only when discovery had assigned that word
++ * to the same function. But a delay slot executes because the hardware
++ * executes it; ownership is an artifact of the analysis. Where the two
++ * disagreed the instruction was silently dropped.
++ *
++ * Which instruction that is matters: a MIPS compiler puts the stack restore in
++ * the delay slot of `jr $ra`, so the dropped instruction is typically
++ * `addiu $sp, $sp, N` and the function returns without releasing its frame.
++ *
++ * Two seeds, the second landing on the delay slot itself, is enough to make
++ * ownership and execution disagree. */
++
++#define DS_BASE 0x08820000u
++
++static const uint32_t DS_CODE[] = {
++    0x03E00008,  /* +00  jr    $ra              function A                     */
++    0x27BD0010,  /* +04  addiu $sp, $sp, 16     A's delay slot -- and B's entry */
++    0x03E00008,  /* +08  jr    $ra              B returns                      */
++    0x00000000,  /* +0C  nop                                                   */
++};
++
++static void test_return_delay_slot_not_owned(void) {
++    uint8_t code[sizeof DS_CODE];
++    for (size_t i = 0; i < sizeof DS_CODE / sizeof DS_CODE[0]; i++) {
++        code[i * 4 + 0] = (uint8_t)(DS_CODE[i]);
++        code[i * 4 + 1] = (uint8_t)(DS_CODE[i] >> 8);
++        code[i * 4 + 2] = (uint8_t)(DS_CODE[i] >> 16);
++        code[i * 4 + 3] = (uint8_t)(DS_CODE[i] >> 24);
++    }
++
++    a_analysis an;
++    memset(&an, 0, sizeof an);
++    an.code = code;
++    an.base = DS_BASE;
++    an.size = (uint32_t)sizeof code;
++
++    const uint32_t seeds[2] = { DS_BASE, DS_BASE + 4 };
++    CHECK(a_discover(&an, seeds, 2) == 0, "delay slot: discovery runs");
++
++    emit_opts o;
++    o.outdir = ".";
++    o.prefix = "t_ds";
++    o.module = "synthetic";
++    CHECK(a_emit(&an, &o) == 0, "delay slot: emission succeeds");
++
++    char *src = slurp("./t_ds_funcs.c", NULL);
++    CHECK(src != NULL, "delay slot: generated .c is readable");
++    if (!src) { a_analysis_free(&an); return; }
++
++    const char *body = strstr(src, "psp_body_08820000");
++    CHECK(body != NULL, "delay slot: function A was emitted");
++    if (body) {
++        const char *end = strstr(body, "\n}\n");
++        if (end) {
++            char *tail = strndup(body, (size_t)(end - body));
++            CHECK(tail && strstr(tail, "r_sp = r_sp + 16;"),
++                  "delay slot: `jr $ra` must emit its delay slot even when\n"
++                  "  another function owns that word -- dropping it returns\n"
++                  "  without releasing the frame");
++            free(tail);
++        }
++    }
++    free(src);
++    a_analysis_free(&an);
++}
++
+ int main(void) {
+     uint8_t code[sizeof CODE];
+     for (size_t i = 0; i < sizeof CODE / sizeof CODE[0]; i++) {
+@@ -164,6 +250,8 @@ int main(void) {
+ 
+     a_analysis_free(&an);
+ 
++    test_return_delay_slot_not_owned();
++
+     if (failures) {
+         printf("\n%d check(s) failed\n", failures);
+         return 1;

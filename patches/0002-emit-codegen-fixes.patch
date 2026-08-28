@@ -1,5 +1,5 @@
 diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
-index e1285c5..0a7efe9 100644
+index e1285c5..6bd8651 100644
 --- a/tools/allegrexrecomp/emit.c
 +++ b/tools/allegrexrecomp/emit.c
 @@ -3,6 +3,7 @@
@@ -125,7 +125,36 @@ index e1285c5..0a7efe9 100644
      /* The body takes the address to start at, and every label is reachable
       * through it.
       *
-@@ -795,6 +819,26 @@ static void emit_function(ectx *c, const a_func *fn) {
+@@ -657,10 +681,26 @@ static void emit_function(ectx *c, const a_func *fn) {
+                         (in.is_jump && !in.is_call);
+         comment(c, &in);
+ 
+-        /* The delay-slot instruction, if this transfers control. */
++        /* The delay-slot instruction, if this transfers control.
++         *
++         * In range, not owned. A delay slot executes because the hardware
++         * executes it; whether discovery assigned that word to this function
++         * is an artifact of the analysis and says nothing about whether the
++         * instruction runs. Gating emission on ownership silently dropped it
++         * whenever the two disagreed.
++         *
++         * That is not a corner case. A MIPS compiler puts the stack restore in
++         * the delay slot of `jr $ra`, so the dropped instruction is typically
++         * `addiu $sp, $sp, N` -- the function returns having never released
++         * its frame, and the damage shows up in the caller. The oracle found
++         * it as clusters of $sp disagreements, each exactly one frame deep.
++         *
++         * Ownership still decides whether the slot also needs a *labelled*
++         * copy further down: that question is about who can jump to it, which
++         * ownership does answer. */
+         a_insn slot;
+         int have_slot = 0;
+-        if (in.has_delay_slot && owned_by(an, a + 4, owner)) {
++        if (in.has_delay_slot && a_in_range(an, a + 4)) {
+             a_decode(fetch(an, a + 4), a + 4, &slot);
+             have_slot = 1;
+         }
+@@ -795,6 +835,26 @@ static void emit_function(ectx *c, const a_func *fn) {
          if (is_function(an, next)) {
              fprintf(f, "    /* falls through into the next function */\n");
              fprintf(f, "    psp_func_%08X();\n", next);
@@ -152,7 +181,7 @@ index e1285c5..0a7efe9 100644
          }
      }
      fprintf(f, "}\n");
-@@ -965,13 +1009,32 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
+@@ -965,13 +1025,32 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
      c.an = an;
      c.is_label = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
      c.is_slot  = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
