@@ -426,10 +426,10 @@ index 481001d..00a2a70 100644
  #endif
 diff --git a/tools/allegrexrecomp/interp.c b/tools/allegrexrecomp/interp.c
 new file mode 100644
-index 0000000..4308f17
+index 0000000..97ced13
 --- /dev/null
 +++ b/tools/allegrexrecomp/interp.c
-@@ -0,0 +1,514 @@
+@@ -0,0 +1,552 @@
 +/* allegrexrecomp — the Allegrex interpreter oracle. See interp.h.
 + *
 + * The switch below deliberately mirrors emit.c's emit_simple() case for case.
@@ -514,6 +514,28 @@ index 0000000..4308f17
 +        kept++;
 +    }
 +    return kept;
++}
++
++/* Which firmware call a run leaned on hardest.
++ *
++ * A run that exhausts its instruction budget has looped, and the useful
++ * question is what it was waiting for. A spin against an unimplemented
++ * function -- which returns zero forever, so the guest's condition never
++ * changes -- shows up here as one NID with an enormous count. That names the
++ * blocker instead of just reporting that something hung. */
++static uint32_t g_hot_nid, g_hot_count, g_last_nid, g_last_run;
++
++void psp_interp_hle_reset(void) { g_hot_nid = g_hot_count = g_last_nid = g_last_run = 0; }
++
++uint32_t psp_interp_hot_nid(uint32_t *count) {
++    if (count) *count = g_hot_count;
++    return g_hot_nid;
++}
++
++static void note_hle(uint32_t nid) {
++    if (nid == g_last_nid) g_last_run++;
++    else { g_last_nid = nid; g_last_run = 1; }
++    if (g_last_run > g_hot_count) { g_hot_count = g_last_run; g_hot_nid = nid; }
 +}
 +
 +static uint32_t import_nid_at(uint32_t pc) {
@@ -766,6 +788,20 @@ index 0000000..4308f17
 +    case A_VPFXT: psp_vfpu_set_prefix(1, in->raw & 0xFFFFFF); return I_RUNNING;
 +    case A_VPFXD: psp_vfpu_set_prefix(2, in->raw & 0xFFFFFF); return I_RUNNING;
 +
++    /* A control transfer in a delay slot. The architecture leaves this
++     * undefined and no compiler emits it, so reaching here almost always means
++     * data is being decoded as code. Naming it separately matters: it used to
++     * fall through to the VFPU trap below and get reported as
++     * "unimplemented VFPU instruction (jal)", which is nonsense and sent the
++     * reader looking at the vector unit. */
++    case A_J: case A_JAL: case A_JR: case A_JALR:
++    case A_BEQ: case A_BNE: case A_BLEZ: case A_BGTZ:
++    case A_BEQL: case A_BNEL: case A_BLEZL: case A_BGTZL:
++    case A_BLTZ: case A_BGEZ: case A_BLTZL: case A_BGEZL:
++    case A_BLTZAL: case A_BGEZAL: case A_BLTZALL: case A_BGEZALL:
++    case A_BC1F: case A_BC1T: case A_BC1FL: case A_BC1TL:
++        return I_TRAP_BRANCH_IN_SLOT;
++
 +    case A_SYSCALL: return I_TRAP_SYSCALL;
 +    case A_BREAK:   return I_TRAP_BREAK;
 +    case A_INVALID: return I_TRAP_INVALID;
@@ -845,6 +881,7 @@ index 0000000..4308f17
 +    const uint32_t nid = import_nid_at(pc);
 +    if (nid) {
 +        if (it->trace) fprintf(it->trace, "%08X  <hle 0x%08X>", pc, nid);
++        note_hle(nid);
 +        psp_hle_call(nid);
 +        it->pc = R(PSP_RA_INDEX);
 +        it->executed += 2;
@@ -936,6 +973,7 @@ index 0000000..4308f17
 +    case I_TRAP_VFPU:    return "unimplemented VFPU instruction";
 +    case I_TRAP_SYSCALL: return "syscall (no HLE wired up)";
 +    case I_TRAP_BREAK:   return "break";
++    case I_TRAP_BRANCH_IN_SLOT: return "control transfer in a delay slot";
 +    case I_TRAP_BADPC:   return "pc left mapped memory";
 +    }
 +    return "unknown";
@@ -946,10 +984,10 @@ index 0000000..4308f17
 +}
 diff --git a/tools/allegrexrecomp/interp.h b/tools/allegrexrecomp/interp.h
 new file mode 100644
-index 0000000..64bab69
+index 0000000..668a5be
 --- /dev/null
 +++ b/tools/allegrexrecomp/interp.h
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,130 @@
 +/* allegrexrecomp — the Allegrex interpreter that acts as the bring-up oracle.
 + *
 + * This exists to answer one question during bring-up: when the recompiled game
@@ -990,6 +1028,7 @@ index 0000000..64bab69
 +    I_TRAP_VFPU,      /* a VFPU op with no implementation behind it */
 +    I_TRAP_SYSCALL,   /* syscall — needs HLE that is not wired up here */
 +    I_TRAP_BREAK,
++    I_TRAP_BRANCH_IN_SLOT, /* a control transfer inside a delay slot */
 +    I_TRAP_BADPC,     /* pc left mapped memory */
 +} psp_interp_status;
 +
@@ -1047,6 +1086,12 @@ index 0000000..64bab69
 +
 +/* Frees the lookup index built by psp_interp_set_imports(). */
 +void psp_interp_free_imports(void);
++
++/* The firmware call a run repeated most, and how many times in a row. A run
++ * that exhausts its instruction budget is usually spinning on one unimplemented
++ * function, and this names it. Reset between runs. */
++void     psp_interp_hle_reset(void);
++uint32_t psp_interp_hot_nid(uint32_t *count);
 +
 +/* Execute one instruction, plus its delay slot if it has one. A branch and its
 + * delay slot are one step: splitting them would let a trace interleave at a

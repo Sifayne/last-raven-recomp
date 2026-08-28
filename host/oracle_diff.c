@@ -75,6 +75,40 @@ void psp_unimplemented(uint32_t addr, const char *what) {
     siglongjmp(g_trap, 1);
 }
 
+/* Why runs stop, tallied by reason. "trapped" was one bucket holding several
+ * unrelated things -- an unimplemented instruction, a syscall, and an
+ * instruction budget that simply ran out -- which made the largest category in
+ * the report also the least informative. They want different fixes. */
+#define TALLY_MAX 64
+typedef struct { char name[48]; long n; } tally_row;
+static tally_row g_why[TALLY_MAX];
+static int g_nwhy;
+
+static void tally(const char *name) {
+    for (int i = 0; i < g_nwhy; i++)
+        if (!strcmp(g_why[i].name, name)) { g_why[i].n++; return; }
+    if (g_nwhy == TALLY_MAX) return;
+    snprintf(g_why[g_nwhy].name, sizeof g_why[0].name, "%s", name);
+    g_why[g_nwhy].n = 1;
+    g_nwhy++;
+}
+
+/* For a run that exhausts its budget, the interesting question is not that it
+ * looped -- it is what it was waiting for. Recording which firmware call the
+ * run made most names the blocker directly: a spin on an unimplemented
+ * function that keeps returning zero looks exactly like this. */
+static void tally_dump(void) {
+    for (int i = 1; i < g_nwhy; i++) {          /* insertion sort, descending */
+        tally_row t = g_why[i];
+        int j = i - 1;
+        while (j >= 0 && g_why[j].n < t.n) { g_why[j + 1] = g_why[j]; j--; }
+        g_why[j + 1] = t;
+    }
+    printf("\nwhy runs stopped early:\n");
+    for (int i = 0; i < g_nwhy; i++)
+        printf("  %-34s %8ld\n", g_why[i].name, g_why[i].n);
+}
+
 void psp_syscall(uint32_t id) {
     g_trapped = 1; g_trap_addr = id; g_trap_what = "syscall";
     siglongjmp(g_trap, 1);
@@ -271,9 +305,24 @@ static void seed_state(uint32_t addr) {
      * self-modifying code, not a codegen bug, but it reads exactly like one.
      *
      * Pointing them into RAM keeps stores away from the code segment. */
-    for (int i = 4; i <= 7; i++) {          /* $a0..$a3 */
+    /* $a0 and $a1 as pointers, $a2 and $a3 as small counts.
+     *
+     * Making all four pointers was the previous attempt and traded one problem
+     * for another: for the very common (dst, src_or_value, length) shape, the
+     * length argument became a RAM address, so a memset-like function looped
+     * about 138 million times and exhausted the instruction budget. That does
+     * not test the recompiler, it tests how long the harness will wait.
+     *
+     * Neither split is right for every function -- nothing is, without knowing
+     * each signature -- but this one matches the dominant MIPS calling shape
+     * and keeps both the pointers valid and the counts sane. */
+    for (int i = 4; i <= 5; i++) {          /* $a0, $a1 -- pointers */
         x = x * 1103515245u + 12345u;
         psp_cpu.r[i] = ARG_ARENA + (((x >> 16) & 0x3FF) * 64);
+    }
+    for (int i = 6; i <= 7; i++) {          /* $a2, $a3 -- counts */
+        x = x * 1103515245u + 12345u;
+        psp_cpu.r[i] = (x >> 16) & 0xFF;
     }
     for (int i = 8; i <= 15; i++) {         /* $t0..$t7 */
         x = x * 1103515245u + 12345u;
@@ -374,6 +423,7 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     /* --- interpreter --- */
     psp_interp it;
     psp_interp_init(&it, addr, RA_DONE, 200000);
+    psp_interp_hle_reset();
 
     /* Thunk hits now go through HLE inside psp_interp_step, so the stub region
      * is no longer a stopping condition. What still is: an HLE handler calling
@@ -404,7 +454,33 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     if (g_trapped)      return R_SKIP_TRAP;
     if (psp_dispatch_calls() != dispatch_before || g_miss_count != miss_before)
         return R_SKIP_REENTRY;
-    if (it.status != I_OK_RETURN)                return R_SKIP_TRAP;
+    if (it.status != I_OK_RETURN) {
+        uint32_t hot_n = 0;
+        const uint32_t hot = psp_interp_hot_nid(&hot_n);
+        if (verbose && it.status == I_BUDGET)
+            printf("  %08X  budget exhausted after %llu instructions "
+                   "(hottest NID 0x%08X x%u)\n",
+                   addr, (unsigned long long)it.executed, hot, hot_n);
+        if (it.status == I_BUDGET && hot_n > 64) {
+            char buf[64];
+            snprintf(buf, sizeof buf, "budget, spinning on NID 0x%08X", hot);
+            tally(buf);
+            return R_SKIP_TRAP;
+        }
+        if (it.status == I_TRAP_VFPU || it.status == I_TRAP_INVALID) {
+            a_insn bad;
+            a_decode(psp_read32(it.fault_pc), it.fault_pc, &bad);
+            char buf[64];
+            snprintf(buf, sizeof buf, "interp: %s (%s)",
+                     psp_interp_status_str(it.status), a_mnemonic(bad.op));
+            tally(buf);
+        } else {
+            char buf[64];
+            snprintf(buf, sizeof buf, "interp: %s", psp_interp_status_str(it.status));
+            tally(buf);
+        }
+        return R_SKIP_TRAP;
+    }
 
     /* Stack balance is the test for "was this address really callable?".
      *
@@ -441,7 +517,12 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     phase("recomp-done");
     if (g_trapped == 2) return R_HANG;
     if (g_trapped == 3) return R_FAULT;
-    if (g_trapped)      return R_SKIP_TRAP;
+    if (g_trapped) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "recomp: %s", g_trap_what ? g_trap_what : "trap");
+        tally(buf);
+        return R_SKIP_TRAP;
+    }
     phase("snap-sr");
     snap_take(sr);
 
@@ -650,6 +731,7 @@ int main(int argc, char **argv) {
     printf("  unbalanced $sp:  %ld  (entry was not independently callable)\n", skip_unbal);
     printf("  host fault:      %ld  (SIGSEGV/SIGBUS, usually host stack exhaustion)\n", faults);
     printf("  import thunk:    %ld  (firmware boundary, not guest code)\n", skip_stub);
+    tally_dump();
 
     psp_mem_free();
     psp_blob_free(&b);
