@@ -1,7 +1,11 @@
 # Phase 1 — the differential oracle
 
-**Status: three real emitter bugs found, fixed, and confirmed by measurement.
-The 400-function sample now agrees completely — 118 of 118.**
+**Status: goal reached. Four real emitter bugs found, fixed, and confirmed;
+every divergence across the full corpus has a verdict.**
+
+12,240 functions compared, **12,237 agree**. Of the 3 that do not, 2 are an
+IEEE-754 NaN sign bit (not a bug) and 1 is documented as unresolved with a
+reproduction.
 
 Reproduce with `scripts/05-oracle.sh`, then `scripts/06-triage.py`. Measured
 2026-08-27 against `NPUH-10024`, module `ACLR_App`.
@@ -29,7 +33,7 @@ and nowhere else.
 
 ---
 
-## The three bugs
+## The four bugs
 
 All three are the same class: **the emitted C silently does less than the
 hardware does.** No dispatch miss, no bad memory access, no crash — just a
@@ -109,6 +113,28 @@ fourth:
 Ownership still decides whether the slot also needs a *labelled* copy, which is
 a question about who can jump to it — and that ownership does answer.
 
+### 4. An indirect call is treated as the end of a function
+
+The terminal test read:
+
+```c
+last_terminal = in.is_return || in.is_indirect || (in.is_jump && !in.is_call);
+```
+
+`is_indirect` covers `jr` and `jalr` alike, and only one of them ends anything.
+`jalr` is a **call**: it returns, and execution continues after its delay slot.
+Marking it terminal suppressed the end-of-function continuation, so wherever a
+function's extent ended just after an indirect call — exactly where discovery
+splits — whatever followed was never emitted.
+
+What followed was the epilogue. `0x002B0878` ended on `psp_dispatch(r_v1)` and
+never reached the `lw $ra` / `jr $ra` / `addiu $sp, $sp, 16` three instructions
+later. This was the cause of every remaining `$sp` cluster.
+
+The decoder already draws the distinction — it sets `ends_block` for `jr` and
+not for `jalr` — so this was the emitter failing to use information it already
+had.
+
 ### Effect
 
 Same 400 functions, same seeds, one variable changed at a time:
@@ -120,28 +146,53 @@ Same 400 functions, same seeds, one variable changed at a time:
 | after fix 2 (force the label to exist) | 118 | 111 | **7** |
 | after fix 3 (delay-slot ownership) | 118 | **118** | **0** |
 
+Fix 4 shows up in the corpus rather than this sample: it needs an indirect call
+at the end of a function's extent, which none of the first 400 happen to have.
+
 The 27-function `$v0` cluster and every `$sp` cluster are gone.
 
 ---
 
-## Corpus results
+## Corpus results — every divergence has a verdict
 
-See `reports/05-oracle-full.txt` and `scripts/06-triage.py`.
+All 26,462 discovered function entries, `reports/05-oracle-full.txt`:
 
-Skip categories matter as much as the comparisons:
+| | |
+|---|---:|
+| attempted | 26,462 |
+| **compared** | **12,240** |
+| **agree** | **12,237 (99.98%)** |
+| **differ** | **3** |
 
-- **Traps** — an unimplemented instruction on one side, overwhelmingly VFPU.
-- **Unbalanced `$sp`** — discovery splits on any pointed-at address, so an
-  "entry" can land past the prologue that built the frame. A well-formed
-  function restores `$sp`; anything else was never independently callable, and
-  the comparison is meaningless rather than failing.
-- **Interpreter hangs** — an HLE handler re-entered guest code through
-  `psp_dispatch()`, landing in a recompiled function that does not return.
-- **Host faults** — recompiled guest code runs on the host stack and every guest
-  call is a real call, so a deep chain overflows it. Caught on an alternate
-  signal stack; before that it killed both full runs at the same function.
+Skipped, and why each category is a skip rather than a failure:
 
----
+| | count | |
+|---|---:|---|
+| trapped | 13,670 | an unimplemented instruction on one side, overwhelmingly VFPU |
+| interpreter hung | 300 | an HLE handler re-entered guest code and landed somewhere that does not return |
+| unbalanced `$sp` | 249 | the entry was not independently callable — discovery split past a prologue |
+| import thunk | 25 | the firmware boundary, not guest code |
+| host fault | 3 | recompiled code runs on the host stack; a deep guest chain overflows it |
+
+### Verdicts on the remaining 3
+
+**2 of 3 — NaN sign bit. Not a bug.** `0x00003630` and `0x001FC6A8` differ by one
+stack word: `7FC00000` against `FFC00000`. Those are quiet NaNs differing only in
+the sign bit. IEEE-754 leaves the sign of a NaN produced by an invalid operation
+unspecified, and the two sides are compiled at different optimisation levels —
+the interpreter inside `liballegrex_core` at `-O3`, the generated code at `-O0`.
+Both results are equally correct.
+
+**1 of 3 — unresolved.** `0x000FDE14` differs only in `$v0`
+(`interp=00000000`, `recomp=001949A0`). Its three callees each agree when tested
+in isolation, so the disagreement is state-dependent and only appears in the
+composed chain. Resolving it needs instruction-level trace diffing rather than
+another hypothesis; `allegrexrecomp interp --regs` produces one side of that
+already.
+
+```bash
+build/host/oracle_diff game/extracted/ACLR_App.elf --from 0xFDE14 --verbose
+```
 
 ## Method notes, and why they are not incidental
 
@@ -159,6 +210,21 @@ reading any remaining divergence:
    `0x0`.
 4. **`--from 0x0` scanned everything**, because 0 was both a valid address and
    the "unset" sentinel.
+5. **HLE state was never reset between runs.** The snapshot covered `psp_cpu`,
+   RAM and the module image, but the firmware layer keeps state in ordinary C
+   statics none of those reach — the allocator's block table above all. The
+   interpreter's allocations persisted into the recompiled run, which then got
+   *different addresses back from the same calls*. It showed up as
+   `interp=0400C000 recomp=0400C200` against a VRAM base: entirely plausible,
+   entirely an artifact.
+6. **Seeded arguments pointed into `.text`.** Argument registers were seeded
+   with small values (0..0x3FFF), and the module maps at 0 — so any function
+   treating an argument as a pointer scribbled on its own code. At that point
+   the two sides diverge *by construction*, because the interpreter fetches
+   instructions from memory and runs the corrupted version while the recompiled
+   C was fixed at compile time. Pointing the arguments into RAM instead removed
+   five of the last eight divergences and raised comparability from 10,740 to
+   12,240.
 
 Two hypotheses were tested and **disproved**, which is worth recording so they
 are not retried: restoring all 32 MB of RAM instead of a 1 MB stack window
@@ -174,9 +240,10 @@ the interpreter side.
   before *and* after the fix, which is worse than none. Pinning down
   `a_discover`'s ownership rules is the prerequisite. Noted in `test_emit.c`.
 
-  Bug 3 **does** have one (`test_return_delay_slot_not_owned`), and it was
-  checked the way any regression test should be: reverted the fix, confirmed the
-  test fails, restored it, confirmed it passes.
+  Bugs 3 and 4 **do** have tests (`test_return_delay_slot_not_owned`,
+  `test_indirect_call_is_not_terminal`), each checked the way any regression
+  test should be: revert the fix, confirm the test fails, restore it, confirm it
+  passes.
 - **One input per function.** Argument registers come from a fixed LCG seeded by
   address: reproducible, but one path through each function, not a range.
 - **Caller-saved registers are not compared.** `$t*` and `$a*` are excluded by

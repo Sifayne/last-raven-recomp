@@ -9,10 +9,16 @@ as N64Recomp / *Zelda 64: Recompiled*.
 run.** See [docs/findings/phase0.md](docs/findings/phase0.md) for the numbers and
 what is still missing.
 
-Phase 1a added the differential oracle: an Allegrex interpreter sharing the
-toolkit's decoder and runtime, so a disagreement with the recompiled C localises
-to the emitter. 86 of 96 comparable functions agree; the 10 that do not are open
-leads, not confirmed bugs. See [docs/findings/oracle.md](docs/findings/oracle.md).
+Phase 1 added the differential oracle: an Allegrex interpreter sharing the
+toolkit's decoder, runtime and HLE, so a disagreement with the recompiled C
+localises to the emitter. It found **four silent-truncation bugs** in the
+emitter, each one making the generated C do less than the hardware does — a
+dropped fall-through, a missing label, a dropped `jr $ra` delay slot (where the
+stack restore lives), and an indirect call treated as the end of a function.
+
+Across all 26,462 discovered functions: **12,240 compared, 12,237 agree.** Of
+the 3 that do not, 2 are an IEEE-754 NaN sign bit and 1 is documented as
+unresolved. See [docs/findings/oracle.md](docs/findings/oracle.md).
 
 ## This repository contains no game data
 

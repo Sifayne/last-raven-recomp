@@ -23,7 +23,7 @@ import sys
 REG   = re.compile(r"^\s+([0-9A-F]{8})\s+\$(\w+)\s+interp=([0-9A-F]{8})\s+recomp=([0-9A-F]{8})")
 HILO  = re.compile(r"^\s+([0-9A-F]{8})\s+(hi|lo)\s+interp=([0-9A-F]{8})\s+recomp=([0-9A-F]{8})")
 MEM   = re.compile(r"^\s+([0-9A-F]{8})\s+stack\[([0-9A-F]{8})\]")
-MOD   = re.compile(r"^\s+([0-9A-F]{8})\s+module image differs")
+MOD   = re.compile(r"^\s+([0-9A-F]{8})\s+module(?:\[([0-9A-F]{8})\]| image differs)")
 
 
 def parse(path):
@@ -42,7 +42,7 @@ def parse(path):
                 continue
             m = MOD.match(line)
             if m:
-                out[m.group(1)].append(("module", "", None, None))
+                out[m.group(1)].append(("module", m.group(2) or "", None, None))
     return out
 
 

@@ -54,6 +54,8 @@ void psp_recomp_register(void);
 
 #define STACK_TOP  (PSP_RAM_BASE + PSP_RAM_SIZE - 0x1000)
 #define RA_DONE    0x0DEAD000u
+/* Where seeded pointer arguments point: RAM, well clear of the stack. */
+#define ARG_ARENA  (PSP_RAM_BASE + 0x00400000u)
 
 /* ---- trap capture ---------------------------------------------------------
  *
@@ -140,6 +142,10 @@ static void install_fault_handler(void) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS,  &sa, NULL);
+    /* The runtime aborts on some unrecoverable paths, and a stack-protector
+     * trip lands here too. Same treatment: this function cannot be
+     * evaluated, the rest of the corpus still can. */
+    sigaction(SIGABRT, &sa, NULL);
 }
 
 /* alarm(2) was the first attempt and made a 400-function run take longer than
@@ -217,6 +223,29 @@ static void snap_restore(const snapshot *s) {
     psp_mem_bad_access = s->bad_access;
 }
 
+/* Reset the HLE layer's own state.
+ *
+ * The snapshot covers psp_cpu, RAM and the module image -- but the firmware
+ * layer keeps state in ordinary C statics that none of those reach: the
+ * allocator's block table and next-uid counter, the thread table, GE and
+ * display registers. Left alone, the interpreter's allocations persist into the
+ * recompiled run, which then gets *different addresses back* from the same
+ * calls.
+ *
+ * That shows up as small, plausible-looking differences in stored pointers --
+ * `interp=0400C000 recomp=0400C200` against a VRAM base -- which reads exactly
+ * like a codegen bug and is not one. Both sides have to start from the same
+ * firmware state as well as the same machine state. */
+static void reset_hle(void) {
+    psp_sysmem_reset();
+    psp_threadman_reset();
+    psp_display_reset();
+    psp_ge_reset();
+    psp_sas_reset();
+    psp_io_reset();
+    psp_misc_reset();
+}
+
 /* ---- deterministic starting state -----------------------------------------
  *
  * Argument registers get pseudo-random values so the comparison exercises real
@@ -231,9 +260,20 @@ static void snap_restore(const snapshot *s) {
 static void seed_state(uint32_t addr) {
     memset(&psp_cpu, 0, sizeof psp_cpu);
     uint32_t x = addr * 1103515245u + 12345u;
+    /* Argument registers get RAM addresses, not small integers.
+     *
+     * Small values were the obvious choice and were wrong: the module is mapped
+     * at 0, so 0x0..0x3FFF is *inside .text*. A function that treats an
+     * argument as a pointer and stores through it then overwrites its own code
+     * -- and at that point the two sides diverge by construction, because the
+     * interpreter fetches instructions from memory and runs the corrupted
+     * version while the recompiled C was fixed at compile time. That is
+     * self-modifying code, not a codegen bug, but it reads exactly like one.
+     *
+     * Pointing them into RAM keeps stores away from the code segment. */
     for (int i = 4; i <= 7; i++) {          /* $a0..$a3 */
         x = x * 1103515245u + 12345u;
-        psp_cpu.r[i] = (x >> 16) & 0x3FFF;
+        psp_cpu.r[i] = ARG_ARENA + (((x >> 16) & 0x3FF) * 64);
     }
     for (int i = 8; i <= 15; i++) {         /* $t0..$t7 */
         x = x * 1103515245u + 12345u;
@@ -326,6 +366,7 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
      * registers holding MIPS instruction words -- which looks exactly like a
      * codegen bug and is not one. */
     snap_restore(&g_pristine);
+    reset_hle();
 
     seed_state(addr);
     snap_take(base);
@@ -388,6 +429,7 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     /* --- recompiled --- */
     const uint64_t miss_after_interp = g_miss_count;
     snap_restore(base);
+    reset_hle();
     g_trapped = 0;
     if (sigsetjmp(g_trap, 1) == 0) {
         watchdog_arm();
