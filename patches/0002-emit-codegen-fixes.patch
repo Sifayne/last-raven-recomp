@@ -1,5 +1,5 @@
 diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
-index e1285c5..6bd8651 100644
+index e1285c5..c33d9f7 100644
 --- a/tools/allegrexrecomp/emit.c
 +++ b/tools/allegrexrecomp/emit.c
 @@ -3,6 +3,7 @@
@@ -125,8 +125,24 @@ index e1285c5..6bd8651 100644
      /* The body takes the address to start at, and every label is reachable
       * through it.
       *
-@@ -657,10 +681,26 @@ static void emit_function(ectx *c, const a_func *fn) {
-                         (in.is_jump && !in.is_call);
+@@ -653,14 +677,40 @@ static void emit_function(ectx *c, const a_func *fn) {
+         a_decode(fetch(an, a), a, &in);
+ 
+         if (c->is_label[i]) fprintf(f, "L_%08X: PSP_MARK(0x%08Xu);\n", a, a);
+-        last_terminal = in.is_return || in.is_indirect ||
+-                        (in.is_jump && !in.is_call);
++        /* `is_indirect` covers `jr` and `jalr` alike, but only one of them ends
++         * anything. `jalr` is a *call*: it returns, and execution continues at
++         * the instruction after its delay slot. Treating it as terminal ended
++         * the emitted body there, so whatever followed -- routinely the
++         * epilogue -- was never emitted and the function returned without
++         * releasing its frame.
++         *
++         * The decoder already draws this distinction (it sets ends_block for
++         * `jr` and not for `jalr`); the test here just did not use it. What
++         * makes a transfer terminal is that control does not come back: a
++         * return, or an unconditional jump that is not a call. */
++        last_terminal = in.is_return || (in.is_jump && !in.is_call);
          comment(c, &in);
  
 -        /* The delay-slot instruction, if this transfers control. */
@@ -154,7 +170,7 @@ index e1285c5..6bd8651 100644
              a_decode(fetch(an, a + 4), a + 4, &slot);
              have_slot = 1;
          }
-@@ -795,6 +835,26 @@ static void emit_function(ectx *c, const a_func *fn) {
+@@ -795,6 +845,26 @@ static void emit_function(ectx *c, const a_func *fn) {
          if (is_function(an, next)) {
              fprintf(f, "    /* falls through into the next function */\n");
              fprintf(f, "    psp_func_%08X();\n", next);
@@ -181,7 +197,7 @@ index e1285c5..6bd8651 100644
          }
      }
      fprintf(f, "}\n");
-@@ -965,13 +1025,32 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
+@@ -965,13 +1035,32 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
      c.an = an;
      c.is_label = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
      c.is_slot  = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);

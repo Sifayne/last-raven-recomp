@@ -284,7 +284,23 @@ static int compare(const snapshot *a, const snapshot *b, uint32_t addr, int verb
         }
     }
     if (memcmp(a->module, b->module, g_module_size) != 0) {
-        printf("  %08X  module image differs\n", addr);
+        /* Report where, not just that. "module image differs" is unactionable:
+         * the offset says whether this is a data-segment global, a write
+         * through a wild pointer, or code being overwritten. */
+        uint32_t first = 0;
+        int shown = 0;
+        for (uint32_t o = 0; o + 4 <= g_module_size; o += 4) {
+            if (memcmp(a->module + o, b->module + o, 4) == 0) continue;
+            first = o;
+            printf("  %08X  module[%08X] interp=%02X%02X%02X%02X recomp=%02X%02X%02X%02X\n",
+                   addr, g_module_lo + o,
+                   a->module[o+3], a->module[o+2], a->module[o+1], a->module[o],
+                   b->module[o+3], b->module[o+2], b->module[o+1], b->module[o]);
+            shown = 1;
+            break;
+        }
+        if (!shown) printf("  %08X  module image differs\n", addr);
+        (void)first;
         diffs++;
     }
     return diffs;
@@ -292,7 +308,7 @@ static int compare(const snapshot *a, const snapshot *b, uint32_t addr, int verb
 
 /* ---- one function --------------------------------------------------------- */
 
-typedef enum { R_MATCH, R_DIFF, R_SKIP_IMPORT, R_SKIP_NOFN, R_SKIP_TRAP, R_HANG, R_SKIP_UNBALANCED, R_SKIP_REENTRY, R_HANG_INTERP, R_FAULT } result;
+typedef enum { R_MATCH, R_DIFF, R_SKIP_IMPORT, R_SKIP_NOFN, R_SKIP_TRAP, R_HANG, R_SKIP_UNBALANCED, R_SKIP_REENTRY, R_HANG_INTERP, R_FAULT, R_DIFF_MISS } result;
 
 static uint32_t g_stub_lo, g_stub_hi;
 
@@ -370,6 +386,7 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
 
     phase("recomp-start");
     /* --- recompiled --- */
+    const uint64_t miss_after_interp = g_miss_count;
     snap_restore(base);
     g_trapped = 0;
     if (sigsetjmp(g_trap, 1) == 0) {
@@ -386,7 +403,22 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     phase("snap-sr");
     snap_take(sr);
 
-    return compare(si, sr, addr, verbose) ? R_DIFF : R_MATCH;
+    const int diffs = compare(si, sr, addr, verbose);
+    if (!diffs) return R_MATCH;
+
+    /* A dispatch miss during the recompiled run explains a divergence without
+     * implicating the emitter. The interpreter follows an indirect jump to
+     * whatever it computes; the recompiled side hands the same address to
+     * psp_dispatch(), which does nothing when discovery never registered it.
+     * The two then legitimately do different work, and the defect is in
+     * discovery's coverage, not in the code that was generated. Worth counting
+     * separately -- the fix is a different one. */
+    if (g_miss_count != miss_after_interp) {
+        if (verbose)
+            printf("  %08X  (dispatch miss during the recompiled run: discovery gap)\n", addr);
+        return R_DIFF_MISS;
+    }
+    return R_DIFF;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -480,7 +512,7 @@ int main(int argc, char **argv) {
     printf("---\n");
 
     long attempted = 0, match = 0, diff = 0;
-    long skip_import = 0, skip_trap = 0, skip_nofn = 0, hang = 0, skip_unbal = 0, skip_reentry = 0, hang_interp = 0, faults = 0;
+    long skip_import = 0, skip_trap = 0, skip_nofn = 0, hang = 0, skip_unbal = 0, skip_reentry = 0, hang_interp = 0, faults = 0, diff_miss = 0, skip_stub = 0;
 
     /* Walk .text on instruction boundaries and test whatever the dispatch
      * table knows about. Using the dispatch table as the work-list means the
@@ -536,6 +568,12 @@ int main(int argc, char **argv) {
             if (a >= text_hi || attempted >= limit) break;
         }
         if (!psp_lookup(a)) continue;
+        /* Import thunks are in .text and land in the discovered function list,
+         * but they are not functions -- they are the firmware boundary. The
+         * interpreter intercepts them into HLE and the recompiled side has a
+         * generated stub; comparing the two as if they were guest code
+         * measures nothing. */
+        if (a >= g_stub_lo && a < g_stub_hi) { skip_stub++; continue; }
         attempted++;
         switch (check_one(a, &base, &si, &sr, verbose)) {
         case R_MATCH:        match++; break;
@@ -548,6 +586,7 @@ int main(int argc, char **argv) {
         case R_SKIP_REENTRY: skip_reentry++; break;
         case R_HANG_INTERP:  hang_interp++;  break;
         case R_FAULT:        faults++;       break;
+        case R_DIFF_MISS:    diff_miss++;    break;
         }
         if ((attempted % 200) == 0) {
             printf("... %ld attempted, %ld compared\n", attempted, match + diff);
@@ -557,9 +596,10 @@ int main(int argc, char **argv) {
 
     printf("---\n");
     printf("attempted: %ld functions\n", attempted);
-    printf("compared:  %ld\n", match + diff);
+    printf("compared:  %ld\n", match + diff + diff_miss);
     printf("  match:  %ld\n", match);
     printf("  differ: %ld\n", diff);
+    printf("  differ (dispatch miss -- discovery gap, not codegen): %ld\n", diff_miss);
     printf("skipped:\n");
     printf("  HLE re-entry:    %ld  (handler called back into guest code)\n", skip_reentry);
     printf("  trapped:         %ld  (unimplemented instruction on one side)\n", skip_trap);
@@ -567,6 +607,7 @@ int main(int argc, char **argv) {
     printf("  interp hung:     %ld  (watchdog fired inside the interpreter run)\n", hang_interp);
     printf("  unbalanced $sp:  %ld  (entry was not independently callable)\n", skip_unbal);
     printf("  host fault:      %ld  (SIGSEGV/SIGBUS, usually host stack exhaustion)\n", faults);
+    printf("  import thunk:    %ld  (firmware boundary, not guest code)\n", skip_stub);
 
     psp_mem_free();
     psp_blob_free(&b);
