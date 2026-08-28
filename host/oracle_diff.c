@@ -112,6 +112,36 @@ static void watchdog(int sig) {
     siglongjmp(g_trap, 1);
 }
 
+/* Recompiled guest code is ordinary C running on the host stack, and every
+ * guest call is a real call. A deep or mutually recursive guest chain -- easy
+ * to reach from seeded argument registers -- overflows that stack and the
+ * process dies with SIGSEGV, taking the whole corpus run with it. Both full
+ * runs stopped at the same function for this reason.
+ *
+ * Catching it needs an alternate signal stack, because by the time the fault
+ * arrives the normal one has no room left to run a handler on. Treated as a
+ * skip: it says the harness cannot evaluate this function, not that the two
+ * sides disagree. */
+static void faulted(int sig) {
+    (void)sig;
+    g_trapped = 3;
+    siglongjmp(g_trap, 1);
+}
+
+static void install_fault_handler(void) {
+    static char altstack[SIGSTKSZ < 65536 ? 65536 : SIGSTKSZ];
+    stack_t ss = { .ss_sp = altstack, .ss_size = sizeof altstack, .ss_flags = 0 };
+    sigaltstack(&ss, NULL);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = faulted;
+    sa.sa_flags   = SA_ONSTACK | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS,  &sa, NULL);
+}
+
 /* alarm(2) was the first attempt and made a 400-function run take longer than
  * ten minutes: once firmware calls started doing real work, far more functions
  * ran long enough to reach the timeout, and each one then cost a full two
@@ -262,7 +292,7 @@ static int compare(const snapshot *a, const snapshot *b, uint32_t addr, int verb
 
 /* ---- one function --------------------------------------------------------- */
 
-typedef enum { R_MATCH, R_DIFF, R_SKIP_IMPORT, R_SKIP_NOFN, R_SKIP_TRAP, R_HANG, R_SKIP_UNBALANCED, R_SKIP_REENTRY, R_HANG_INTERP } result;
+typedef enum { R_MATCH, R_DIFF, R_SKIP_IMPORT, R_SKIP_NOFN, R_SKIP_TRAP, R_HANG, R_SKIP_UNBALANCED, R_SKIP_REENTRY, R_HANG_INTERP, R_FAULT } result;
 
 static uint32_t g_stub_lo, g_stub_hi;
 
@@ -313,6 +343,7 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     }
     phase("interp-done");
     if (g_trapped == 2) return R_HANG_INTERP;
+    if (g_trapped == 3) return R_FAULT;
     if (g_trapped)      return R_SKIP_TRAP;
     if (psp_dispatch_calls() != dispatch_before || g_miss_count != miss_before)
         return R_SKIP_REENTRY;
@@ -350,6 +381,7 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     }
     phase("recomp-done");
     if (g_trapped == 2) return R_HANG;
+    if (g_trapped == 3) return R_FAULT;
     if (g_trapped)      return R_SKIP_TRAP;
     phase("snap-sr");
     snap_take(sr);
@@ -371,12 +403,14 @@ int main(int argc, char **argv) {
     const char *path = argv[1];
     long limit = 2000;
     uint32_t only = 0; int have_only = 0;
+    const char *funcs_path = NULL;
     int verbose = 0;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--limit") && i + 1 < argc) limit = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--from") && i + 1 < argc) { only = (uint32_t)strtoul(argv[++i], NULL, 0); have_only = 1; }
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
         else if (!strcmp(argv[i], "--phase")) g_phase_trace = 1;
+        else if (!strcmp(argv[i], "--funcs") && i + 1 < argc) funcs_path = argv[++i];
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
     }
 
@@ -405,6 +439,7 @@ int main(int argc, char **argv) {
     g_stub_hi = e.stub_addr + e.stub_size;
 
     signal(SIGALRM, watchdog);
+    install_fault_handler();
     psp_set_miss_handler(note_miss);
     psp_recomp_register();
     psp_hle_init();
@@ -445,7 +480,7 @@ int main(int argc, char **argv) {
     printf("---\n");
 
     long attempted = 0, match = 0, diff = 0;
-    long skip_import = 0, skip_trap = 0, skip_nofn = 0, hang = 0, skip_unbal = 0, skip_reentry = 0, hang_interp = 0;
+    long skip_import = 0, skip_trap = 0, skip_nofn = 0, hang = 0, skip_unbal = 0, skip_reentry = 0, hang_interp = 0, faults = 0;
 
     /* Walk .text on instruction boundaries and test whatever the dispatch
      * table knows about. Using the dispatch table as the work-list means the
@@ -457,7 +492,49 @@ int main(int argc, char **argv) {
      * excluded — and the harness then grinds through all 26,487 functions
      * running each one to its instruction budget first. */
     const uint32_t text_lo = e.text_addr, text_hi = e.text_addr + e.text_size;
-    for (uint32_t a = have_only ? only : text_lo; a < text_hi && attempted < limit; a += 4) {
+
+    /* The work-list.
+     *
+     * Walking .text and testing whatever psp_lookup resolves is wrong: the
+     * dispatch table holds interior labels as well as function entries -- for
+     * this module, 32,068 of the former against 26,487 of the latter. A label
+     * sits past the prologue that set up the frame, so entering there is not a
+     * call and the comparison is meaningless. The $sp-balance check catches
+     * most of them after the fact, but at the cost of running each one first.
+     *
+     * With --funcs, the entry list from `allegrexrecomp funcs --list` is used
+     * instead, so only real entries are attempted. */
+    uint32_t *worklist = NULL;
+    long nwork = 0;
+    if (funcs_path) {
+        FILE *lf = fopen(funcs_path, "r");
+        if (!lf) { fprintf(stderr, "cannot read %s\n", funcs_path); return 1; }
+        long cap = 4096;
+        worklist = malloc((size_t)cap * sizeof *worklist);
+        char line[256];
+        while (worklist && fgets(line, sizeof line, lf)) {
+            unsigned a;
+            if (sscanf(line, " 0x%x", &a) != 1) continue;
+            if (nwork == cap) {
+                cap *= 2;
+                uint32_t *bigger = realloc(worklist, (size_t)cap * sizeof *worklist);
+                if (!bigger) break;
+                worklist = bigger;
+            }
+            worklist[nwork++] = a;
+        }
+        fclose(lf);
+        printf("worklist: %ld function entries from %s\n", nwork, funcs_path);
+    }
+
+    for (long wi = 0; ; wi++) {
+        uint32_t a;
+        if (have_only)      { if (wi) break; a = only; }
+        else if (worklist)  { if (wi >= nwork || attempted >= limit) break; a = worklist[wi]; }
+        else {
+            a = text_lo + (uint32_t)wi * 4;
+            if (a >= text_hi || attempted >= limit) break;
+        }
         if (!psp_lookup(a)) continue;
         attempted++;
         switch (check_one(a, &base, &si, &sr, verbose)) {
@@ -470,8 +547,8 @@ int main(int argc, char **argv) {
         case R_SKIP_UNBALANCED: skip_unbal++; break;
         case R_SKIP_REENTRY: skip_reentry++; break;
         case R_HANG_INTERP:  hang_interp++;  break;
+        case R_FAULT:        faults++;       break;
         }
-        if (have_only) break;
         if ((attempted % 200) == 0) {
             printf("... %ld attempted, %ld compared\n", attempted, match + diff);
             fflush(stdout);
@@ -489,6 +566,7 @@ int main(int argc, char **argv) {
     printf("  recomp hung:     %ld  (interpreter returned; recompiled C did not)\n", hang);
     printf("  interp hung:     %ld  (watchdog fired inside the interpreter run)\n", hang_interp);
     printf("  unbalanced $sp:  %ld  (entry was not independently callable)\n", skip_unbal);
+    printf("  host fault:      %ld  (SIGSEGV/SIGBUS, usually host stack exhaustion)\n", faults);
 
     psp_mem_free();
     psp_blob_free(&b);

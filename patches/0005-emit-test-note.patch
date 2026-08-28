@@ -1,0 +1,26 @@
+diff --git a/tests/test_emit.c b/tests/test_emit.c
+index f0f8805..962e09b 100644
+--- a/tests/test_emit.c
++++ b/tests/test_emit.c
+@@ -71,6 +71,21 @@ static void expect_contains(const char *hay, const char *needle, const char *why
+     }
+ }
+ 
++
++/* NOTE: the fall-through-into-a-label bug that the differential oracle found in
++ * memset (see the comment at the fix site in emit.c) has no test here.
++ *
++ * Reproducing it needs discovery to leave the fall-through target as a *label*
++ * inside a neighbouring function. Several synthetic shapes were tried and
++ * discovery promoted the target to its own entry every time, which exercises
++ * the path that always worked -- a test that passes both before and after the
++ * fix, which is worse than no test because it implies coverage that is not
++ * there. Building one needs a_discover's ownership rules pinned down first.
++ *
++ * The fix is verified against the real module instead: memset returned $v0 = 0
++ * before and $v0 = $a0 after, and corpus divergences fell from 17 to 8 over the
++ * same 400 functions. */
++
+ int main(void) {
+     uint8_t code[sizeof CODE];
+     for (size_t i = 0; i < sizeof CODE / sizeof CODE[0]; i++) {

@@ -35,7 +35,13 @@ done
 cc -c "${CFLAGS[@]}" -o "$OBJ/link_probe.o" "$ROOT/host/link_probe.c"
 
 info "linking"
-cc -o "$OBJ/${PREFIX}_probe" "$OBJ"/*.o "$ROOT/build/psprecomp/libpsprecomp.a" -lm
+# Named explicitly rather than globbed: stage 05 also builds into this
+# directory, and sweeping up its objects drags the oracle harness into the
+# probe with none of the libraries it needs.
+GEN_OBJS=()
+for src in "$GEN"/*.c; do GEN_OBJS+=("$OBJ/$(basename "${src%.c}").o"); done
+cc -o "$OBJ/${PREFIX}_probe" "${GEN_OBJS[@]}" "$OBJ/link_probe.o" \
+      "$ROOT/build/psprecomp/libpsprecomp.a" -lm
 
 info "link closed: $(du -h "$OBJ/${PREFIX}_probe" | cut -f1) executable"
 "$OBJ/${PREFIX}_probe"

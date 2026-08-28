@@ -1,156 +1,158 @@
-# Phase 1a — the differential oracle
+# Phase 1 — the differential oracle
 
-**Status: built, validated, and producing comparisons. 10 divergences are open
-leads, not confirmed bugs.**
+**Status: two real emitter bugs found, fixed, and confirmed by measurement.**
 
-Reproduce with `scripts/05-oracle.sh`. Measured 2026-08-27 against `NPUH-10024`,
-module `ACLR_App`.
+Reproduce with `scripts/05-oracle.sh`, then `scripts/06-triage.py`. Measured
+2026-08-27 against `NPUH-10024`, module `ACLR_App`.
 
 ---
 
-## What was built
+## What the oracle is
 
-psprecomp's `docs/ORACLE.md` describes a three-tier oracle, of which tier 1 —
-an Allegrex interpreter sharing the toolkit's own decoder and runtime — was an
-**unchecked box in its Phase 5 roadmap**. It did not exist. So this phase was
-writing it, not wiring it up.
+psprecomp's `docs/ORACLE.md` describes a tier-1 interpreter oracle in the
+present tense, but it was an **unchecked box in its Phase 5 roadmap** — `src/`
+had no interpreter. Phase 1 wrote one.
 
-| Piece | Where | What |
-|---|---|---|
-| Interpreter | `patches/0003` → `tools/allegrexrecomp/interp.{c,h}` | Executes Allegrex on the shared `psp_cpu`, memory model, and `recomp_rt.h` helpers |
-| CLI | `allegrexrecomp interp <elf> [--from] [--trace] [--regs]` | Runs and traces a module |
-| Unit tests | `tests/test_interp.c` | 12 cases, hand-written encodings, no game data |
-| Harness | `host/oracle_diff.c` | Runs each function both ways and compares |
+| Piece | Where |
+|---|---|
+| Allegrex interpreter | `patches/0003` → `tools/allegrexrecomp/interp.{c,h}` |
+| CLI | `allegrexrecomp interp <elf> [--from] [--trace] [--regs]` |
+| Unit tests | `tests/test_interp.c` — 12 cases, hand-written encodings |
+| Differential harness | `host/oracle_diff.c` |
+| Triage | `scripts/06-triage.py` — clusters divergences by signature |
 
-The design property that matters: the two sides share **everything except
-sequencing**. Decode, arithmetic, memory and HLE are common code, so they cannot
-produce a false divergence. Only the emitter and the interpreter's own
-control-flow handling can.
+The property that makes it work: both sides share the decoder, CPU state,
+memory model, semantic helpers **and HLE**. Only instruction sequencing differs.
+So a disagreement localises to the emitter or to the interpreter's control flow,
+and nowhere else.
 
-## Validation
+---
 
-The unit tests target precisely the part that is *not* shared — delay slots,
-described in psprecomp's own notes as "the single most error-prone thing in MIPS
-recompilation":
+## The two bugs
 
-- a taken branch runs its delay slot
-- a **not-taken plain branch also runs its delay slot**
-- a **not-taken *likely* branch nullifies it**
-- `jal` links to `pc+8`, past the slot
-- `jr $t9` uses the value `$t9` held *before* the slot ran
-- `bltzal` links even when not taken
+Both are the same defect at different depths: **a function whose last block
+falls through into another function silently returns instead of continuing.**
+No dispatch miss, no bad memory access — just less work done than the hardware
+would do. That is the worst failure mode available, and it is exactly what a
+differential oracle is for.
 
-Plus a drift guard: 70 real encodings covering everything `emit.c` translates,
-asserting the interpreter implements the same set. If the emitter grows a case
-the interpreter lacks, the oracle would start blaming the game for a hole in
-itself; the guard fails first.
+### 1. Fall-through into a label is dropped
 
-Writing those tests immediately caught three bad encodings in the test table
-(`clz` is SPECIAL `0x16`, `wsbw` is BSHFL `sa=3`). They work.
+`emit.c` continued execution when the address after a function's extent was
+another function's **entry**, and dropped it when the address was a **label
+inside** another function.
 
-## It runs real code
+Found as a `$v0` disagreement on 27 functions, all reached through `memset`
+(`0x002A91DC`). Discovery splits memset's word-fill loop into its own function;
+the loop's not-taken exit falls through into the byte-fill tail, which belongs
+to the neighbouring body. The emitted loop just returned. So **memset skipped
+its trailing 1–3 bytes and never ran the `jr $ra` delay slot that sets its
+return value** — it returned whatever was already in `$v0`.
 
-`allegrexrecomp interp` executes the module entry to a clean return in 62
-instructions with **zero bad memory accesses**. The trace is legible and
-correct: `lui $v0,0x505` / `ori $a0,$v0,0x10` builds `0x05050010` — the devkit
-version from the `~PSP` header — on its way to `sceKernelSetCompiledSdkVersion`.
-Calls into the import-stub region find the unlinked `jr $ra` and return.
+Confirmed outside the harness with a direct call: `$v0 = 0` before, `$v0 = $a0`
+after.
 
-The `$ra` sentinel survives a real stack spill and reload, which is the
-mechanism that makes single functions testable in isolation.
+### 2. …and the label it needs does not exist
 
-## Results
+Fixing (1) exposed the next layer. The continuation targets an address that has
+no label and no dispatch entry, because labels are only emitted for addresses
+something *branches to*. The dispatch missed and the continuation was lost
+anyway.
 
-400 functions attempted:
+At `0x00003630` the lost continuation was the epilogue itself:
 
-| Outcome | Count |
-|---|---:|
-| **compared** | **96** |
-| — agree | **86** |
-| — differ | **10** |
-| skipped: reached an import | 58 |
-| skipped: trapped on one side | 215 |
-| skipped: `$sp` unbalanced (entry not independently callable) | 31 |
+```
+0000366C  lw    $ra, 16($sp)
+00003670  jr    $ra
+00003674  addiu $sp, $sp, 32     ← delay slot restores the frame
+```
 
-The skip categories are as important as the comparisons:
+Symptom: the function returns with `$sp` still holding its frame — visible in
+the triage output as clusters of `$sp-0x10`, `$sp-0x20`, `$sp-0x40`.
 
-**Imports (58).** The recompiled stub calls `psp_hle_call()`; the interpreter,
-running the *unlinked* module, finds a bare `jr $ra`. Guaranteed disagreement
-that says nothing about codegen. **Routing the interpreter's stub hits into HLE
-is the single highest-value next change** — it would move most of these 58 into
-the comparable set.
+The fix is a pre-pass over all functions before emission, marking every
+fall-through target so its owner emits a label there. It has to be a pre-pass:
+the function that *needs* the label is not the one that discovers it is needed,
+and emission runs in address order.
 
-**Traps (215).** Mostly VFPU with no implementation behind it, on both sides.
+**Worth noting for upstream:** psprecomp's HEAD commit message is *"shared-epilogue
++32 is correct, the -64 group is not explained."* The `$sp-0x40` cluster here is
+that −64 group.
 
-**Unbalanced `$sp` (31).** Discovery splits a function at any address something
-points at, so an "entry" can land past the prologue that allocated the frame.
-Entering there, the epilogue's `lw $ra, N($sp)` reads a slot no prologue wrote.
-A well-formed function restores `$sp`; anything else was never independently
-callable and the comparison is meaningless rather than failing.
+### Effect
 
-## The 10 divergences are not yet findings
+Same 400 functions, same seeds, one variable changed at a time:
 
-Stated plainly because it would be easy to misread the table above: **none of
-the 10 has been confirmed as an emitter bug.**
+| | compared | agree | differ |
+|---|---:|---:|---:|
+| before either fix | 118 | 101 | **17** |
+| after fix 1 | 118 | 110 | **8** |
+| after fix 2 | 118 | 111 | **7** |
 
-Three separate *harness* defects were found and fixed during bring-up, each of
-which produced divergences indistinguishable from real codegen errors:
+The 27-function `$v0` cluster is gone entirely.
 
-1. **Unbounded work-list.** `--limit` counted successful comparisons, not
-   attempts, so skipped functions were unbounded — the harness ground through
-   all 26,487 functions and appeared to hang.
+---
+
+## Corpus results
+
+See `reports/05-oracle-full.txt` and `scripts/06-triage.py`.
+
+Skip categories matter as much as the comparisons:
+
+- **Traps** — an unimplemented instruction on one side, overwhelmingly VFPU.
+- **Unbalanced `$sp`** — discovery splits on any pointed-at address, so an
+  "entry" can land past the prologue that built the frame. A well-formed
+  function restores `$sp`; anything else was never independently callable, and
+  the comparison is meaningless rather than failing.
+- **Interpreter hangs** — an HLE handler re-entered guest code through
+  `psp_dispatch()`, landing in a recompiled function that does not return.
+- **Host faults** — recompiled guest code runs on the host stack and every guest
+  call is a real call, so a deep chain overflows it. Caught on an alternate
+  signal stack; before that it killed both full runs at the same function.
+
+---
+
+## Method notes, and why they are not incidental
+
+Four *harness* defects were found and fixed along the way, each producing
+divergences indistinguishable from codegen bugs. The base rate matters when
+reading any remaining divergence:
+
+1. **Unbounded work-list.** `--limit` counted successful comparisons rather than
+   attempts, so a run ground through all 26,487 functions and looked like a hang.
 2. **No reset between functions.** Each function inherited the previous one's
-   memory writes. Later functions read code as data; registers ended up holding
-   MIPS instruction words, which looks exactly like a codegen bug.
-3. **Testing non-callable entries.** Before the `$sp` filter, 36 of 175
-   comparisons "differed" — almost all of them mid-function entries. `0x24`,
-   the first, turned out to be `sw $a0, 0($sp)` nine instructions into the
-   function at `0x0`.
+   writes; later ones read code as data and ended with MIPS instruction words in
+   registers.
+3. **Non-callable entries.** 36 of 175 early "divergences" were mid-function
+   addresses. `0x24` is `sw $a0, 0($sp)`, nine instructions into the function at
+   `0x0`.
+4. **`--from 0x0` scanned everything**, because 0 was both a valid address and
+   the "unset" sentinel.
 
-Given a base rate that high, each remaining divergence needs individual triage
-before it is called anything. One hypothesis was tested and **disproved**:
-restoring all 32 MB of RAM instead of a 1 MB stack window changed nothing, so
-incomplete state restoration is not the cause.
+Two hypotheses were tested and **disproved**, which is worth recording so they
+are not retried: restoring all 32 MB of RAM instead of a 1 MB stack window
+changed nothing; and the stdio-deadlock theory for the early hangs was wrong —
+the real cause was HLE re-entry, and the fix was extending the watchdog to cover
+the interpreter side.
 
-### The lead worth pulling first
+## Known gaps
 
-`0x00003428`. The saved-`$ra` stack slots differ — interpreter `0x000034B8`,
-recompiled `0x00003464` — so **the two sides took different branches**, not
-merely computed different values. The function loads a global pointer
-(`lw $a1, -2740($s1)`), dereferences it, and branches on bit 10 of the result
-(`srl $a2, $a0, 10` / `andi $a2, $a2, 1`). The recompiled side also leaves `$s1`
-= `0x00320000` where the interpreter restores it to its entry value, so one side
-is not running the epilogue it should.
-
-Reproduce:
-
-```bash
-build/host/oracle_diff game/extracted/ACLR_App.elf --from 0x3428 --verbose
-```
-
-```bash
-build/psprecomp/tools/allegrexrecomp/allegrexrecomp interp game/extracted/ACLR_App.elf --from 0x3428 --regs --budget 200
-```
-
-## Known limits
-
-- The interpreter has no HLE. Firmware calls are unlinked `jr $ra` returns.
-- No thread scheduler on either side; this is single-threaded execution only.
-- Argument registers are seeded with small pseudo-random values from a fixed
-  LCG. Deterministic and reproducible, but it exercises one input per function,
-  not a range.
-- Callee-saved registers, `$v0`/`$v1`, `$sp`/`$fp`/`$gp`, `hi`/`lo`, all RAM and
-  the module image are compared. Caller-saved `$t*`/`$a*` are not — the two
-  sides are entitled to leave different garbage there.
-- The recompiled side gets a 2-second wall-clock watchdog, because unlike the
-  interpreter it has no instruction budget and a runaway loop never returns.
+- **No regression test for either bug.** Reproducing them needs discovery to
+  leave a fall-through target as a label inside a neighbouring function, and
+  every synthetic shape tried got promoted to its own entry — a test that passes
+  before *and* after the fix, which is worse than none. Pinning down
+  `a_discover`'s ownership rules is the prerequisite. Noted in `test_emit.c`.
+- **One input per function.** Argument registers come from a fixed LCG seeded by
+  address: reproducible, but one path through each function, not a range.
+- **Caller-saved registers are not compared.** `$t*` and `$a*` are excluded by
+  design; the two sides may legitimately leave different values there.
+- **Guest re-entry from HLE is excluded**, not solved. Making the interpreter
+  service `psp_dispatch` itself would close it.
 
 ## Next
 
-1. Route the interpreter's import-stub hits into `psp_hle_call`, so both sides
-   cross the firmware boundary the same way. Unlocks ~58 more comparisons per
-   400 and is the prerequisite for comparing anything that does real work.
-2. Triage `0x3428`, then the other nine.
-3. Send `patches/0001`–`0003` upstream. The interpreter fills a roadmap gap the
-   author had already scoped, and the label-ordering fix in `0002` is a bug they
-   would want.
+1. Triage the remaining divergence clusters — `scripts/06-triage.py` groups them
+   so each pattern is one investigation rather than N.
+2. Let the interpreter service `psp_dispatch`, closing the re-entry exclusion.
+3. Send `patches/0001`–`0005` upstream. Both emitter bugs are silent-truncation
+   defects that affect every title, not just this one.
