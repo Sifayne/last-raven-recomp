@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# GATING RULE: this repository ships CODE ONLY.
+#
+# No game data, no firmware, no decryption keys, no extracted assets — ever.
+# The user supplies their own dump of media they own. If you are adding a
+# pattern here, add it BEFORE the file it matches exists on disk.
+# ---------------------------------------------------------------------------
+
+# --- Game dumps and containers ---------------------------------------------
+game/
+*.iso
+*.cso
+*.dax
+*.chd
+*.pbp
+*.PBP
+*.prx
+*.PRX
+*.elf
+*.bin
+*.BIN
+*.img
+*.umd
+EBOOT.*
+BOOT.*
+PSP_GAME/
+UMD_DATA.BIN
+
+# --- Decryption keys and firmware ------------------------------------------
+# psp_keys.txt is the real thing; the .example.txt from psprecomp is fine.
+keys/
+psp_keys.txt
+*.key
+*.keys
+!*.example.txt
+
+# --- Extracted / generated game-derived content -----------------------------
+# Recompiled C is a derivative of the binary — regenerate it, never commit it.
+generated/
+extracted/
+out/
+*.gcm
+*.vag
+*.at3
+*.gim
+*.tga
+
+# --- Analysis output --------------------------------------------------------
+# reports/ holds raw dumps (disassembly, symbol tables) that embed game code.
+# Committed summaries live in docs/findings/ instead, hand-curated.
+reports/*
+!reports/.gitkeep
+
+# --- Build ------------------------------------------------------------------
+build/
+cmake-build-*/
+compile_commands.json
+.cache/
+
+# --- Editor / OS ------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

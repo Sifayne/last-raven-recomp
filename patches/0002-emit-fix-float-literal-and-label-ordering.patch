@@ -1,0 +1,79 @@
+diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
+index e1285c5..6f3cdf5 100644
+--- a/tools/allegrexrecomp/emit.c
++++ b/tools/allegrexrecomp/emit.c
+@@ -3,6 +3,7 @@
+ #include "emit.h"
+ #include "decode.h"
+ 
++#include <math.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -435,10 +436,20 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
+     case A_VIIM:
+         fprintf(f, "%spsp_vimm(%u, %.1ff);\n", ind, in->vd, (double)in->imm);
+         return;
+-    case A_VFIM:
+-        fprintf(f, "%spsp_vimm(%u, %.9gf);\n", ind, in->vd,
+-                (double)half_to_float((uint16_t)in->imm));
++    /* `%g` drops the decimal point on whole values, so the `f` suffix lands on
++     * what C then reads as an integer constant -- `-1f` is not a literal and
++     * does not compile. `#` keeps the point. A half can also encode inf/NaN,
++     * neither of which has a literal form, so those are named instead. */
++    case A_VFIM: {
++        float v = half_to_float((uint16_t)in->imm);
++        if (isinf(v))
++            fprintf(f, "%spsp_vimm(%u, %sHUGE_VALF);\n", ind, in->vd, v < 0 ? "-" : "");
++        else if (isnan(v))
++            fprintf(f, "%spsp_vimm(%u, (float)NAN);\n", ind, in->vd);
++        else
++            fprintf(f, "%spsp_vimm(%u, %#.9gf);\n", ind, in->vd, (double)v);
+         return;
++    }
+ 
+     /* Matrix ops that need no multiply. `vsize` is the matrix order here. */
+     case A_VMMUL:
+@@ -540,6 +551,24 @@ static void emit_function(ectx *c, const a_func *fn) {
+             c->is_slot[widx(an, a + 4)] = 1;
+     }
+ 
++    /* A function's instructions do not always begin at its entry: a backward
++     * jump can pull in a block that lies *below* the entry address, and
++     * emission walks the whole owned range in address order. When that
++     * happens the first statement in the body is not the first statement to
++     * execute, so control has to be sent to the real entry explicitly.
++     *
++     * Without this, calling the function silently runs whatever happens to sit
++     * lowest in its address range -- with none of the entry's setup having
++     * run. Registers hold stale values and the damage surfaces far away.
++     *
++     * This has to be marked *before* the delay-slot pass below, not after it.
++     * When a function's entry is itself the delay slot of the instruction that
++     * pulled the earlier block in, that pass is what gives the address past the
++     * standalone copy its label -- and it only fires for slots already known to
++     * be labels. Marking afterwards leaves emission emitting `goto L_<addr+4>`
++     * against a label nothing declared. */
++    c->is_label[widx(an, fn->addr)] = 1;
++
+     /* A delay slot can also be somebody's branch target. Arriving through the
+      * branch, it runs as part of that transfer; arriving by a jump straight to
+      * its address, it is an ordinary instruction. Both paths are real, so it
+@@ -565,17 +594,6 @@ static void emit_function(ectx *c, const a_func *fn) {
+         fprintf(f, " * Contains a computed jump routed through the dispatch table.\n");
+     fprintf(f, " * ------------------------------------------------------------- */\n");
+ 
+-    /* A function's instructions do not always begin at its entry: a backward
+-     * jump can pull in a block that lies *below* the entry address, and
+-     * emission walks the whole owned range in address order. When that
+-     * happens the first statement in the body is not the first statement to
+-     * execute, so control has to be sent to the real entry explicitly.
+-     *
+-     * Without this, calling the function silently runs whatever happens to sit
+-     * lowest in its address range -- with none of the entry's setup having
+-     * run. Registers hold stale values and the damage surfaces far away. */
+-    c->is_label[widx(an, fn->addr)] = 1;
+-
+     /* The body takes the address to start at, and every label is reachable
+      * through it.
+      *
