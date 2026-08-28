@@ -1,5 +1,5 @@
 diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
-index e1285c5..6f3cdf5 100644
+index e1285c5..0e319e9 100644
 --- a/tools/allegrexrecomp/emit.c
 +++ b/tools/allegrexrecomp/emit.c
 @@ -3,6 +3,7 @@
@@ -10,7 +10,28 @@ index e1285c5..6f3cdf5 100644
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
-@@ -435,10 +436,20 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
+@@ -38,20 +39,6 @@ static void entry_push(ectx *c, uint32_t a) {
+     c->entries[c->nentries++] = a;
+ }
+ 
+-/* vfim carries a half-precision float. Expanding it here keeps the runtime
+- * dealing only in single precision. */
+-static float half_to_float(uint16_t h) {
+-    const uint32_t sign = (uint32_t)(h >> 15) << 31;
+-    const uint32_t exp  = (h >> 10) & 0x1F;
+-    const uint32_t man  = h & 0x3FF;
+-    uint32_t bits;
+-    if (exp == 0)        bits = sign | (man ? ((127 - 15 + 1) << 23) | (man << 13) : 0);
+-    else if (exp == 31)  bits = sign | 0x7F800000u | (man << 13);
+-    else                 bits = sign | ((exp + 127 - 15) << 23) | (man << 13);
+-    float f;
+-    memcpy(&f, &bits, sizeof f);
+-    return f;
+-}
+ /* ---- helpers ------------------------------------------------------------- */
+ 
+ static uint32_t widx(const a_analysis *an, uint32_t addr) {
+@@ -435,10 +422,20 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
      case A_VIIM:
          fprintf(f, "%spsp_vimm(%u, %.1ff);\n", ind, in->vd, (double)in->imm);
          return;
@@ -22,7 +43,7 @@ index e1285c5..6f3cdf5 100644
 +     * does not compile. `#` keeps the point. A half can also encode inf/NaN,
 +     * neither of which has a literal form, so those are named instead. */
 +    case A_VFIM: {
-+        float v = half_to_float((uint16_t)in->imm);
++        float v = a_half_to_float((uint16_t)in->imm);
 +        if (isinf(v))
 +            fprintf(f, "%spsp_vimm(%u, %sHUGE_VALF);\n", ind, in->vd, v < 0 ? "-" : "");
 +        else if (isnan(v))
@@ -34,7 +55,7 @@ index e1285c5..6f3cdf5 100644
  
      /* Matrix ops that need no multiply. `vsize` is the matrix order here. */
      case A_VMMUL:
-@@ -540,6 +551,24 @@ static void emit_function(ectx *c, const a_func *fn) {
+@@ -540,6 +537,24 @@ static void emit_function(ectx *c, const a_func *fn) {
              c->is_slot[widx(an, a + 4)] = 1;
      }
  
@@ -59,7 +80,7 @@ index e1285c5..6f3cdf5 100644
      /* A delay slot can also be somebody's branch target. Arriving through the
       * branch, it runs as part of that transfer; arriving by a jump straight to
       * its address, it is an ordinary instruction. Both paths are real, so it
-@@ -565,17 +594,6 @@ static void emit_function(ectx *c, const a_func *fn) {
+@@ -565,17 +580,6 @@ static void emit_function(ectx *c, const a_func *fn) {
          fprintf(f, " * Contains a computed jump routed through the dispatch table.\n");
      fprintf(f, " * ------------------------------------------------------------- */\n");
  

@@ -1,0 +1,1132 @@
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 8809bed..ab2395f 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -43,3 +43,10 @@ add_test(NAME ctors COMMAND test_ctors)
+ add_executable(test_raster test_raster.c)
+ target_link_libraries(test_raster PRIVATE psprecomp)
+ add_test(NAME raster COMMAND test_raster)
++
++# The interpreter oracle. Hand-written encodings only; the delay-slot cases are
++# the ones that matter, since that is where interp.c stops sharing code with
++# the emitter.
++add_executable(test_interp test_interp.c)
++target_link_libraries(test_interp PRIVATE allegrex_core)
++add_test(NAME interp COMMAND test_interp)
+diff --git a/tests/test_interp.c b/tests/test_interp.c
+new file mode 100644
+index 0000000..106d4e3
+--- /dev/null
++++ b/tests/test_interp.c
+@@ -0,0 +1,339 @@
++/* Interpreter oracle tests. Every encoding here is hand-written from the
++ * MIPS32r2 manual and the Allegrex extensions — no game data, no ROM, no disc
++ * image.
++ *
++ * An oracle nobody has checked is worse than no oracle: it turns every real
++ * divergence into an argument about which side is wrong. So these tests focus
++ * on the parts of interp.c that are *not* shared with the emitter, because the
++ * shared parts (decode, the recomp_rt helpers, memory) are covered elsewhere
++ * and cannot produce a false divergence anyway.
++ *
++ * That means, above all, delay slots — described in the architecture notes as
++ * "the single most error-prone thing in MIPS recompilation".
++ */
++
++#include "interp.h"
++#include "decode.h"
++
++#include "psprecomp/cpu.h"
++#include "psprecomp/mem.h"
++
++#include <stdio.h>
++#include <string.h>
++
++static int failures;
++
++#define CHECK(cond, ...)                                       \
++    do {                                                       \
++        if (!(cond)) {                                         \
++            printf("FAIL %s:%d: ", __FILE__, __LINE__);        \
++            printf(__VA_ARGS__);                               \
++            printf("\n");                                      \
++            failures++;                                        \
++        }                                                      \
++    } while (0)
++
++/* Somewhere in mapped RAM to assemble test programs into. */
++#define CODE  0x08900000u
++#define DATA  0x08910000u
++#define DONE  0x0DEAD000u   /* $ra sentinel: never mapped to code */
++
++static void load(uint32_t addr, const uint32_t *words, unsigned n) {
++    for (unsigned i = 0; i < n; i++) psp_write32(addr + i * 4, words[i]);
++}
++
++/* Run a word sequence from CODE with a clean register file. Returns the run. */
++static psp_interp run(const uint32_t *words, unsigned n, uint64_t budget) {
++    memset(&psp_cpu, 0, sizeof psp_cpu);
++    load(CODE, words, n);
++    psp_interp it;
++    psp_interp_init(&it, CODE, DONE, budget);
++    psp_interp_run(&it);
++    return it;
++}
++
++#define R(name) psp_cpu.r[PSP_REG_##name]
++
++/* ---- basics -------------------------------------------------------------- */
++
++static void test_alu(void) {
++    /* addiu $v0,$zero,5 ; addiu $v1,$zero,7 ; addu $a0,$v0,$v1 ; jr $ra ; nop */
++    static const uint32_t p[] = {
++        0x24020005, 0x24030007, 0x00432021, 0x03E00008, 0x00000000,
++    };
++    psp_interp it = run(p, 5, 100);
++    CHECK(it.status == I_OK_RETURN, "alu: %s", psp_interp_status_str(it.status));
++    CHECK(R(V0) == 5, "addiu v0: got %u", R(V0));
++    CHECK(R(V1) == 7, "addiu v1: got %u", R(V1));
++    CHECK(R(A0) == 12, "addu a0: got %u", R(A0));
++}
++
++static void test_zero_is_hardwired(void) {
++    /* addiu $zero,$zero,42 — the hardware discards this, and emit.c refuses to
++     * emit it. If the interpreter let it through, every later comparison
++     * against $zero would silently disagree with the recompiled path. */
++    static const uint32_t p[] = { 0x24000000 | 42, 0x03E00008, 0x00000000 };
++    psp_interp it = run(p, 3, 100);
++    CHECK(it.status == I_OK_RETURN, "zero: %s", psp_interp_status_str(it.status));
++    CHECK(psp_cpu.r[0] == 0, "$zero took a write: got %u", psp_cpu.r[0]);
++}
++
++static void test_shift_masks_amount(void) {
++    /* srlv with a shift amount of 33: MIPS masks to 5 bits, so this is a shift
++     * by 1, not undefined behaviour. This is why psp_srl exists at all. */
++    static const uint32_t p[] = {
++        0x24020010,             /* addiu $v0,$zero,16   */
++        0x24030021,             /* addiu $v1,$zero,33   */
++        0x00622006 | (4 << 11), /* srlv  $a0,$v0,$v1    */
++        0x03E00008, 0x00000000,
++    };
++    psp_interp it = run(p, 5, 100);
++    CHECK(it.status == I_OK_RETURN, "shift: %s", psp_interp_status_str(it.status));
++    CHECK(R(A0) == 8, "srlv masked to 5 bits: got %u, want 8", R(A0));
++}
++
++static void test_load_store(void) {
++    static const uint32_t p[] = {
++        0x3C080891,             /* lui   $t0,0x0891     */
++        0x2409ABCD,             /* addiu $t1,$zero,0xFFFFABCD (sign-extended) */
++        0xAD090000,             /* sw    $t1,0($t0)     */
++        0x8D0A0000,             /* lw    $t2,0($t0)     */
++        0x910B0000,             /* lbu   $t3,0($t0)     */
++        0x03E00008, 0x00000000,
++    };
++    psp_interp it = run(p, 7, 100);
++    CHECK(it.status == I_OK_RETURN, "ldst: %s", psp_interp_status_str(it.status));
++    CHECK(R(T2) == 0xFFFFABCDu, "lw round-trip: got %08X", R(T2));
++    CHECK(R(T3) == 0xCD, "lbu low byte (LE): got %02X", R(T3));
++}
++
++/* ---- delay slots: the part that can actually be wrong --------------------- */
++
++static void test_branch_taken_runs_slot(void) {
++    /* beq $zero,$zero,+2 with `addiu $v0,$zero,1` in the slot.
++     * Taken branch: the slot still executes. */
++    static const uint32_t p[] = {
++        0x10000002,             /* beq   $zero,$zero, +2 -> CODE+0x0C */
++        0x24020001,             /* addiu $v0,$zero,1   (delay slot)   */
++        0x24030001,             /* addiu $v1,$zero,1   (skipped)      */
++        0x03E00008, 0x00000000,
++    };
++    psp_interp it = run(p, 5, 100);
++    CHECK(it.status == I_OK_RETURN, "btaken: %s", psp_interp_status_str(it.status));
++    CHECK(R(V0) == 1, "delay slot ran on taken branch");
++    CHECK(R(V1) == 0, "branch skipped the instruction after the slot");
++}
++
++static void test_branch_not_taken_still_runs_slot(void) {
++    /* bne $zero,$zero (never taken). A *plain* branch runs its delay slot
++     * regardless — this is the case people get wrong by assuming the slot
++     * belongs to the taken path. */
++    static const uint32_t p[] = {
++        0x14000002,             /* bne   $zero,$zero,+2 (not taken)   */
++        0x24020001,             /* addiu $v0,$zero,1   (delay slot)   */
++        0x24030001,             /* addiu $v1,$zero,1   (falls through)*/
++        0x03E00008, 0x00000000,
++    };
++    psp_interp it = run(p, 5, 100);
++    CHECK(it.status == I_OK_RETURN, "bnottaken: %s", psp_interp_status_str(it.status));
++    CHECK(R(V0) == 1, "plain branch must run its slot even when not taken");
++    CHECK(R(V1) == 1, "execution fell through past the slot");
++}
++
++static void test_likely_branch_nullifies_slot(void) {
++    /* bnel $zero,$zero (not taken) — a *likely* branch nullifies its slot.
++     * The mirror image of the previous test, and the reason the two forms
++     * cannot share a code path. */
++    static const uint32_t p[] = {
++        0x54000002,             /* bnel  $zero,$zero,+2 (not taken)   */
++        0x24020001,             /* addiu $v0,$zero,1   (NULLIFIED)    */
++        0x24030001,             /* addiu $v1,$zero,1   (falls through)*/
++        0x03E00008, 0x00000000,
++    };
++    psp_interp it = run(p, 5, 100);
++    CHECK(it.status == I_OK_RETURN, "likely: %s", psp_interp_status_str(it.status));
++    CHECK(R(V0) == 0, "not-taken likely branch must nullify its slot: v0=%u", R(V0));
++    CHECK(R(V1) == 1, "execution fell through past the nullified slot");
++}
++
++static void test_jal_links_past_slot(void) {
++    /* jal to the epilogue. $ra must be pc+8 — past the delay slot, not pc+4. */
++    static const uint32_t target = (CODE + 0x10) >> 2;
++    const uint32_t p[] = {
++        0x0C000000 | (target & 0x03FFFFFF),  /* jal CODE+0x10 */
++        0x00000000,                          /* delay slot    */
++        0x24020001,                          /* skipped       */
++        0x24030001,                          /* skipped       */
++        0x03E00008, 0x00000000,              /* jr $ra        */
++    };
++    memset(&psp_cpu, 0, sizeof psp_cpu);
++    load(CODE, p, 6);
++    psp_interp it;
++    psp_interp_init(&it, CODE, DONE, 100);
++    psp_interp_step(&it);                    /* the jal + its slot */
++    CHECK(psp_cpu.r[PSP_RA_INDEX] == CODE + 8,
++          "jal $ra: got %08X, want %08X", psp_cpu.r[PSP_RA_INDEX], CODE + 8);
++    CHECK(it.pc == CODE + 0x10, "jal target: got %08X", it.pc);
++}
++
++static void test_jr_target_read_before_slot(void) {
++    /* The classic. `jr $t9` where the delay slot reassigns $t9: the jump uses
++     * the value $t9 held *before* the slot ran. An interpreter that reads the
++     * register after executing the slot goes somewhere else entirely, and the
++     * resulting divergence looks like a wild jump with no obvious cause. */
++    static const uint32_t p[] = {
++        0x3C190890,             /* lui   $t9,0x0890          */
++        0x37390010,             /* ori   $t9,$t9,0x0010      -> CODE+0x10 */
++        0x03200008,             /* jr    $t9                 */
++        0x3C190DEA,             /* lui   $t9,0x0DEA (slot: clobbers $t9)  */
++        0x24020007,             /* CODE+0x10: addiu $v0,$zero,7           */
++        0x03E00008, 0x00000000,
++    };
++    psp_interp it = run(p, 7, 100);
++    CHECK(it.status == I_OK_RETURN, "jr: %s", psp_interp_status_str(it.status));
++    CHECK(R(V0) == 7, "jr used the pre-slot register value (v0=%u, want 7)", R(V0));
++    CHECK(R(T9) == 0x0DEA0000u, "the slot still executed: t9=%08X", R(T9));
++}
++
++static void test_link_branch_always_links(void) {
++    /* bltzal with a non-negative operand: not taken, but a *link* branch writes
++     * $ra either way. Missing this leaves $ra stale and the eventual return
++     * goes to whatever the last call left behind. */
++    static const uint32_t p[] = {
++        0x04100002,             /* bltzal $zero,+2  (not taken, $zero >= 0) */
++        0x00000000,             /* delay slot */
++        0x03E00008, 0x00000000,
++    };
++    memset(&psp_cpu, 0, sizeof psp_cpu);
++    load(CODE, p, 4);
++    psp_interp it;
++    psp_interp_init(&it, CODE, DONE, 100);
++    psp_interp_step(&it);
++    CHECK(psp_cpu.r[PSP_RA_INDEX] == CODE + 8,
++          "bltzal links even when not taken: got %08X", psp_cpu.r[PSP_RA_INDEX]);
++}
++
++/* ---- termination --------------------------------------------------------- */
++
++static void test_budget_stops_infinite_loop(void) {
++    /* b . — branches to itself forever. The budget is what stops a bring-up
++     * run from hanging instead of reporting. */
++    static const uint32_t p[] = { 0x1000FFFF, 0x00000000 };
++    psp_interp it = run(p, 2, 50);
++    CHECK(it.status == I_BUDGET, "infinite loop must hit the budget, got %s",
++          psp_interp_status_str(it.status));
++    CHECK(it.executed >= 50, "budget counted %llu", (unsigned long long)it.executed);
++}
++
++static void test_syscall_traps(void) {
++    /* syscall must stop the run rather than be skipped. A skipped syscall is
++     * an HLE call that silently did not happen — the worst failure mode, since
++     * execution continues on state that was never produced. */
++    static const uint32_t p[] = { 0x0000000C, 0x03E00008, 0x00000000 };
++    psp_interp it = run(p, 3, 100);
++    CHECK(it.status == I_TRAP_SYSCALL, "syscall trap: got %s",
++          psp_interp_status_str(it.status));
++    CHECK(it.fault_pc == CODE, "fault pc: got %08X", it.fault_pc);
++}
++
++/* ---- drift guard ---------------------------------------------------------
++ *
++ * The oracle is only useful while the interpreter and the emitter implement
++ * the same instruction set. If the emitter grows a case the interpreter lacks,
++ * the interpreter traps on real code and the divergence report blames the game
++ * for a hole in the oracle.
++ *
++ * These are real encodings for the ops emit.c translates. Any that trap here
++ * are ops the emitter can emit and the interpreter cannot run. */
++
++static void test_no_drift_from_emitter(void) {
++    static const struct { uint32_t word; const char *what; } ops[] = {
++        { 0x00851020, "add"   }, { 0x00851022, "sub"   }, { 0x00851024, "and"   },
++        { 0x00851025, "or"    }, { 0x00851026, "xor"   }, { 0x00851027, "nor"   },
++        { 0x0085102A, "slt"   }, { 0x0085102B, "sltu"  },
++        { 0x0085102C, "max"   }, { 0x0085102D, "min"   },
++        { 0x0085100A, "movz"  }, { 0x0085100B, "movn"  },
++        { 0x24850010, "addiu" }, { 0x28850010, "slti"  }, { 0x2C850010, "sltiu" },
++        { 0x30850010, "andi"  }, { 0x34850010, "ori"   }, { 0x38850010, "xori"  },
++        { 0x3C050010, "lui"   },
++        { 0x00052880, "sll"   }, { 0x00052882, "srl"   }, { 0x00052883, "sra"   },
++        { 0x00A42804, "sllv"  }, { 0x00A42806, "srlv"  }, { 0x00A42807, "srav"  },
++        { 0x00052046, "rotr"  },
++        { 0x00A02816, "clz"   }, { 0x00A02817, "clo"   },
++        { 0x7C052420, "seb"   }, { 0x7C052620, "seh"   },
++        { 0x7C0528A0, "wsbh"  }, { 0x7C0528E0, "wsbw"  },
++        { 0x7CA53C00, "ext"   }, { 0x7CA53C04, "ins"   },
++        { 0x00A40018, "mult"  }, { 0x00A40019, "multu" },
++        { 0x00A4001A, "div"   }, { 0x00A4001B, "divu"  },
++        { 0x00A4001C, "madd"  }, { 0x00A4001D, "maddu" },
++        { 0x00002810, "mfhi"  }, { 0x00002812, "mflo"  },
++        { 0x00A00011, "mthi"  }, { 0x00A00013, "mtlo"  },
++        { 0x80A40000, "lb"    }, { 0x90A40000, "lbu"   },
++        { 0x84A40000, "lh"    }, { 0x94A40000, "lhu"   },
++        { 0x8CA40000, "lw"    },
++        { 0x88A40000, "lwl"   }, { 0x98A40000, "lwr"   },
++        { 0xA0A40000, "sb"    }, { 0xA4A40000, "sh"    }, { 0xACA40000, "sw"    },
++        { 0xA8A40000, "swl"   }, { 0xB8A40000, "swr"   },
++        { 0xBCA40000, "cache" }, { 0xCCA40000, "pref"  },
++        { 0x44852000, "mtc1"  }, { 0x44052000, "mfc1"  },
++        { 0xC4A40000, "lwc1"  }, { 0xE4A40000, "swc1"  },
++        { 0x46062100, "add.s" }, { 0x46062101, "sub.s" },
++        { 0x46062102, "mul.s" }, { 0x46062103, "div.s" },
++        { 0x46002106, "mov.s" }, { 0x46002107, "neg.s" },
++        { 0x46002105, "abs.s" }, { 0x46002104, "sqrt.s"},
++        { 0x40056000, "mfc0"  }, { 0x40856000, "mtc0"  },
++    };
++
++    CHECK(psp_mem_init() == 0, "memory init for drift guard");
++    memset(&psp_cpu, 0, sizeof psp_cpu);
++
++    for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++) {
++        a_insn in;
++        /* Re-seed the base register every iteration: several entries in the
++         * table write $a1, and a clobbered base turns every later load and
++         * store into an unmapped access that has nothing to do with drift. */
++        psp_cpu.r[PSP_REG_A1] = DATA;
++        a_decode(ops[i].word, CODE, &in);
++        CHECK(in.op != A_INVALID, "%s: 0x%08X did not decode",
++              ops[i].what, ops[i].word);
++        if (in.op == A_INVALID) continue;
++        psp_interp_status st = psp_interp_exec_one(&in);
++        CHECK(st == I_RUNNING, "%s: emitter translates it, interpreter returned %s",
++              ops[i].what, psp_interp_status_str(st));
++    }
++    psp_mem_free();
++}
++
++/* -------------------------------------------------------------------------- */
++
++int main(void) {
++    if (psp_mem_init() != 0) {
++        printf("FAIL: psp_mem_init\n");
++        return 1;
++    }
++
++    test_alu();
++    test_zero_is_hardwired();
++    test_shift_masks_amount();
++    test_load_store();
++
++    test_branch_taken_runs_slot();
++    test_branch_not_taken_still_runs_slot();
++    test_likely_branch_nullifies_slot();
++    test_jal_links_past_slot();
++    test_jr_target_read_before_slot();
++    test_link_branch_always_links();
++
++    test_budget_stops_infinite_loop();
++    test_syscall_traps();
++
++    psp_mem_free();
++    test_no_drift_from_emitter();
++
++    if (failures) {
++        printf("%d failure(s)\n", failures);
++        return 1;
++    }
++    printf("interp: all checks passed\n");
++    return 0;
++}
+diff --git a/tools/allegrexrecomp/CMakeLists.txt b/tools/allegrexrecomp/CMakeLists.txt
+index e9f93d4..968cb3a 100644
+--- a/tools/allegrexrecomp/CMakeLists.txt
++++ b/tools/allegrexrecomp/CMakeLists.txt
+@@ -9,6 +9,7 @@ add_library(allegrex_core STATIC
+     container.c
+     analyze.c
+     emit.c
++    interp.c
+     keys.c
+     crypto/aes.c
+     crypto/cmac.c
+@@ -20,6 +21,11 @@ target_include_directories(allegrex_core PUBLIC
+     ${CMAKE_CURRENT_SOURCE_DIR}
+ )
+ 
++# interp.c runs on the runtime's CPU state, memory model and semantic helpers —
++# sharing them with the recompiled path is the property that makes it a useful
++# oracle at all. PUBLIC so the tests inherit both.
++target_link_libraries(allegrex_core PUBLIC psprecomp)
++
+ add_executable(allegrexrecomp
+     main.c
+ )
+diff --git a/tools/allegrexrecomp/decode.c b/tools/allegrexrecomp/decode.c
+index 7512695..23b015d 100644
+--- a/tools/allegrexrecomp/decode.c
++++ b/tools/allegrexrecomp/decode.c
+@@ -789,3 +789,19 @@ int a_format(const a_insn *in, char *buf, int buflen) {
+         return snprintf(buf, buflen, ".word     0x%08X", in->raw);
+     }
+ }
++
++/* vfim carries a half-precision float. Expanding it here keeps the runtime
++ * dealing only in single precision. Shared by the emitter and the interpreter
++ * so both read the same constant out of the same encoding. */
++float a_half_to_float(uint16_t h) {
++    const uint32_t sign = (uint32_t)(h >> 15) << 31;
++    const uint32_t exp  = (h >> 10) & 0x1F;
++    const uint32_t man  = h & 0x3FF;
++    uint32_t bits;
++    if (exp == 0)        bits = sign | (man ? ((127 - 15 + 1) << 23) | (man << 13) : 0);
++    else if (exp == 31)  bits = sign | 0x7F800000u | (man << 13);
++    else                 bits = sign | ((exp + 127 - 15) << 23) | (man << 13);
++    float f;
++    memcpy(&f, &bits, sizeof f);
++    return f;
++}
+diff --git a/tools/allegrexrecomp/decode.h b/tools/allegrexrecomp/decode.h
+index 481001d..00a2a70 100644
+--- a/tools/allegrexrecomp/decode.h
++++ b/tools/allegrexrecomp/decode.h
+@@ -159,6 +159,13 @@ int a_format(const a_insn *in, char *buf, int buflen);
+ const char *a_reg_name(unsigned idx);
+ const char *a_freg_name(unsigned idx);
+ 
++/* Expand the half-precision immediate carried by vfim. This lives with the
++ * decoder rather than in one consumer because both the emitter and the
++ * interpreter need it, and two copies of a float conversion is exactly the
++ * kind of drift the oracle exists to detect — it would report a divergence
++ * whose cause was the oracle itself. */
++float a_half_to_float(uint16_t h);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/tools/allegrexrecomp/interp.c b/tools/allegrexrecomp/interp.c
+new file mode 100644
+index 0000000..e98e55d
+--- /dev/null
++++ b/tools/allegrexrecomp/interp.c
+@@ -0,0 +1,439 @@
++/* allegrexrecomp — the Allegrex interpreter oracle. See interp.h.
++ *
++ * The switch below deliberately mirrors emit.c's emit_simple() case for case.
++ * That looks like duplication and is not: emit_simple *writes C text*, this
++ * *executes*, and neither can be expressed in terms of the other without a
++ * refactor that would put a layer of indirection between the emitter and the
++ * code it generates.
++ *
++ * What stops the two drifting is that neither one implements any semantics.
++ * Both call the same helpers out of recomp_rt.h and vfpu.h, so a bug in `psp_sra`
++ * or `psp_div` is present identically on both sides and cannot show up as a
++ * false divergence. The parts that *can* drift are the dispatch and the
++ * sequencing — which is exactly what test_interp.c's coverage guard checks.
++ */
++
++#include "interp.h"
++
++#include "decode.h"
++
++#include "psprecomp/cpu.h"
++#include "psprecomp/mem.h"
++#include "psprecomp/recomp_rt.h"
++#include "psprecomp/vfpu.h"
++
++#include <string.h>
++
++/* ---- register access ------------------------------------------------------
++ *
++ * $zero is hardwired. The hardware discards writes to it; emit.c does the same
++ * by refusing to emit them (its DEST_ZERO check). Dropping them here keeps the
++ * two paths identical -- and a stray write would corrupt a register the rest of
++ * the code is entitled to assume is always zero. */
++
++#define R(i)   (psp_cpu.r[(i)])
++
++static void setr(unsigned idx, uint32_t v) {
++    if (idx != 0) psp_cpu.r[idx] = v;
++}
++
++/* ---- tracing --------------------------------------------------------------
++ *
++ * The trace is one line per step: address, mnemonic, then whatever state the
++ * step changed. Memory writes are logged where they happen rather than
++ * reconstructed afterwards, so a store to an address nothing later reads is
++ * still visible -- those are exactly the ones worth seeing.
++ *
++ * `g_trace` is a file-static rather than a parameter so the executor's
++ * signature stays about instructions. This is a single-threaded development
++ * tool; if that ever changes, this is the thing to fix. */
++
++static psp_interp *g_trace;
++
++static void trace_mem(char kind, uint32_t addr, uint32_t val) {
++    if (g_trace && g_trace->trace)
++        fprintf(g_trace->trace, " M%c[%08X]=%08X", kind, addr, val);
++}
++
++/* ---- store helpers --------------------------------------------------------
++ *
++ * Wrapped only so stores land in the trace. The write itself goes through the
++ * same psp_write* the recompiled code uses. */
++
++static void st8 (uint32_t a, uint8_t  v) { psp_write8 (a, v); trace_mem('8', a, v); }
++static void st16(uint32_t a, uint16_t v) { psp_write16(a, v); trace_mem('H', a, v); }
++static void st32(uint32_t a, uint32_t v) { psp_write32(a, v); trace_mem('W', a, v); }
++
++/* ---- one instruction, no control flow -------------------------------------
++ *
++ * Returns I_RUNNING when the instruction executed, or a trap status. Control
++ * transfer is not handled here: the caller owns pc.
++ *
++ * Case order follows emit.c so the two can be diffed by eye when either
++ * changes. */
++
++static psp_interp_status exec_simple(const a_insn *in) {
++    switch (in->op) {
++    case A_NOP:
++        return I_RUNNING;
++
++    /* --- ALU, register --- */
++    case A_ADD: case A_ADDU: setr(in->rd, R(in->rs) + R(in->rt));  return I_RUNNING;
++    case A_SUB: case A_SUBU: setr(in->rd, R(in->rs) - R(in->rt));  return I_RUNNING;
++    case A_AND:  setr(in->rd, R(in->rs) &  R(in->rt));             return I_RUNNING;
++    case A_OR:   setr(in->rd, R(in->rs) |  R(in->rt));             return I_RUNNING;
++    case A_XOR:  setr(in->rd, R(in->rs) ^  R(in->rt));             return I_RUNNING;
++    case A_NOR:  setr(in->rd, ~(R(in->rs) | R(in->rt)));           return I_RUNNING;
++    case A_SLT:  setr(in->rd, psp_slt (R(in->rs), R(in->rt)));     return I_RUNNING;
++    case A_SLTU: setr(in->rd, psp_sltu(R(in->rs), R(in->rt)));     return I_RUNNING;
++    case A_MAX:  setr(in->rd, psp_max (R(in->rs), R(in->rt)));     return I_RUNNING;
++    case A_MIN:  setr(in->rd, psp_min (R(in->rs), R(in->rt)));     return I_RUNNING;
++    case A_MOVZ: if (R(in->rt) == 0) setr(in->rd, R(in->rs));      return I_RUNNING;
++    case A_MOVN: if (R(in->rt) != 0) setr(in->rd, R(in->rs));      return I_RUNNING;
++
++    /* --- ALU, immediate --- */
++    case A_ADDI: case A_ADDIU: setr(in->rt, R(in->rs) + (uint32_t)in->imm); return I_RUNNING;
++    case A_SLTI:  setr(in->rt, psp_slt (R(in->rs), (uint32_t)in->imm)); return I_RUNNING;
++    case A_SLTIU: setr(in->rt, psp_sltu(R(in->rs), (uint32_t)in->imm)); return I_RUNNING;
++    case A_ANDI:  setr(in->rt, R(in->rs) & (uint32_t)in->imm);          return I_RUNNING;
++    case A_ORI:   setr(in->rt, R(in->rs) | (uint32_t)in->imm);          return I_RUNNING;
++    case A_XORI:  setr(in->rt, R(in->rs) ^ (uint32_t)in->imm);          return I_RUNNING;
++    case A_LUI:   setr(in->rt, (uint32_t)in->imm << 16);                return I_RUNNING;
++
++    /* --- shifts. The helpers exist because C leaves shift-by->=32 undefined
++       while MIPS masks the amount to five bits. --- */
++    case A_SLL:   setr(in->rd, psp_sll (R(in->rt), in->sa));       return I_RUNNING;
++    case A_SRL:   setr(in->rd, psp_srl (R(in->rt), in->sa));       return I_RUNNING;
++    case A_SRA:   setr(in->rd, psp_sra (R(in->rt), in->sa));       return I_RUNNING;
++    case A_ROTR:  setr(in->rd, psp_rotr(R(in->rt), in->sa));       return I_RUNNING;
++    case A_SLLV:  setr(in->rd, psp_sll (R(in->rt), R(in->rs)));    return I_RUNNING;
++    case A_SRLV:  setr(in->rd, psp_srl (R(in->rt), R(in->rs)));    return I_RUNNING;
++    case A_SRAV:  setr(in->rd, psp_sra (R(in->rt), R(in->rs)));    return I_RUNNING;
++    case A_ROTRV: setr(in->rd, psp_rotr(R(in->rt), R(in->rs)));    return I_RUNNING;
++
++    /* --- bit manipulation --- */
++    case A_CLZ:    setr(in->rd, psp_clz   (R(in->rs))); return I_RUNNING;
++    case A_CLO:    setr(in->rd, psp_clo   (R(in->rs))); return I_RUNNING;
++    case A_SEB:    setr(in->rd, psp_seb   (R(in->rt))); return I_RUNNING;
++    case A_SEH:    setr(in->rd, psp_seh   (R(in->rt))); return I_RUNNING;
++    case A_WSBH:   setr(in->rd, psp_wsbh  (R(in->rt))); return I_RUNNING;
++    case A_WSBW:   setr(in->rd, psp_wsbw  (R(in->rt))); return I_RUNNING;
++    case A_BITREV: setr(in->rd, psp_bitrev(R(in->rt))); return I_RUNNING;
++    case A_EXT:
++        setr(in->rt, psp_ext(R(in->rs), in->sa, (unsigned)in->rd + 1u));
++        return I_RUNNING;
++    case A_INS:
++        setr(in->rt, psp_ins(R(in->rt), R(in->rs), in->sa,
++                             (unsigned)in->rd - in->sa + 1u));
++        return I_RUNNING;
++
++    /* --- multiply / divide. These write HI/LO, never a GPR. --- */
++    case A_MULT:  psp_mult (R(in->rs), R(in->rt)); return I_RUNNING;
++    case A_MULTU: psp_multu(R(in->rs), R(in->rt)); return I_RUNNING;
++    case A_DIV:   psp_div  (R(in->rs), R(in->rt)); return I_RUNNING;
++    case A_DIVU:  psp_divu (R(in->rs), R(in->rt)); return I_RUNNING;
++    case A_MADD:  psp_madd (R(in->rs), R(in->rt)); return I_RUNNING;
++    case A_MADDU: psp_maddu(R(in->rs), R(in->rt)); return I_RUNNING;
++    case A_MSUB:  psp_msub (R(in->rs), R(in->rt)); return I_RUNNING;
++    case A_MSUBU: psp_msubu(R(in->rs), R(in->rt)); return I_RUNNING;
++    case A_MFHI:  setr(in->rd, psp_cpu.hi);       return I_RUNNING;
++    case A_MFLO:  setr(in->rd, psp_cpu.lo);       return I_RUNNING;
++    case A_MTHI:  psp_cpu.hi = R(in->rs);         return I_RUNNING;
++    case A_MTLO:  psp_cpu.lo = R(in->rs);         return I_RUNNING;
++
++    /* --- loads --- */
++    case A_LB:
++        setr(in->rt, (uint32_t)(int32_t)(int8_t)psp_read8(R(in->rs) + in->imm));
++        return I_RUNNING;
++    case A_LBU:
++        setr(in->rt, psp_read8(R(in->rs) + in->imm));
++        return I_RUNNING;
++    case A_LH:
++        setr(in->rt, (uint32_t)(int32_t)(int16_t)psp_read16(R(in->rs) + in->imm));
++        return I_RUNNING;
++    case A_LHU:
++        setr(in->rt, psp_read16(R(in->rs) + in->imm));
++        return I_RUNNING;
++    case A_LW: case A_LL:
++        setr(in->rt, psp_read32(R(in->rs) + in->imm));
++        return I_RUNNING;
++    case A_LWL:
++        setr(in->rt, psp_lwl(R(in->rt), R(in->rs) + in->imm));
++        return I_RUNNING;
++    case A_LWR:
++        setr(in->rt, psp_lwr(R(in->rt), R(in->rs) + in->imm));
++        return I_RUNNING;
++
++    /* --- stores --- */
++    case A_SB: st8 (R(in->rs) + in->imm, (uint8_t )R(in->rt)); return I_RUNNING;
++    case A_SH: st16(R(in->rs) + in->imm, (uint16_t)R(in->rt)); return I_RUNNING;
++    case A_SW: st32(R(in->rs) + in->imm,           R(in->rt)); return I_RUNNING;
++    case A_SWL:
++        psp_swl(R(in->rt), R(in->rs) + in->imm);
++        trace_mem('L', R(in->rs) + in->imm, R(in->rt));
++        return I_RUNNING;
++    case A_SWR:
++        psp_swr(R(in->rt), R(in->rs) + in->imm);
++        trace_mem('R', R(in->rs) + in->imm, R(in->rt));
++        return I_RUNNING;
++    case A_SC:
++        /* No multiprocessor to contend with, so the store always succeeds. */
++        st32(R(in->rs) + in->imm, R(in->rt));
++        setr(in->rt, 1);
++        return I_RUNNING;
++
++    /* Cache and prefetch hints have no meaning without a cache model. */
++    case A_CACHE: case A_PREF: case A_SYNC:
++        return I_RUNNING;
++
++    /* --- COP1, single precision only --- */
++    case A_MTC1: psp_cpu.f[in->fs] = psp_bits_to_f32(R(in->rt));      return I_RUNNING;
++    case A_MFC1: setr(in->rt, psp_f32_to_bits(psp_cpu.f[in->fs]));    return I_RUNNING;
++    case A_CTC1: psp_cpu.fcr31 = R(in->rt);                           return I_RUNNING;
++    case A_CFC1: setr(in->rt, psp_cpu.fcr31);                         return I_RUNNING;
++    case A_LWC1: psp_cpu.f[in->ft] = psp_read_f32(R(in->rs) + in->imm); return I_RUNNING;
++    case A_SWC1:
++        psp_write_f32(R(in->rs) + in->imm, psp_cpu.f[in->ft]);
++        trace_mem('F', R(in->rs) + in->imm, psp_f32_to_bits(psp_cpu.f[in->ft]));
++        return I_RUNNING;
++    case A_ADD_S: psp_cpu.f[in->fd] = psp_cpu.f[in->fs] + psp_cpu.f[in->ft]; return I_RUNNING;
++    case A_SUB_S: psp_cpu.f[in->fd] = psp_cpu.f[in->fs] - psp_cpu.f[in->ft]; return I_RUNNING;
++    case A_MUL_S: psp_cpu.f[in->fd] = psp_cpu.f[in->fs] * psp_cpu.f[in->ft]; return I_RUNNING;
++    case A_DIV_S: psp_cpu.f[in->fd] = psp_cpu.f[in->fs] / psp_cpu.f[in->ft]; return I_RUNNING;
++    case A_MOV_S: psp_cpu.f[in->fd] =  psp_cpu.f[in->fs];                    return I_RUNNING;
++    case A_NEG_S: psp_cpu.f[in->fd] = -psp_cpu.f[in->fs];                    return I_RUNNING;
++    case A_ABS_S: psp_cpu.f[in->fd] = psp_fabs (psp_cpu.f[in->fs]);          return I_RUNNING;
++    case A_SQRT_S:psp_cpu.f[in->fd] = psp_fsqrt(psp_cpu.f[in->fs]);          return I_RUNNING;
++    case A_CVT_S_W:
++        psp_cpu.f[in->fd] = (float)(int32_t)psp_f32_to_bits(psp_cpu.f[in->fs]);
++        return I_RUNNING;
++    case A_CVT_W_S: case A_TRUNC_W_S:
++        psp_cpu.f[in->fd] = psp_bits_to_f32((uint32_t)(int32_t)psp_cpu.f[in->fs]);
++        return I_RUNNING;
++    case A_C_COND_S:
++        psp_fpu_set_cond(psp_fcmp(in->fcond, psp_cpu.f[in->fs], psp_cpu.f[in->ft]));
++        return I_RUNNING;
++
++    /* --- COP0. There is no privileged state to model. --- */
++    case A_MFC0: case A_CFC0: case A_MFIC: setr(in->rt, 0); return I_RUNNING;
++    case A_MTC0: case A_CTC0: case A_MTIC:                  return I_RUNNING;
++
++    /* --- VFPU: the subset with a real implementation behind it. --- */
++    case A_LV_S: psp_lv_s(in->vt, R(in->rs) + (in->imm & ~3)); return I_RUNNING;
++    case A_LV_Q: psp_lv_q(in->vt, R(in->rs) + (in->imm & ~3)); return I_RUNNING;
++    case A_SV_S: psp_sv_s(in->vt, R(in->rs) + (in->imm & ~3)); return I_RUNNING;
++    case A_SV_Q: psp_sv_q(in->vt, R(in->rs) + (in->imm & ~3)); return I_RUNNING;
++
++    case A_VADD: psp_vadd(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VSUB: psp_vsub(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VMUL: psp_vmul(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VDIV: psp_vdiv(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VMIN: psp_vmin(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VMAX: psp_vmax(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VDOT: psp_vdot(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VSCL: psp_vscl(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VCMP: psp_vcmp(in->vd & 0xF, in->vs, in->vt, in->vsize); return I_RUNNING;
++
++    /* VFPU4 unary ops, all through one runtime entry point. The selector table
++     * mirrors emit.c's; keeping the same order makes them diffable. */
++    case A_VMOV: case A_VABS: case A_VNEG: case A_VZERO: case A_VONE:
++    case A_VRCP: case A_VRSQ: case A_VSQRT: case A_VSIN: case A_VCOS:
++    case A_VEXP2: case A_VLOG2: case A_VSAT0: case A_VSAT1:
++    case A_VNRCP: case A_VNSIN: case A_VASIN: case A_VF2IZ: case A_VI2F: {
++        static const struct { a_op op; int sel; } U[] = {
++            { A_VMOV, PSP_VU_MOV },   { A_VABS, PSP_VU_ABS },
++            { A_VNEG, PSP_VU_NEG },   { A_VZERO,PSP_VU_ZERO },
++            { A_VONE, PSP_VU_ONE },   { A_VRCP, PSP_VU_RCP },
++            { A_VRSQ, PSP_VU_RSQ },   { A_VSQRT,PSP_VU_SQRT },
++            { A_VSIN, PSP_VU_SIN },   { A_VCOS, PSP_VU_COS },
++            { A_VEXP2,PSP_VU_EXP2 },  { A_VLOG2,PSP_VU_LOG2 },
++            { A_VSAT0,PSP_VU_SAT0 },  { A_VSAT1,PSP_VU_SAT1 },
++            { A_VNRCP,PSP_VU_NRCP },  { A_VNSIN,PSP_VU_NSIN },
++            { A_VASIN,PSP_VU_ASIN },  { A_VF2IZ,PSP_VU_F2IZ },
++            { A_VI2F, PSP_VU_I2F },
++        };
++        for (size_t k = 0; k < sizeof U / sizeof U[0]; k++) {
++            if (U[k].op != in->op) continue;
++            psp_vunary(U[k].sel, in->vd, in->vs, in->vsize);
++            return I_RUNNING;
++        }
++        return I_TRAP_VFPU;
++    }
++
++    case A_VIDT: psp_vidt(in->vd, in->vsize);            return I_RUNNING;
++    case A_VCST: psp_vcst(in->vd, in->vs, in->vsize);    return I_RUNNING;
++    case A_VIIM: psp_vimm(in->vd, (float)in->imm);       return I_RUNNING;
++    case A_VFIM: psp_vimm(in->vd, a_half_to_float((uint16_t)in->imm)); return I_RUNNING;
++
++    case A_VMMUL: psp_vmmul(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VTFM2: case A_VTFM3: case A_VTFM4:
++        psp_vtfm(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VMSCL: psp_vmscl(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VMMOV: psp_vmmov(in->vd, in->vs, in->vsize);  return I_RUNNING;
++    case A_VMIDT: psp_vmidt(in->vd, in->vsize);          return I_RUNNING;
++    case A_VMZERO:psp_vmzero(in->vd, in->vsize);         return I_RUNNING;
++    case A_VMONE: psp_vmone(in->vd, in->vsize);          return I_RUNNING;
++
++    /* Prefixes compute nothing: they arm a register that rewrites the operands
++     * of the *next* vector instruction. Skipping them would not "lose a
++     * no-op" -- it would make every following prefixed op silently compute the
++     * unprefixed answer, which is worse than trapping. */
++    case A_VPFXS: psp_vfpu_set_prefix(0, in->raw & 0xFFFFFF); return I_RUNNING;
++    case A_VPFXT: psp_vfpu_set_prefix(1, in->raw & 0xFFFFFF); return I_RUNNING;
++    case A_VPFXD: psp_vfpu_set_prefix(2, in->raw & 0xFFFFFF); return I_RUNNING;
++
++    case A_SYSCALL: return I_TRAP_SYSCALL;
++    case A_BREAK:   return I_TRAP_BREAK;
++    case A_INVALID: return I_TRAP_INVALID;
++
++    default:
++        /* Everything the decoder names but nothing implements -- the rest of
++         * the VFPU, mostly. Trapping matches what emit.c generates
++         * (psp_unimplemented), so both paths stop at the same instruction
++         * instead of one of them inventing an answer. */
++        return I_TRAP_VFPU;
++    }
++}
++
++/* ---- branch conditions ----------------------------------------------------
++ *
++ * Mirrors emit.c's branch_cond(). Evaluated against register state *before*
++ * the delay slot runs, which is the whole subtlety of the thing. */
++
++static int branch_taken(const a_insn *in) {
++    switch (in->op) {
++    case A_BEQ:  case A_BEQL:  return R(in->rs) == R(in->rt);
++    case A_BNE:  case A_BNEL:  return R(in->rs) != R(in->rt);
++    case A_BLEZ: case A_BLEZL: return (int32_t)R(in->rs) <= 0;
++    case A_BGTZ: case A_BGTZL: return (int32_t)R(in->rs) >  0;
++    case A_BLTZ: case A_BLTZL:
++    case A_BLTZAL: case A_BLTZALL: return (int32_t)R(in->rs) <  0;
++    case A_BGEZ: case A_BGEZL:
++    case A_BGEZAL: case A_BGEZALL: return (int32_t)R(in->rs) >= 0;
++    case A_BC1T: case A_BC1TL: return  psp_fpu_cond();
++    case A_BC1F: case A_BC1FL: return !psp_fpu_cond();
++    default:                   return 0;
++    }
++}
++
++/* ---- stepping -------------------------------------------------------------
++ *
++ * A branch and its delay slot are one step. The hardware never exposes a point
++ * between them where the branch has been decided but the slot has not run, so
++ * a trace that stopped there would describe a state the machine cannot be in.
++ *
++ * Three things here are easy to get wrong and are the usual source of
++ * recompilation bugs:
++ *
++ *   1. An indirect jump's target must be read *before* the delay slot runs.
++ *      `jr $t9` followed by a slot that reassigns $t9 jumps to the old value.
++ *   2. A *link* branch writes $ra whether or not it is taken.
++ *   3. A *likely* branch nullifies its delay slot when not taken -- the slot
++ *      does not execute at all. Plain branches always execute it.
++ */
++
++void psp_interp_init(psp_interp *it, uint32_t entry, uint32_t ra_sentinel,
++                     uint64_t budget) {
++    memset(it, 0, sizeof *it);
++    it->pc          = entry;
++    it->ra_sentinel = ra_sentinel;
++    it->budget      = budget;
++    it->status      = I_RUNNING;
++    psp_cpu.r[PSP_RA_INDEX] = ra_sentinel;
++}
++
++psp_interp_status psp_interp_step(psp_interp *it) {
++    uint32_t before[PSP_NUM_GPR];
++    a_insn in, slot;
++    const uint32_t pc = it->pc;
++
++    if (it->budget && it->executed >= it->budget)
++        return it->status = I_BUDGET;
++
++    a_decode(psp_read32(pc), pc, &in);
++
++    g_trace = it;
++    if (it->trace) {
++        char buf[96];
++        a_format(&in, buf, sizeof buf);
++        fprintf(it->trace, "%08X  %s", pc, buf);
++        if (it->trace_regs) memcpy(before, psp_cpu.r, sizeof before);
++    }
++
++    psp_interp_status st = I_RUNNING;
++
++    if (in.has_delay_slot) {
++        /* Capture everything that the delay slot could invalidate, first. */
++        const int taken   = in.is_branch ? branch_taken(&in) : 0;
++        const int uncond  = in.is_jump;
++        const uint32_t rs_now = R(in.rs);          /* for jr/jalr */
++        uint32_t next;
++
++        if (in.is_call) setr(in.is_indirect ? in.rd : PSP_RA_INDEX, pc + 8);
++
++        if (uncond)                 next = in.is_indirect ? rs_now : in.target;
++        else if (taken)             next = in.target;
++        else                        next = pc + 8;
++
++        /* A not-taken likely branch nullifies its slot entirely. */
++        const int run_slot = !(in.is_likely && !uncond && !taken);
++        if (run_slot) {
++            a_decode(psp_read32(pc + 4), pc + 4, &slot);
++            st = exec_simple(&slot);
++            if (it->trace) {
++                char sb[96];
++                a_format(&slot, sb, sizeof sb);
++                fprintf(it->trace, " ; slot: %s", sb);
++            }
++        } else if (it->trace) {
++            fprintf(it->trace, " ; slot nullified");
++        }
++
++        it->executed += run_slot ? 2 : 1;
++        it->pc = next;
++    } else {
++        st = exec_simple(&in);
++        it->executed++;
++        it->pc = pc + 4;
++    }
++
++    if (it->trace) {
++        if (it->trace_regs) {
++            for (unsigned i = 0; i < PSP_NUM_GPR; i++)
++                if (before[i] != psp_cpu.r[i])
++                    fprintf(it->trace, " %s=%08X", psp_reg_names[i], psp_cpu.r[i]);
++        }
++        fputc('\n', it->trace);
++    }
++    g_trace = NULL;
++
++    if (st != I_RUNNING) {
++        it->fault_pc = pc;
++        return it->status = st;
++    }
++    if (it->pc == it->ra_sentinel) return it->status = I_OK_RETURN;
++    return it->status = I_RUNNING;
++}
++
++psp_interp_status psp_interp_run(psp_interp *it) {
++    while (psp_interp_step(it) == I_RUNNING) { }
++    return it->status;
++}
++
++const char *psp_interp_status_str(psp_interp_status s) {
++    switch (s) {
++    case I_RUNNING:      return "running";
++    case I_OK_RETURN:    return "returned";
++    case I_BUDGET:       return "instruction budget exhausted";
++    case I_TRAP_INVALID: return "invalid instruction";
++    case I_TRAP_VFPU:    return "unimplemented VFPU instruction";
++    case I_TRAP_SYSCALL: return "syscall (no HLE wired up)";
++    case I_TRAP_BREAK:   return "break";
++    case I_TRAP_BADPC:   return "pc left mapped memory";
++    }
++    return "unknown";
++}
++
++psp_interp_status psp_interp_exec_one(const void *decoded_insn) {
++    return exec_simple((const a_insn *)decoded_insn);
++}
+diff --git a/tools/allegrexrecomp/interp.h b/tools/allegrexrecomp/interp.h
+new file mode 100644
+index 0000000..adb8fa7
+--- /dev/null
++++ b/tools/allegrexrecomp/interp.h
+@@ -0,0 +1,93 @@
++/* allegrexrecomp — the Allegrex interpreter that acts as the bring-up oracle.
++ *
++ * This exists to answer one question during bring-up: when the recompiled game
++ * does something wrong, *where did it first diverge*?
++ *
++ * The property that makes it useful is not fidelity — it is shared machinery.
++ * The interpreter runs on the same decoder (a_decode), the same CPU state
++ * (psp_cpu), the same memory model (the psp_read and psp_write family), and
++ * the same semantic helpers (recomp_rt.h, vfpu.h) as the recompiled C. The
++ * only thing it does differently is sequence instructions itself instead of
++ * relying on emitted control flow.
++ *
++ * So when the interpreter and the recompiled path disagree, the bug is in
++ * exactly one of two places: the emitter, or this file's sequencing. Decode,
++ * memory, arithmetic and HLE are shared, and therefore cannot be the
++ * difference. That narrowing is worth more than accuracy.
++ *
++ * See docs/ORACLE.md. This is the tier-1 oracle; PPSSPP and pspautotests are
++ * tiers 2 and 3, and both are separate processes — never linked.
++ */
++#ifndef ALLEGREX_INTERP_H
++#define ALLEGREX_INTERP_H
++
++#include <stdint.h>
++#include <stdio.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Why a run stopped. Anything other than I_OK_RETURN means the trace ends
++ * early, and the caller should say so rather than treating it as a clean run. */
++typedef enum {
++    I_RUNNING = 0,
++    I_OK_RETURN,      /* reached the sentinel return address — a clean finish */
++    I_BUDGET,         /* hit the instruction budget; probably an infinite loop */
++    I_TRAP_INVALID,   /* an encoding the decoder does not recognise */
++    I_TRAP_VFPU,      /* a VFPU op with no implementation behind it */
++    I_TRAP_SYSCALL,   /* syscall — needs HLE that is not wired up here */
++    I_TRAP_BREAK,
++    I_TRAP_BADPC,     /* pc left mapped memory */
++} psp_interp_status;
++
++/* A run in progress.
++ *
++ * `ra_sentinel` is how a run terminates: the caller seeds $ra with an address
++ * that is deliberately not mapped to code, and the run stops when pc reaches
++ * it. This is what makes single functions testable in isolation, which is the
++ * whole point during bring-up — the game cannot boot yet, so whole-program
++ * execution is not available to compare against. */
++typedef struct {
++    uint32_t          pc;
++    uint32_t          ra_sentinel;
++    uint64_t          budget;      /* max instructions; 0 = unlimited */
++    uint64_t          executed;
++    psp_interp_status status;
++    uint32_t          fault_pc;    /* where a trap happened */
++
++    /* Trace output. NULL disables tracing entirely, which is the fast path. */
++    FILE             *trace;
++    int               trace_regs;  /* also log every register the step changed */
++} psp_interp;
++
++/* Set up a run: pc = entry, $ra = sentinel, counters cleared. Does not touch
++ * memory or any register other than $ra, so the caller controls the arguments. */
++void psp_interp_init(psp_interp *it, uint32_t entry, uint32_t ra_sentinel,
++                     uint64_t budget);
++
++/* Execute one instruction, plus its delay slot if it has one. A branch and its
++ * delay slot are one step: splitting them would let a trace interleave at a
++ * point the hardware never exposes. Returns the status after the step. */
++psp_interp_status psp_interp_step(psp_interp *it);
++
++/* Step until the run stops. Returns the terminating status. */
++psp_interp_status psp_interp_run(psp_interp *it);
++
++/* Human-readable status, for error messages. Never NULL. */
++const char *psp_interp_status_str(psp_interp_status s);
++
++/* Execute a single already-decoded instruction, no control flow. Exposed for
++ * the test suite's coverage guard, which walks a list of real encodings and
++ * asserts the interpreter implements everything the emitter does — the two
++ * drifting apart would quietly destroy the oracle's only useful property.
++ *
++ * Not for general use: it does not touch pc and does not handle delay slots.
++ * Callers that want to run code want psp_interp_step(). */
++psp_interp_status psp_interp_exec_one(const void *decoded_insn);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ALLEGREX_INTERP_H */
+diff --git a/tools/allegrexrecomp/main.c b/tools/allegrexrecomp/main.c
+index 2e9e8f2..86aee6d 100644
+--- a/tools/allegrexrecomp/main.c
++++ b/tools/allegrexrecomp/main.c
+@@ -14,9 +14,15 @@
+ #include "decode.h"
+ #include "analyze.h"
+ #include "emit.h"
++#include "interp.h"
+ #include "keys.h"
+ #include "crypto/kirk.h"
+ 
++/* The `interp` verb runs guest code, so the CLI reaches into the runtime the
++ * recompiled game also links against — same CPU state, same memory model. */
++#include "psprecomp/cpu.h"
++#include "psprecomp/mem.h"
++
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -34,6 +40,7 @@ static int usage(void) {
+         "  allegrexrecomp cover   <file>\n"
+         "  allegrexrecomp funcs   <file> [--list]\n"
+         "  allegrexrecomp emit    <file> <outdir> [prefix]\n"
++        "  allegrexrecomp interp  <file> [--from <addr>] [--budget <n>] [--trace] [--regs]\n"
+         "  allegrexrecomp decrypt <file> [--keys <path>]\n"
+         "  allegrexrecomp kirk1   <file> [out] [--keys <path>]\n"
+         "\n"
+@@ -825,6 +832,107 @@ static int looks_like_cmd1_meta(const uint8_t *m, size_t avail, uint32_t file_si
+     return 1;
+ }
+ 
++/* ---- interp ---------------------------------------------------------------
++ *
++ * Run a module under the interpreter oracle. See docs/ORACLE.md and interp.h.
++ *
++ * The module is mapped at the address it was *linked* at, not somewhere inside
++ * the console's RAM window. A PRX links at 0, and the recompiled C has those
++ * addresses baked in as literals, so the oracle has to use the same address
++ * space as the code it is meant to be compared against. psp_mem_map_module()
++ * exists for exactly this.
++ *
++ * Relocations are deliberately not applied. Doing so would move every address
++ * away from the ones the emitter used and make traces from the two sides
++ * incomparable — which is the only thing this command is for. The consequence
++ * is that running from the module entry does not get far: real bring-up starts
++ * at a single leaf function, not at _start. */
++
++#define INTERP_STACK_TOP  (PSP_RAM_BASE + PSP_RAM_SIZE - 0x100)
++#define INTERP_RA_DONE    0x0DEAD000u   /* never mapped: the run stops here */
++
++static int cmd_interp(const char *path, uint32_t from, int have_from,
++                      uint64_t budget, int trace, int trace_regs) {
++    psp_blob b;
++    if (psp_blob_read(path, &b) != 0) { fprintf(stderr, "cannot read %s\n", path); return 1; }
++
++    elf_info e;
++    if (elf_parse(b.data, b.size, &e) != 0) {
++        fprintf(stderr, "not an ELF/PRX: %s\n"
++                        "  interp needs a decrypted module — run `decrypt` first\n", path);
++        psp_blob_free(&b);
++        return 1;
++    }
++
++    if (psp_mem_init() != 0) {
++        fprintf(stderr, "cannot allocate guest memory\n");
++        psp_blob_free(&b); return 1;
++    }
++
++    /* One mapping spanning every PT_LOAD, so a .bss that extends past the file
++     * is still addressable. */
++    uint32_t lo = UINT32_MAX, hi = 0;
++    for (int i = 0; i < e.nsegments; i++) {
++        const elf_segment *s = &e.seg[i];
++        if (s->addr < lo) lo = s->addr;
++        if (s->addr + s->memsz > hi) hi = s->addr + s->memsz;
++    }
++    if (lo > hi) { fprintf(stderr, "no loadable segments\n"); goto fail; }
++
++    if (psp_mem_map_module(lo, hi - lo) != 0) {
++        fprintf(stderr, "cannot map module image\n"); goto fail;
++    }
++    for (int i = 0; i < e.nsegments; i++) {
++        const elf_segment *s = &e.seg[i];
++        if (!s->filesz) continue;
++        if (s->offset + s->filesz > b.size) {
++            fprintf(stderr, "segment %d runs past end of file\n", i); goto fail;
++        }
++        psp_mem_write_block(s->addr, b.data + s->offset, s->filesz);
++    }
++
++    const uint32_t entry = have_from ? from : e.entry;
++
++    memset(&psp_cpu, 0, sizeof psp_cpu);
++    psp_cpu.r[PSP_REG_SP] = INTERP_STACK_TOP;
++
++    psp_interp it;
++    psp_interp_init(&it, entry, INTERP_RA_DONE, budget);
++    it.trace      = trace ? stdout : NULL;
++    it.trace_regs = trace_regs;
++
++    printf("module:   %s\n", path);
++    printf("mapped:   0x%08X + %u bytes (%d segments)\n", lo, hi - lo, e.nsegments);
++    printf("entry:    0x%08X%s\n", entry, have_from ? " (--from)" : " (module entry)");
++    printf("budget:   %llu instructions\n", (unsigned long long)budget);
++    printf("---\n");
++
++    psp_interp_run(&it);
++
++    printf("---\n");
++    printf("stopped:  %s\n", psp_interp_status_str(it.status));
++    printf("executed: %llu instructions\n", (unsigned long long)it.executed);
++    if (it.status != I_OK_RETURN && it.status != I_BUDGET) {
++        a_insn in;
++        a_decode(psp_read32(it.fault_pc), it.fault_pc, &in);
++        char buf[96];
++        a_format(&in, buf, sizeof buf);
++        printf("at:       0x%08X  %s\n", it.fault_pc, buf);
++    }
++    printf("bad mem:  %llu accesses\n", (unsigned long long)psp_mem_bad_access);
++
++    psp_mem_free();
++    psp_blob_free(&b);
++    /* A clean return is success. Anything else is a finding, not a crash, so
++     * report it through the exit status without a scary message. */
++    return it.status == I_OK_RETURN ? 0 : 1;
++
++fail:
++    psp_mem_free();
++    psp_blob_free(&b);
++    return 1;
++}
++
+ static int cmd_decrypt(const char *path, const char *keypath) {
+     psp_blob b;
+     if (psp_blob_read(path, &b) != 0) { fprintf(stderr, "cannot read %s\n", path); return 1; }
+@@ -988,6 +1096,25 @@ int main(int argc, char **argv) {
+     for (int i = 3; i + 1 < argc; i++)
+         if (!strcmp(argv[i], "--keys")) keypath = argv[i + 1];
+ 
++    if (!strcmp(cmd, "interp")) {
++        uint32_t from = 0; int have_from = 0, trace = 0, regs = 0;
++        uint64_t budget = 1000000;
++        for (int i = 3; i < argc; i++) {
++            if (!strcmp(argv[i], "--from") && i + 1 < argc) {
++                from = (uint32_t)strtoul(argv[++i], NULL, 0); have_from = 1;
++            } else if (!strcmp(argv[i], "--budget") && i + 1 < argc) {
++                budget = strtoull(argv[++i], NULL, 0);
++            } else if (!strcmp(argv[i], "--trace")) {
++                trace = 1;
++            } else if (!strcmp(argv[i], "--regs")) {
++                trace = 1; regs = 1;   /* --regs implies --trace */
++            } else {
++                fprintf(stderr, "interp: unknown option %s\n", argv[i]);
++                return usage();
++            }
++        }
++        return cmd_interp(argv[2], from, have_from, budget, trace, regs);
++    }
+     if (!strcmp(cmd, "decrypt")) return cmd_decrypt(argv[2], keypath);
+     if (!strcmp(cmd, "kirk1")) {
+         const char *out = (argc > 3 && strcmp(argv[3], "--keys")) ? argv[3] : NULL;

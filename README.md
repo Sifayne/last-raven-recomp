@@ -9,6 +9,11 @@ as N64Recomp / *Zelda 64: Recompiled*.
 run.** See [docs/findings/phase0.md](docs/findings/phase0.md) for the numbers and
 what is still missing.
 
+Phase 1a added the differential oracle: an Allegrex interpreter sharing the
+toolkit's decoder and runtime, so a disagreement with the recompiled C localises
+to the emitter. 86 of 96 comparable functions agree; the 10 that do not are open
+leads, not confirmed bugs. See [docs/findings/oracle.md](docs/findings/oracle.md).
+
 ## This repository contains no game data
 
 No ROM, no ISO, no assets, no firmware, no decryption keys — and it never will.
@@ -40,6 +45,12 @@ scripts/00-identify.sh && scripts/01-extract-decrypt.sh && scripts/02-analyze.sh
 
 ```bash
 python3 scripts/03-imports.py | tee reports/03-imports.txt && scripts/04-emit-build.sh
+```
+
+Then the oracle, which needs stage 04's objects:
+
+```bash
+scripts/05-oracle.sh 400
 ```
 
 Stage 04 emits ~2.1M lines of C, compiles it, and links it against the runtime.
@@ -75,7 +86,15 @@ means for this project's own license first.
 
 ## Upstream
 
-Three bugs found during bring-up are carried in `patches/` — a `libm` link
-failure and two emitter codegen bugs. They belong upstream in
-[sp00nznet/psprecomp](https://github.com/sp00nznet/psprecomp); the patches are
-kept here so a fresh clone reproduces the same build in the meantime.
+`patches/` carries three changes to `psprecomp`, applied by `build-tools.sh` and
+verified to apply to a pristine checkout in order:
+
+| Patch | What |
+|---|---|
+| `0001` | `libm` was never linked — invisible on MSVC, a hard failure on Linux |
+| `0002` | Two emitter codegen bugs: an invalid float literal, and a label-ordering hazard |
+| `0003` | The interpreter oracle, filling an unchecked box in upstream's Phase 5 roadmap |
+
+All three belong upstream in
+[sp00nznet/psprecomp](https://github.com/sp00nznet/psprecomp); they are kept
+here so a fresh clone reproduces the same build in the meantime.
