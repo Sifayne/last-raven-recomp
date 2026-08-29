@@ -611,17 +611,32 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr,
-            "oracle_diff <module.elf> [--limit N] [--from ADDR] [--verbose]\n"
+            "oracle_diff <module.elf> --funcs LIST  [--limit N] [--prefix] [--verbose]\n"
+            "oracle_diff <module.elf> --text-walk   [--limit N] [--verbose]\n"
+            "oracle_diff <module.elf> --from ADDR   [--verbose]\n"
             "\n"
-            "Runs each discovered function through the interpreter and the\n"
-            "recompiled C and reports disagreements.\n");
+            "Runs each function through the interpreter and the recompiled C and\n"
+            "reports disagreements.\n"
+            "\n"
+            "  --funcs LIST  the work-list: function entries, as printed by\n"
+            "                `allegrexrecomp funcs <elf> --list`. This is what\n"
+            "                scripts/05-oracle.sh generates and passes.\n"
+            "  --text-walk   instead, walk .text on 4-byte boundaries and test\n"
+            "                every address the dispatch table resolves. That set is\n"
+            "                mostly interior labels rather than entries, so it\n"
+            "                answers the label-coverage question, not the codegen\n"
+            "                one.\n"
+            "  --limit N     cap attempts; 0 means no cap. A capped --funcs run\n"
+            "                strides the whole list rather than taking a prefix.\n"
+            "  --prefix      take the first N of the work-list instead of striding.\n"
+            "  --from ADDR   test one address and nothing else.\n");
         return 2;
     }
     const char *path = argv[1];
     long limit = 2000;
     uint32_t only = 0; int have_only = 0;
     const char *funcs_path = NULL;
-    int verbose = 0;
+    int verbose = 0, want_text_walk = 0, want_prefix = 0;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--limit") && i + 1 < argc) limit = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--from") && i + 1 < argc) { only = (uint32_t)strtoul(argv[++i], NULL, 0); have_only = 1; }
@@ -629,7 +644,38 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--phase")) g_phase_trace = 1;
         else if (!strcmp(argv[i], "--profile")) want_profile = 1;
         else if (!strcmp(argv[i], "--funcs") && i + 1 < argc) funcs_path = argv[++i];
+        else if (!strcmp(argv[i], "--text-walk")) want_text_walk = 1;
+        else if (!strcmp(argv[i], "--prefix")) want_prefix = 1;
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
+    }
+
+    /* Which work-list to use is an explicit choice now, with no default.
+     *
+     * It used to default to the .text walk, which reads as "test everything"
+     * and is not. The dispatch table holds interior labels as well as function
+     * entries -- 42,681 against 16,494 on this module -- so five sixths of what
+     * the walk attempts was never independently callable, and the $sp-balance
+     * check throws it away only after running it. Worse, at that table density
+     * (~7.8% of .text words resolve) a --limit of 5,000 stops around
+     * 0x0003D7B0: about 8% of a 3.03 MB .text, all of it at the low end. Two
+     * runs straddling an emitter change that reclaimed 171 functions produced
+     * byte-identical reports for exactly that reason -- every function the
+     * change touched was past the window.
+     *
+     * The walk still answers the question it was written for, which is how much
+     * of the dispatch table is reachable at all. It just should not be the
+     * thing that runs when nobody said which they wanted. */
+    if (!funcs_path && !want_text_walk && !have_only) {
+        fprintf(stderr,
+            "no work-list selected.\n"
+            "  --funcs LIST   function entries (`allegrexrecomp funcs <elf> --list`)\n"
+            "  --text-walk    every dispatch-table address in .text, labels included\n"
+            "  --from ADDR    a single function\n");
+        return 2;
+    }
+    if (funcs_path && want_text_walk) {
+        fprintf(stderr, "--funcs and --text-walk are different work-lists; pick one\n");
+        return 2;
     }
 
     psp_blob b;
@@ -712,33 +758,24 @@ int main(int argc, char **argv) {
     printf("stubs:    0x%08X..0x%08X (%u bytes, %d routed to HLE)\n",
            g_stub_lo, g_stub_hi, e.stub_size, nimp);
     printf("text:     0x%08X + %u bytes\n", e.text_addr, e.text_size);
-    printf("---\n");
 
-    long attempted = 0, match = 0, diff = 0;
+    long attempted = 0, match = 0, diff = 0, unregistered = 0;
     long skip_import = 0, skip_trap = 0, skip_nofn = 0, hang = 0, skip_unbal = 0, skip_reentry = 0, hang_interp = 0, faults = 0, diff_miss = 0, skip_stub = 0;
 
-    /* Walk .text on instruction boundaries and test whatever the dispatch
-     * table knows about. Using the dispatch table as the work-list means the
-     * harness tests exactly the set the emitter claims to have translated.
-     *
-     * `limit` bounds *attempts*, not successful comparisons. Bounding successes
+    /* `limit` bounds *attempts*, not successful comparisons. Bounding successes
      * instead makes the loop unbounded whenever most functions are skipped —
      * which is the common case here, since anything touching an import is
-     * excluded — and the harness then grinds through all 26,487 functions
-     * running each one to its instruction budget first. */
+     * excluded — and the harness then grinds through the whole work-list
+     * running each one to its instruction budget first. `--limit 0` lifts the
+     * bound entirely, which is how a full-corpus run is asked for. */
     const uint32_t text_lo = e.text_addr, text_hi = e.text_addr + e.text_size;
 
-    /* The work-list.
+    /* The work-list: function entries from `allegrexrecomp funcs --list`.
      *
-     * Walking .text and testing whatever psp_lookup resolves is wrong: the
-     * dispatch table holds interior labels as well as function entries -- for
-     * this module, 32,068 of the former against 26,487 of the latter. A label
-     * sits past the prologue that set up the frame, so entering there is not a
-     * call and the comparison is meaningless. The $sp-balance check catches
-     * most of them after the fact, but at the cost of running each one first.
-     *
-     * With --funcs, the entry list from `allegrexrecomp funcs --list` is used
-     * instead, so only real entries are attempted. */
+     * Only the addresses are read. Everything else the listing prints -- the
+     * header block, the per-library import counts, the shape summary -- either
+     * starts with something other than `0x` or is indented past it, so the
+     * filter is the address column itself rather than a line count. */
     uint32_t *worklist = NULL;
     long nwork = 0;
     if (funcs_path) {
@@ -759,18 +796,82 @@ int main(int argc, char **argv) {
             worklist[nwork++] = a;
         }
         fclose(lf);
-        printf("worklist: %ld function entries from %s\n", nwork, funcs_path);
+        if (!nwork) { fprintf(stderr, "no function entries in %s\n", funcs_path); return 1; }
     }
+
+    /* Sample the whole list rather than a prefix of it.
+     *
+     * Taking the first N makes a limited run *positional*: it reports on the
+     * low end of the module and says nothing about the rest, while presenting
+     * itself as a corpus result. That is not hypothetical — it is why two runs
+     * across a change that reclaimed 171 functions came out byte-identical.
+     *
+     * Striding spends the same budget across the whole address range, so a
+     * limited run is representative and two runs at the same limit still line
+     * up entry for entry. Round the stride *up*, so it reaches the last entry
+     * instead of exhausting the budget at nine tenths of the way through; the
+     * cost is that `--limit 5000` on 16,494 entries selects about 4,124 rather
+     * than exactly 5,000. The header says which, so nobody has to infer it. */
+    long stride = 1;
+    if (worklist && limit > 0 && !want_prefix && nwork > limit)
+        stride = (nwork + limit - 1) / limit;
+
+    /* --from overrides whatever work-list was built, so do not describe one:
+     * a header advertising 16,494 entries above a run that tested a single
+     * address is exactly the sort of thing this change exists to stop. */
+    if (have_only) {
+        printf("only:     0x%08X (single function; work-list ignored)\n", only);
+    } else if (worklist) {
+        long nsel;
+        if (stride > 1)                      nsel = (nwork + stride - 1) / stride;
+        else if (limit > 0 && limit < nwork) nsel = limit;      /* --prefix */
+        else                                 nsel = nwork;
+        printf("worklist: %ld function entries from %s\n", nwork, funcs_path);
+        if (stride > 1)
+            printf("sample:   %ld of %ld, every %ld across 0x%08X..0x%08X\n",
+                   nsel, nwork, stride, worklist[0], worklist[(nsel - 1) * stride]);
+        else if (nsel < nwork)
+            printf("sample:   %ld of %ld, the first N (--prefix) -- 0x%08X..0x%08X\n",
+                   nsel, nwork, worklist[0], worklist[nsel - 1]);
+        else
+            printf("sample:   all %ld -- 0x%08X..0x%08X\n",
+                   nwork, worklist[0], worklist[nwork - 1]);
+    } else if (want_text_walk) {
+        /* Say plainly that this one *is* positional. It walks addresses in
+         * order and stops when the budget runs out, so a limited walk is a
+         * report on the bottom of .text and nothing else. */
+        printf("worklist: .text walk from 0x%08X, every 4 bytes, interior labels included\n",
+               text_lo);
+        if (limit > 0)
+            printf("sample:   first %ld resolved addresses -- positional, not representative\n",
+                   limit);
+    }
+    printf("---\n");
 
     for (long wi = 0; ; wi++) {
         uint32_t a;
         if (have_only)      { if (wi) break; a = only; }
-        else if (worklist)  { if (wi >= nwork || attempted >= limit) break; a = worklist[wi]; }
+        else if (worklist)  {
+            const long idx = wi * stride;
+            if (idx >= nwork) break;
+            if (limit > 0 && attempted >= limit) break;
+            a = worklist[idx];
+        }
         else {
             a = text_lo + (uint32_t)wi * 4;
-            if (a >= text_hi || attempted >= limit) break;
+            if (a >= text_hi) break;
+            if (limit > 0 && attempted >= limit) break;
         }
-        if (!psp_lookup(a)) continue;
+        /* Not in the dispatch table.
+         *
+         * On the .text walk this is the ordinary case -- most words in .text
+         * are not the start of anything -- and counting it says nothing. On the
+         * entry list it is a finding: discovery named a function the emitter
+         * never registered, so there is no recompiled side to compare against.
+         * Silently dropping those makes `attempted` fall short of the sample
+         * size with no stated reason, which is the same kind of quiet
+         * misreporting the positional sample was. */
+        if (!psp_lookup(a)) { unregistered++; continue; }
         /* Import thunks are in .text and land in the discovered function list,
          * but they are not functions -- they are the firmware boundary. The
          * interpreter intercepts them into HLE and the recompiled side has a
@@ -811,6 +912,9 @@ int main(int argc, char **argv) {
     printf("  unbalanced $sp:  %ld  (entry was not independently callable)\n", skip_unbal);
     printf("  host fault:      %ld  (SIGSEGV/SIGBUS, usually host stack exhaustion)\n", faults);
     printf("  import thunk:    %ld  (firmware boundary, not guest code)\n", skip_stub);
+    if (worklist)
+        printf("  unregistered:    %ld  (entry discovery found but the emitter did not register)\n",
+               unregistered);
     if (psp_interp_nest_refused())
         printf("  re-entry refused: %llu  (nesting limit; a guest callback did not run)\n",
                (unsigned long long)psp_interp_nest_refused());
