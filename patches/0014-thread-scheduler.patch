@@ -1,17 +1,18 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index e6a88df..d063d63 100644
+index e6a88df..1d8c0bb 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -41,6 +41,8 @@ add_library(psprecomp STATIC
+@@ -41,6 +41,9 @@ add_library(psprecomp STATIC
      src/hle/hle.c
      src/hle/sysmem.c
      src/hle/threadman.c
 +    src/hle/sched.c
 +    src/hle/clock.c
++    src/hle/mpeg.c
      src/hle/display.c
      src/hle/ge.c
      src/hle/sascore.c
-@@ -56,6 +58,11 @@ target_include_directories(psprecomp PUBLIC
+@@ -56,6 +59,11 @@ target_include_directories(psprecomp PUBLIC
  # vfpu.c calls sinf/cosf/powf/logf/asinf. MSVC keeps those in the CRT, but on
  # Unix they live in libm and need an explicit link. PUBLIC so that consumers —
  # the test binaries, and any game host linking this runtime — inherit it too.

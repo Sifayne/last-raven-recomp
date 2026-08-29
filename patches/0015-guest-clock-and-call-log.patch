@@ -54,11 +54,16 @@ index 0000000..6289560
 +
 +#endif /* PSPRECOMP_CLOCK_H */
 diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
-index 79424f8..213d02c 100644
+index 79424f8..7d62b77 100644
 --- a/include/psprecomp/hle.h
 +++ b/include/psprecomp/hle.h
-@@ -63,6 +63,14 @@ const psp_hle_entry *psp_hle_entries(int *count);
+@@ -61,8 +61,19 @@ const psp_hle_entry *psp_hle_entries(int *count);
+ /* Print the recent firmware calls that returned zero. Zero is what a game most
+  * often mistakes for an address, so this is the first thing to consult when a
   * wild pointer shows up far from its cause. */
++void psp_mpeg_register(void);
++void psp_mpeg_reset(void);
++
  void psp_hle_dump_recent(FILE *out);
  
 +/* The `top` most-called firmware functions, most first. Shows what a run spent
@@ -141,7 +146,7 @@ index 0a619bb..fa8176c 100644
      psp_hle_register(0x9C6EAAD7, "sceDisplay", "sceDisplayGetVcount",         hle_GetVcount);
      psp_hle_register(0x210EAB3A, "sceDisplay", "sceDisplayGetAccumulatedHcount",
 diff --git a/src/hle/hle.c b/src/hle/hle.c
-index 778152a..f43a551 100644
+index 778152a..e179114 100644
 --- a/src/hle/hle.c
 +++ b/src/hle/hle.c
 @@ -1,6 +1,7 @@
@@ -266,11 +271,14 @@ index 778152a..f43a551 100644
  
      /* Unimplemented. Naming the function is the whole point — bringing a game
       * up is largely the process of watching this message stop appearing, and
-@@ -170,6 +269,7 @@ void psp_hle_init(void) {
+@@ -170,7 +269,10 @@ void psp_hle_init(void) {
      psp_set_miss_context(miss_context);
      psp_sysmem_init();
      psp_sysmem_register();
 +    psp_sched_init();
      psp_threadman_init();
++    psp_mpeg_register();
++    psp_mpeg_reset();
      psp_threadman_register();
      psp_display_init();
+     psp_display_register();

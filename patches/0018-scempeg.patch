@@ -1,0 +1,377 @@
+diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
+new file mode 100644
+index 0000000..d535826
+--- /dev/null
++++ b/src/hle/mpeg.c
+@@ -0,0 +1,371 @@
++/* psprecomp — sceMpeg.
++ *
++ * ## What this is, and what it is not
++ *
++ * This is the bookkeeping half of MPEG playback: init, contexts, the ring
++ * buffer, stream registration, and the PSMF header queries. It is **not** a
++ * decoder. No video frame is produced and no audio is decoded.
++ *
++ * That is a deliberate split rather than an unfinished one. A game reaches
++ * sceMpeg long before it plays a movie, because the class that owns FMV is
++ * constructed during startup -- Armored Core's said so out loud, on its own
++ * stdout:
++ *
++ *     CFsMpegSound::StartThread() is failed...
++ *
++ * and every one of these calls was returning zero from the unimplemented-call
++ * path, which reads as success. So the game believed it had a working MPEG
++ * context, a ring buffer it never got, and a handle that was zero. Answering
++ * the bookkeeping honestly is what lets startup finish; decoding is a separate,
++ * much larger piece of work that only matters once a movie actually plays.
++ *
++ * The calls that would hand back decoded data therefore report
++ * SCE_MPEG_ERROR_NO_DATA. That is the code a player already handles -- it is
++ * what it sees at the end of a stream -- so a game gets a movie that finishes
++ * immediately rather than one that hangs waiting for a frame that is never
++ * coming.
++ *
++ * Constants and structure layouts are PPSSPP's (Core/HLE/sceMpeg.cpp and
++ * sceMpeg.h), which is the closest thing to a specification these have.
++ */
++
++#include "psprecomp/hle.h"
++
++#include <stdio.h>
++#include <string.h>
++
++/* ---- constants ------------------------------------------------------------
++ *
++ * From PPSSPP Core/HLE/sceMpeg.cpp unless noted. */
++#define MPEG_MEMSIZE            0x10000u    /* MPEG_MEMSIZE_0105: what Create needs */
++#define MPEG_AVC_ES_SIZE        2048
++#define MPEG_ATRAC_ES_SIZE      2112
++#define MPEG_ATRAC_ES_OUT_SIZE  8192
++#define MPEG_RINGBUFFER_PACKET  (104 + 2048)  /* __MpegRingbufferQueryMemSize */
++
++#define PSMF_MAGIC              0x464D5350u  /* "PSMF" */
++#define PSMF_STREAM_OFFSET_OFF  0x08         /* big-endian u32 */
++#define PSMF_STREAM_SIZE_OFF    0x0C         /* big-endian u32 */
++
++#define SCE_MPEG_ERROR_NO_DATA       0x80618001u
++#define SCE_MPEG_ERROR_NOT_YET_INIT  0x80618009u
++#define SCE_MPEG_ERROR_INVALID_VALUE 0x806101FEu
++#define SCE_MPEG_ERROR_NO_MEMORY     0x80610022u
++
++/* SceMpegRingbuffer, as the guest sees it. Field order matters: the game reads
++ * these directly, and packetsFree in particular is how it decides whether it
++ * may queue more data. */
++#define RB_PACKETS          0
++#define RB_PACKETS_READ     4
++#define RB_PACKETS_WRITTEN  8
++#define RB_PACKETS_FREE    12
++#define RB_PACKET_SIZE     16
++#define RB_DATA            20
++#define RB_CALLBACK        24
++#define RB_CALLBACK_ARG    28
++#define RB_DATA_UPPER      32
++#define RB_SEMA_ID         36
++#define RB_MPEG            40
++
++/* SceMpegAu: two 64-bit timestamps then the elementary-stream buffer. */
++#define AU_PTS       0
++#define AU_DTS       8
++#define AU_ES_BUFFER 16
++#define AU_ES_SIZE   20
++
++/* An unset timestamp. A player compares against this to decide it has none. */
++#define MPEG_TIMESTAMP_UNSET 0xFFFFFFFFu
++
++#define MAX_MPEG    4
++#define MAX_ES_BUF  8
++
++typedef struct {
++    int      used;
++    uint32_t handle;       /* what the guest passes back as `mpeg` */
++    uint32_t ringbuffer;   /* guest address of its SceMpegRingbuffer */
++    uint32_t stream_size;
++    uint32_t stream_offset;
++    int      es_used[MAX_ES_BUF];
++} mpeg_ctx;
++
++static mpeg_ctx g_mpeg[MAX_MPEG];
++static int      g_inited;
++
++void psp_mpeg_reset(void) {
++    memset(g_mpeg, 0, sizeof g_mpeg);
++    g_inited = 0;
++}
++
++static mpeg_ctx *ctx_of(uint32_t handle) {
++    for (int i = 0; i < MAX_MPEG; i++)
++        if (g_mpeg[i].used && g_mpeg[i].handle == handle) return &g_mpeg[i];
++    return NULL;
++}
++
++/* The PSMF header stores its two size fields big-endian, unlike everything else
++ * on the machine. */
++static uint32_t read_be32(uint32_t addr) {
++    return ((uint32_t)psp_read8(addr)     << 24) |
++           ((uint32_t)psp_read8(addr + 1) << 16) |
++           ((uint32_t)psp_read8(addr + 2) <<  8) |
++           ((uint32_t)psp_read8(addr + 3));
++}
++
++/* ---- lifecycle ------------------------------------------------------------ */
++
++static void hle_MpegInit(void)   { g_inited = 1; psp_ret(SCE_KERNEL_ERROR_OK); }
++
++static void hle_MpegFinish(void) {
++    psp_mpeg_reset();
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++static void hle_QueryMemSize(void) { psp_ret(MPEG_MEMSIZE); }
++
++/* sceMpegCreate(mpeg, data, size, ringbuffer, frameWidth, mode, ddrTop)
++ *
++ * `mpeg` is a pointer to where the handle goes, not the handle itself -- the
++ * one detail that makes the difference between a game that works and one that
++ * dereferences zero. The handle is the buffer it gave us, which it can pass
++ * back without us having to invent an id space. */
++static void hle_MpegCreate(void) {
++    const uint32_t mpeg_out = psp_arg(0);
++    const uint32_t data     = psp_arg(1);
++    const uint32_t size     = psp_arg(2);
++    const uint32_t ringbuf  = psp_arg(3);
++
++    if (!g_inited)          { psp_ret(SCE_MPEG_ERROR_NOT_YET_INIT); return; }
++    if (!mpeg_out || !data)  { psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); return; }
++    if (size < MPEG_MEMSIZE) { psp_ret(SCE_MPEG_ERROR_NO_MEMORY); return; }
++
++    mpeg_ctx *c = NULL;
++    for (int i = 0; i < MAX_MPEG; i++) if (!g_mpeg[i].used) { c = &g_mpeg[i]; break; }
++    if (!c) { psp_ret(SCE_MPEG_ERROR_NO_MEMORY); return; }
++
++    memset(c, 0, sizeof *c);
++    c->used       = 1;
++    c->handle     = data;
++    c->ringbuffer = ringbuf;
++
++    psp_write32(mpeg_out, c->handle);
++    if (ringbuf) psp_write32(ringbuf + RB_MPEG, c->handle);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++static void hle_MpegDelete(void) {
++    mpeg_ctx *c = ctx_of(psp_arg(0));
++    if (c) c->used = 0;
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++/* ---- the ring buffer ------------------------------------------------------ */
++
++static void hle_RingbufferQueryMemSize(void) {
++    psp_ret((uint32_t)((int32_t)psp_arg(0) * MPEG_RINGBUFFER_PACKET));
++}
++
++/* sceMpegRingbufferConstruct(rb, packets, data, size, callback, cbArg) */
++static void hle_RingbufferConstruct(void) {
++    const uint32_t rb      = psp_arg(0);
++    const uint32_t packets = psp_arg(1);
++    const uint32_t data    = psp_arg(2);
++    const uint32_t size    = psp_arg(3);
++
++    if (!rb) { psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); return; }
++
++    psp_write32(rb + RB_PACKETS,         packets);
++    psp_write32(rb + RB_PACKETS_READ,    0);
++    psp_write32(rb + RB_PACKETS_WRITTEN, 0);
++    psp_write32(rb + RB_PACKETS_FREE,    packets);
++    psp_write32(rb + RB_PACKET_SIZE,     MPEG_AVC_ES_SIZE);
++    psp_write32(rb + RB_DATA,            data);
++    psp_write32(rb + RB_CALLBACK,        psp_arg(4));
++    psp_write32(rb + RB_CALLBACK_ARG,    psp_arg(5));
++    psp_write32(rb + RB_DATA_UPPER,      data + size);
++    psp_write32(rb + RB_SEMA_ID,         0xFFFFFFFFu);
++    psp_write32(rb + RB_MPEG,            0);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++static void hle_RingbufferDestruct(void) {
++    const uint32_t rb = psp_arg(0);
++    if (rb) {
++        psp_write32(rb + RB_PACKETS_READ,    0);
++        psp_write32(rb + RB_PACKETS_WRITTEN, 0);
++        psp_write32(rb + RB_PACKETS_FREE,    psp_read32(rb + RB_PACKETS));
++    }
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++static void hle_RingbufferAvailableSize(void) {
++    const uint32_t rb = psp_arg(0);
++    psp_ret(rb ? psp_read32(rb + RB_PACKETS_FREE) : 0);
++}
++
++/* sceMpegRingbufferPut(rb, numPackets, available)
++ *
++ * On hardware this invokes the game's own callback to copy packets in, then
++ * accounts for them. Nothing consumes them here, so they are accepted and
++ * immediately treated as consumed: the buffer never fills, and a feeder loop
++ * that waits for space always gets it. Claiming zero were taken would stall
++ * that loop forever, which is the failure this is avoiding. */
++static void hle_RingbufferPut(void) {
++    const uint32_t rb = psp_arg(0);
++    const int32_t  n  = (int32_t)psp_arg(1);
++    if (rb && n > 0) {
++        psp_write32(rb + RB_PACKETS_WRITTEN, psp_read32(rb + RB_PACKETS_WRITTEN) + (uint32_t)n);
++        psp_write32(rb + RB_PACKETS_READ,    psp_read32(rb + RB_PACKETS_READ) + (uint32_t)n);
++        psp_write32(rb + RB_PACKETS_FREE,    psp_read32(rb + RB_PACKETS));
++    }
++    psp_ret((uint32_t)n);
++}
++
++/* ---- the PSMF header ------------------------------------------------------
++ *
++ * These two are the only calls here that report something real: the numbers
++ * come out of the file the game already read from the disc. */
++static void hle_QueryStreamOffset(void) {
++    const uint32_t buf = psp_arg(1), out = psp_arg(2);
++    if (!buf || !out) { psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); return; }
++
++    if (psp_read32(buf) != PSMF_MAGIC) {
++        psp_write32(out, 0);
++        psp_ret(SCE_MPEG_ERROR_INVALID_VALUE);
++        return;
++    }
++    const uint32_t off = read_be32(buf + PSMF_STREAM_OFFSET_OFF);
++    /* The offset is a whole number of 2048-byte sectors; anything else means
++     * the header is not what it claims to be. */
++    if (!off || (off & 2047u)) {
++        psp_write32(out, 0);
++        psp_ret(SCE_MPEG_ERROR_INVALID_VALUE);
++        return;
++    }
++    mpeg_ctx *c = ctx_of(psp_arg(0));
++    if (c) c->stream_offset = off;
++    psp_write32(out, off);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++static void hle_QueryStreamSize(void) {
++    const uint32_t buf = psp_arg(0), out = psp_arg(1);
++    if (!buf || !out) { psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); return; }
++
++    if (psp_read32(buf) != PSMF_MAGIC) {
++        psp_write32(out, 0);
++        psp_ret(SCE_MPEG_ERROR_INVALID_VALUE);
++        return;
++    }
++    psp_write32(out, read_be32(buf + PSMF_STREAM_SIZE_OFF));
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++/* ---- streams and elementary-stream buffers -------------------------------- */
++
++/* A stream handle only has to be distinct and non-null: the game hands it back
++ * to GetAvcAu and friends and never looks inside it. */
++static void hle_RegistStream(void) {
++    static uint32_t next = 0x00010000u;
++    psp_ret(ctx_of(psp_arg(0)) ? next++ : 0);
++}
++
++static void hle_UnRegistStream(void) { psp_ret(SCE_KERNEL_ERROR_OK); }
++
++static void hle_MallocAvcEsBuf(void) {
++    mpeg_ctx *c = ctx_of(psp_arg(0));
++    if (!c) { psp_ret(0); return; }
++    for (int i = 0; i < MAX_ES_BUF; i++)
++        if (!c->es_used[i]) { c->es_used[i] = 1; psp_ret((uint32_t)(i + 1)); return; }
++    psp_ret(0);
++}
++
++static void hle_FreeAvcEsBuf(void) {
++    mpeg_ctx *c = ctx_of(psp_arg(0));
++    const int32_t id = (int32_t)psp_arg(1) - 1;
++    if (c && id >= 0 && id < MAX_ES_BUF) c->es_used[id] = 0;
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++/* sceMpegQueryAtracEsSize(mpeg, esSizeOut, outSizeOut) */
++static void hle_QueryAtracEsSize(void) {
++    if (psp_arg(1)) psp_write32(psp_arg(1), MPEG_ATRAC_ES_SIZE);
++    if (psp_arg(2)) psp_write32(psp_arg(2), MPEG_ATRAC_ES_OUT_SIZE);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++/* sceMpegInitAu(mpeg, esBuffer, au) */
++static void hle_InitAu(void) {
++    const uint32_t au = psp_arg(2);
++    if (!au) { psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); return; }
++    psp_write32(au + AU_PTS,     MPEG_TIMESTAMP_UNSET);
++    psp_write32(au + AU_PTS + 4, MPEG_TIMESTAMP_UNSET);
++    psp_write32(au + AU_DTS,     MPEG_TIMESTAMP_UNSET);
++    psp_write32(au + AU_DTS + 4, MPEG_TIMESTAMP_UNSET);
++    psp_write32(au + AU_ES_BUFFER, psp_arg(1));
++    psp_write32(au + AU_ES_SIZE,   0);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++/* ---- the decoder that is not here -----------------------------------------
++ *
++ * Every one of these reports "no data", which a player reads as the end of the
++ * stream. It ends the movie on its first attempt rather than waiting for a
++ * frame that will never arrive. Said once, because a title screen retries. */
++static void no_decoder(const char *what) {
++    static int said;
++    if (!said++)
++        fprintf(stderr,
++            "psprecomp: %s -- sceMpeg decoding is not implemented, so every\n"
++            "  stream reports end-of-data. Video and FMV audio will not play;\n"
++            "  everything else continues. Further calls are not reported.\n", what);
++}
++
++static void hle_GetAvcAu(void)      { no_decoder("sceMpegGetAvcAu");
++                                      psp_ret(SCE_MPEG_ERROR_NO_DATA); }
++static void hle_GetAtracAu(void)    { no_decoder("sceMpegGetAtracAu");
++                                      psp_ret(SCE_MPEG_ERROR_NO_DATA); }
++static void hle_AvcDecode(void)     { no_decoder("sceMpegAvcDecode");
++                                      psp_ret(SCE_MPEG_ERROR_NO_DATA); }
++static void hle_AtracDecode(void)   { no_decoder("sceMpegAtracDecode");
++                                      psp_ret(SCE_MPEG_ERROR_NO_DATA); }
++static void hle_AvcDecodeStop(void) {
++    /* Reports zero frames left, so a drain loop terminates. */
++    if (psp_arg(3)) psp_write32(psp_arg(3), 0);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++void psp_mpeg_register(void) {
++    psp_hle_register(0x682A619B, "sceMpeg", "sceMpegInit",            hle_MpegInit);
++    psp_hle_register(0x874624D6, "sceMpeg", "sceMpegFinish",          hle_MpegFinish);
++    psp_hle_register(0xC132E22F, "sceMpeg", "sceMpegQueryMemSize",    hle_QueryMemSize);
++    psp_hle_register(0xD8C5F121, "sceMpeg", "sceMpegCreate",          hle_MpegCreate);
++    psp_hle_register(0x606A4649, "sceMpeg", "sceMpegDelete",          hle_MpegDelete);
++
++    psp_hle_register(0xD7A29F46, "sceMpeg", "sceMpegRingbufferQueryMemSize",
++                     hle_RingbufferQueryMemSize);
++    psp_hle_register(0x37295ED8, "sceMpeg", "sceMpegRingbufferConstruct",
++                     hle_RingbufferConstruct);
++    psp_hle_register(0x13407F13, "sceMpeg", "sceMpegRingbufferDestruct",
++                     hle_RingbufferDestruct);
++    psp_hle_register(0xB5F6DC87, "sceMpeg", "sceMpegRingbufferAvailableSize",
++                     hle_RingbufferAvailableSize);
++    psp_hle_register(0xB240A59E, "sceMpeg", "sceMpegRingbufferPut",   hle_RingbufferPut);
++
++    psp_hle_register(0x21FF80E4, "sceMpeg", "sceMpegQueryStreamOffset",
++                     hle_QueryStreamOffset);
++    psp_hle_register(0x611E9E11, "sceMpeg", "sceMpegQueryStreamSize", hle_QueryStreamSize);
++
++    psp_hle_register(0x42560F23, "sceMpeg", "sceMpegRegistStream",    hle_RegistStream);
++    psp_hle_register(0x591A4AA2, "sceMpeg", "sceMpegUnRegistStream",  hle_UnRegistStream);
++    psp_hle_register(0xA780CF7E, "sceMpeg", "sceMpegMallocAvcEsBuf",  hle_MallocAvcEsBuf);
++    psp_hle_register(0xCEB870B1, "sceMpeg", "sceMpegFreeAvcEsBuf",    hle_FreeAvcEsBuf);
++    psp_hle_register(0xF8DCB679, "sceMpeg", "sceMpegQueryAtracEsSize",
++                     hle_QueryAtracEsSize);
++    psp_hle_register(0x167AFD9E, "sceMpeg", "sceMpegInitAu",          hle_InitAu);
++
++    psp_hle_register(0xFE246728, "sceMpeg", "sceMpegGetAvcAu",        hle_GetAvcAu);
++    psp_hle_register(0xE1CE83A7, "sceMpeg", "sceMpegGetAtracAu",      hle_GetAtracAu);
++    psp_hle_register(0x0E3C2E9D, "sceMpeg", "sceMpegAvcDecode",       hle_AvcDecode);
++    psp_hle_register(0x800C44DF, "sceMpeg", "sceMpegAtracDecode",     hle_AtracDecode);
++    psp_hle_register(0x740FCCD1, "sceMpeg", "sceMpegAvcDecodeStop",   hle_AvcDecodeStop);
++}
