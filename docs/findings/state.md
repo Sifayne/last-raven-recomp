@@ -178,7 +178,7 @@ on without the conversation that produced it.
    should not veto a merge — but be clear that on its own it changed **nothing**
    measurable: same 52 sites, same addresses, same deltas.
 
-   **What is left is diagnosed, and it is an emitter bug.** A gdb backtrace:
+   **The rest was an emitter bug, now fixed.** A gdb backtrace found it:
 
    ```
    #0  psp_at_002B57E4      <- label thunk
@@ -195,13 +195,17 @@ on without the conversation that produced it.
    epilogue and releases 16 — which is every `+16` in the report, and why the
    leak count is zero.
 
-   The fix is to make a computed jump re-enter the body's own `switch (_entry)`
-   when the target is one of this function's labels, and only fall back to
-   `psp_dispatch` otherwise. The label set is already enumerated where the
-   switch is built. It matters beyond the noise: each transfer costs two host
-   frames rather than a jump, so a computed jump used as a loop back-edge grows
-   the host stack without bound — the same class as the loop back-edges already
-   fixed.
+   A computed jump now re-enters the body's own `switch (_entry)` when the
+   target is one of this function's labels, and only falls back to
+   `psp_dispatch` for a genuine cross-function transfer. That took it to **37
+   sites / 889,348 returns**, from 52 / 7.0M at the start. It mattered beyond
+   the noise: each transfer cost two host frames rather than a jump, so a
+   computed jump used as a loop back-edge would grow the host stack without
+   bound — the same failure as the loop back-edges already fixed, by a
+   different route.
+
+   Still open: `0x002B60C4` at 888k of the remaining 889k. Same instrument, same
+   method — one site left carrying almost all of it.
 3. **The two composed-chain oracle divergences.** Each callee agrees in
    isolation; the disagreement only appears in the chain. Needs
    instruction-level trace diffing, not another hypothesis — which means giving
