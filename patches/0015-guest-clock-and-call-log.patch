@@ -54,16 +54,20 @@ index 0000000..6289560
 +
 +#endif /* PSPRECOMP_CLOCK_H */
 diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
-index 79424f8..c0b529a 100644
+index 79424f8..213d02c 100644
 --- a/include/psprecomp/hle.h
 +++ b/include/psprecomp/hle.h
-@@ -63,6 +63,10 @@ const psp_hle_entry *psp_hle_entries(int *count);
+@@ -63,6 +63,14 @@ const psp_hle_entry *psp_hle_entries(int *count);
   * wild pointer shows up far from its cause. */
  void psp_hle_dump_recent(FILE *out);
  
 +/* The `top` most-called firmware functions, most first. Shows what a run spent
 + * its time on -- and, by what is missing, what it never reached. */
 +void psp_hle_dump_calls(FILE *out, int top);
++
++/* Whether PSPRECOMP_HLE_LOG is on. Handlers consult this to add detail that is
++ * too verbose to print unconditionally. */
++int psp_hle_logging(void);
 +
  /* Register everything the toolkit implements. Call once at startup. */
  void psp_hle_init(void);
@@ -137,7 +141,7 @@ index 0a619bb..fa8176c 100644
      psp_hle_register(0x9C6EAAD7, "sceDisplay", "sceDisplayGetVcount",         hle_GetVcount);
      psp_hle_register(0x210EAB3A, "sceDisplay", "sceDisplayGetAccumulatedHcount",
 diff --git a/src/hle/hle.c b/src/hle/hle.c
-index 778152a..c3e9267 100644
+index 778152a..3b48077 100644
 --- a/src/hle/hle.c
 +++ b/src/hle/hle.c
 @@ -1,6 +1,7 @@
@@ -148,7 +152,7 @@ index 778152a..c3e9267 100644
  #include "psprecomp/dispatch.h"
  
  #include <stdio.h>
-@@ -129,15 +130,80 @@ void psp_hle_dump_recent(FILE *out) {
+@@ -129,15 +130,84 @@ void psp_hle_dump_recent(FILE *out) {
      }
  }
  
@@ -170,6 +174,10 @@ index 778152a..c3e9267 100644
 + * after -- a question the totals cannot answer, because the interesting call
 + * happened exactly once. Off by default: it is one line per call. */
 +static int g_log = -1;
++
++static int logging(void);
++
++int psp_hle_logging(void) { return logging(); }
 +
 +static int logging(void) {
 +    if (g_log < 0) {
@@ -229,7 +237,7 @@ index 778152a..c3e9267 100644
  
      /* Unimplemented. Naming the function is the whole point — bringing a game
       * up is largely the process of watching this message stop appearing, and
-@@ -170,6 +236,7 @@ void psp_hle_init(void) {
+@@ -170,6 +240,7 @@ void psp_hle_init(void) {
      psp_set_miss_context(miss_context);
      psp_sysmem_init();
      psp_sysmem_register();

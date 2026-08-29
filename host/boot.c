@@ -44,7 +44,10 @@ void psp_recomp_register(void);
 
 /* The guest's user-mode stack. PSP puts it at the top of user RAM and grows it
  * down; the exact value matters less than leaving room below for the heap. */
-#define STACK_TOP   (PSP_RAM_BASE + PSP_RAM_SIZE - 0x1000)
+/* The entry stack. 256K is generous for module_start, and generous is right:
+ * a recompiled frame is larger than the MIPS one it came from, and a stack
+ * that overflows here corrupts the heap it was allocated from. */
+#define MAIN_STACK_SIZE  0x40000u
 
 /* Where a `jr $ra` out of the outermost call lands. Deliberately unmapped, so
  * arriving here is unambiguous rather than something that might be real code. */
@@ -116,8 +119,64 @@ static void hle_stop_unload_self(void) {
     siglongjmp(g_abort, 1);
 }
 
+/* PSPRECOMP_WATCH=<hex address> prints the argument registers on entry to that
+ * function, plus what the pointer-looking ones point at.
+ *
+ * Bring-up keeps arriving at the same question -- one function out of tens of
+ * thousands decides something, and the decision is made on a value nobody has
+ * seen. Rebuilding 2.1M lines of generated C with a printf in it answers that
+ * once, slowly, and leaves debris. */
+static void watch_hit(uint32_t addr) {
+    fprintf(stderr, "watch: psp_func_%08X(a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X)\n",
+            addr, psp_arg(0), psp_arg(1), psp_arg(2), psp_arg(3));
+    for (int i = 0; i < 4; i++) {
+        const uint32_t v = psp_arg(i);
+        if (v < PSP_RAM_BASE || v >= PSP_RAM_BASE + PSP_RAM_SIZE) continue;
+        const uint32_t deref = psp_read32(v);
+        fprintf(stderr, "         a%d -> 0x%08X", i, deref);
+        if (deref >= PSP_RAM_BASE && deref < PSP_RAM_BASE + PSP_RAM_SIZE)
+            fprintf(stderr, "  -> first bytes %02X %02X %02X %02X",
+                    psp_read8(deref), psp_read8(deref + 1),
+                    psp_read8(deref + 2), psp_read8(deref + 3));
+        fprintf(stderr, "\n");
+    }
+}
+
+static void install_watch(void) {
+    const char *v = getenv("PSPRECOMP_WATCH");
+    if (!v || !*v) return;
+    const uint32_t addr = (uint32_t)strtoul(v, NULL, 0);
+    psp_trace_watch(addr, watch_hit);
+    printf("      watch     psp_func_%08X (needs a PSPRECOMP_TRACE build)\n", addr);
+}
+
+#define ALT_STACK_SIZE ((size_t)(SIGSTKSZ < 65536 ? 65536 : SIGSTKSZ))
+
+/* Each thread needs its own: sigaltstack is per-thread, and the fault most
+ * worth catching is a blown stack, which leaves no room to run a handler. */
+static void install_alt_stack(void) {
+    stack_t ss;
+    ss.ss_sp    = malloc(ALT_STACK_SIZE);
+    ss.ss_size  = ALT_STACK_SIZE;
+    ss.ss_flags = 0;
+    if (ss.ss_sp) sigaltstack(&ss, NULL);
+}
+
 static void on_signal(int sig) {
     g_reason = (sig == SIGALRM) ? 2 : 3;
+
+    /* A guest thread cannot jump to g_abort: that belongs to the main stack.
+     * Nor can it be unwound -- it is part-way down a host call stack of
+     * generated code. So it reports and ends the process. Losing the boot
+     * summary is a fair trade for a diagnosis instead of a core dump. */
+    if (psp_sched_current() != 0) {
+        fprintf(stderr, "\npsprecomp: %s in guest thread 0x%08X, last fn 0x%08X\n",
+                sig == SIGALRM ? "timed out" : "host fault (SIGSEGV/SIGBUS)",
+                psp_sched_current(), psp_trace_last());
+        psp_trace_dump();
+        fflush(NULL);
+        _exit(2);
+    }
     siglongjmp(g_abort, 1);
 }
 
@@ -245,15 +304,29 @@ int main(int argc, char **argv) {
     psp_hle_register(0x8F2DF740u, "ModuleMgrForUser", "StopUnloadSelfModule",
                      hle_stop_unload_self);
     printf("  [2] runtime   %u functions registered\n", psp_dispatch_count());
+    install_watch();
+    psp_sched_set_thread_hook(install_alt_stack);
     printf("      disc      %s\n", iso ? iso : "(none -- raw umd: opens will fail)");
 
     /* 3 — machine state. $k0 points at a thread control block; the allocator
      *     reaches through it for the reent structure, so it has to be real
      *     before any allocation, not just before the first C++ object. */
     memset(&psp_cpu, 0, sizeof psp_cpu);
-    psp_cpu.r[PSP_REG_SP] = STACK_TOP;
+
+    /* The stack is *allocated*, not just pointed at the top of RAM.
+     *
+     * It used to sit at a fixed 0x09FFF000, which is inside the user heap --
+     * and the heap hands out blocks from the top down, so the guest's very
+     * first allocation straddled it. On hardware the initial thread's stack
+     * comes out of the same partition as everything else, and taking it the
+     * same way here is both more faithful and the only way the allocator can
+     * know not to hand it to someone else. */
+    const uint32_t stack = psp_sysmem_alloc(MAIN_STACK_SIZE, 1);
+    if (!stack) { fprintf(stderr, "cannot allocate the entry stack\n"); return 1; }
+    psp_cpu.r[PSP_REG_SP] = (stack + MAIN_STACK_SIZE - 64) & ~15u;
     psp_cpu.r[PSP_RA_INDEX] = RA_DONE;
-    printf("  [3] state     sp=0x%08X  (k0/reent not yet set up)\n", psp_cpu.r[PSP_REG_SP]);
+    printf("  [3] state     sp=0x%08X  (%uK stack, k0/reent not yet set up)\n",
+           psp_cpu.r[PSP_REG_SP], MAIN_STACK_SIZE / 1024);
 
     /* 4 — static constructors.
      *

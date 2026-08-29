@@ -28,6 +28,14 @@ info "$(cat "$GEN"/*.c | wc -l) lines of C in $(ls "$GEN" | wc -l) files, $(du -
 # not how fast it runs. Optimised builds are a Phase 1 concern.
 CFLAGS=(-O0 -I "$ROOT/tools/psprecomp/include")
 
+# TRACE=1 records every function entry, so a failure names the functions that
+# led to it rather than just the one it happened in. Off by default: it costs a
+# store per call, and the ring is only useful when something has gone wrong.
+if [ "${TRACE:-0}" != "0" ]; then
+    CFLAGS+=(-DPSPRECOMP_TRACE)
+    info "trace instrumentation ON"
+fi
+
 info "compiling (~45s)"
 for src in "$GEN"/*.c; do
     cc -c "${CFLAGS[@]}" -o "$OBJ/$(basename "${src%.c}").o" "$src"
