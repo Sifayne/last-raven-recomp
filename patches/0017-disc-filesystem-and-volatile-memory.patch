@@ -1,8 +1,8 @@
 diff --git a/src/hle/iofilemgr.c b/src/hle/iofilemgr.c
-index 68af6aa..788d4cc 100644
+index 68af6aa..a59b013 100644
 --- a/src/hle/iofilemgr.c
 +++ b/src/hle/iofilemgr.c
-@@ -32,7 +32,11 @@
+@@ -32,7 +32,32 @@
  #define PSP_O_CREAT  0x0200
  #define PSP_O_TRUNC  0x0400
  
@@ -11,19 +11,43 @@ index 68af6aa..788d4cc 100644
 + * a file inside a disc image indistinguishable from a host file to everything
 + * downstream: the ISO is one host file and every asset is a range within it.
 + * A plain host file is the whole of `f`, so len is its size and base is 0. */
-+typedef struct { FILE *f; int used; uint64_t base, len, pos; } io_file;
++typedef struct {
++    FILE    *f;
++    int      used;
++    uint64_t base, len, pos;
++    /* The async result of the last operation on this descriptor, waiting to be
++     * collected by poll or wait. See the async block near the bottom. */
++    int      has_result;
++    int      close_pending;
++    int64_t  result;
++    /* The raw UMD block device counts in 2048-byte sectors, not bytes: both the
++     * offset given to sceIoLseek and the length given to sceIoRead are LBAs.
++     * A game streaming from the disc opens the device this way, stats each file
++     * to get its start sector, and seeks straight there. Treating those numbers
++     * as bytes reads 64 bytes from offset 58144 where the game asked for 64
++     * sectors from sector 58144 -- a plausible-looking read of entirely the
++     * wrong thing.
++     *
++     * PPSSPP marks the same distinction, in Core/FileSystems/ISOFileSystem.cpp:
++     *   "when open as umd1:... the param in sceIoLseek and sceIoRead is lba
++     *    mode. we must mark it." */
++    int      sector_mode;
++} io_file;
  
  typedef struct {
      int used;
-@@ -80,6 +84,7 @@ void psp_io_reset(void) {
+@@ -80,6 +105,10 @@ void psp_io_reset(void) {
          if (g_file[i].used && g_file[i].f) fclose(g_file[i].f);
          g_file[i].used = 0;
          g_file[i].f = NULL;
 +        g_file[i].base = g_file[i].len = g_file[i].pos = 0;
++        g_file[i].has_result = g_file[i].close_pending = 0;
++        g_file[i].result = 0;
++        g_file[i].sector_mode = 0;
      }
      memset(g_dir, 0, sizeof g_dir);
      g_bytes_read = 0;
-@@ -113,11 +118,39 @@ static void map_path(const char *guest, char *out, size_t cap) {
+@@ -113,11 +142,41 @@ static void map_path(const char *guest, char *out, size_t cap) {
      snprintf(out, cap, "%s/%s/%s", g_root, sub, p);
  }
  
@@ -51,6 +75,8 @@ index 68af6aa..788d4cc 100644
 +                if (g_file[i].used) continue;
 +                g_file[i].f = img; g_file[i].used = 1;
 +                g_file[i].base = base; g_file[i].len = len; g_file[i].pos = 0;
++                g_file[i].has_result = g_file[i].close_pending = 0;
++                g_file[i].sector_mode = is_raw_umd(guest);
 +                psp_ret((uint32_t)(i + 3));
 +                return;
 +            }
@@ -63,7 +89,7 @@ index 68af6aa..788d4cc 100644
      if (is_raw_umd(guest)) {
          if (!g_umd_image[0]) {
              static int complained;
-@@ -137,6 +170,10 @@ static void hle_Open(void) {
+@@ -137,6 +196,10 @@ static void hle_Open(void) {
              if (g_file[i].used) continue;
              g_file[i].f = f;
              g_file[i].used = 1;
@@ -74,7 +100,7 @@ index 68af6aa..788d4cc 100644
              psp_ret((uint32_t)(i + 3));
              return;
          }
-@@ -174,6 +211,13 @@ static void hle_Open(void) {
+@@ -174,6 +237,13 @@ static void hle_Open(void) {
          if (g_file[i].used) continue;
          g_file[i].f = f;
          g_file[i].used = 1;
@@ -88,7 +114,12 @@ index 68af6aa..788d4cc 100644
          psp_ret((uint32_t)(i + 3));   /* 0-2 are reserved for the std streams */
          return;
      }
-@@ -205,10 +249,19 @@ static void hle_Read(void) {
+@@ -201,14 +271,24 @@ static void hle_Read(void) {
+     uint32_t dst = psp_arg(1), size = psp_arg(2);
+     if (!h) { psp_ret(0x80020323); return; }
+     if (!size) { psp_ret(0); return; }
++    if (h->sector_mode) size *= ISO_SECTOR;   /* the count is in sectors */
+ 
      /* Read through a host buffer and then place it, so a read that straddles
       * the end of a guest region is rejected by the memory layer rather than
       * writing past it. */
@@ -109,7 +140,17 @@ index 68af6aa..788d4cc 100644
      if (got && psp_mem_write_block(dst, tmp, (uint32_t)got) != 0) {
          /* Fall back to byte-at-a-time so a partially mapped destination still
           * gets what fits, and the bad-access counter records the rest. */
-@@ -272,12 +325,257 @@ static void hle_Lseek(void) {
+@@ -216,7 +296,8 @@ static void hle_Read(void) {
+     }
+     free(tmp);
+     g_bytes_read += got;
+-    psp_ret((uint32_t)got);
++    /* Reported in whatever unit the caller asked in. */
++    psp_ret((uint32_t)(h->sector_mode ? got / ISO_SECTOR : got));
+ }
+ 
+ static void hle_Write(void) {
+@@ -272,12 +353,259 @@ static void hle_Lseek(void) {
      uint32_t whence = psp_arg(4);
      if (!h) { psp_ret(0x80020323); return; }
  
@@ -120,7 +161,8 @@ index 68af6aa..788d4cc 100644
 +     * SEEK_END mean the end of the *asset*, which is what a game seeking to
 +     * find a length expects, and the 64-bit offset is no longer truncated to
 +     * long on the way through. */
-+    const int64_t rel = (int64_t)off;
++    int64_t rel = (int64_t)off;
++    if (h->sector_mode) rel *= ISO_SECTOR;
 +    int64_t want;
 +    if      (whence == 1) want = (int64_t)h->pos + rel;   /* SEEK_CUR */
 +    else if (whence == 2) want = (int64_t)h->len + rel;   /* SEEK_END */
@@ -130,8 +172,9 @@ index 68af6aa..788d4cc 100644
 +    if ((uint64_t)want > h->len) want = (int64_t)h->len;
 +    h->pos = (uint64_t)want;
 +
-+    psp_cpu.r[PSP_REG_V0] = (uint32_t)h->pos;
-+    psp_cpu.r[PSP_REG_V1] = (uint32_t)(h->pos >> 32);
++    const uint64_t shown = h->sector_mode ? h->pos / ISO_SECTOR : h->pos;
++    psp_cpu.r[PSP_REG_V0] = (uint32_t)shown;
++    psp_cpu.r[PSP_REG_V1] = (uint32_t)(shown >> 32);
 +}
 +
 +/* SceIoStat, laid out exactly as pspiofilemgr_stat.h declares it:
@@ -180,10 +223,7 @@ index 68af6aa..788d4cc 100644
 +    /* The three timestamps stay zero. Nothing in a game's load path reads them,
 +     * and inventing a date would be less honest than reporting none. */
 +}
- 
--    long pos = ftell(h->f);
--    psp_cpu.r[PSP_REG_V0] = (uint32_t)pos;
--    psp_cpu.r[PSP_REG_V1] = 0;
++
 +static void hle_Getstat(void) {
 +    char guest[512], host[1024];
 +    psp_str(psp_arg(0), guest, sizeof guest);
@@ -223,7 +263,10 @@ index 68af6aa..788d4cc 100644
 +    uint64_t size = 0;
 +    if (fseeko(f, 0, SEEK_END) == 0) { const off_t n = ftello(f); if (n > 0) size = (uint64_t)n; }
 +    fclose(f);
-+
+ 
+-    long pos = ftell(h->f);
+-    psp_cpu.r[PSP_REG_V0] = (uint32_t)pos;
+-    psp_cpu.r[PSP_REG_V1] = 0;
 +    if (out) write_stat(out, 0, size, 0);   /* a host file has no disc sector */
 +    psp_ret(SCE_KERNEL_ERROR_OK);
 +}
@@ -372,11 +415,130 @@ index 68af6aa..788d4cc 100644
  }
  
  static void hle_Rename(void) {
-@@ -371,6 +669,7 @@ void psp_io_register(void) {
+@@ -364,6 +692,109 @@ static void hle_Dclose(void) {
+     psp_ret(0);
+ }
+ 
++/* ---- asynchronous I/O -------------------------------------------------------
++ *
++ * This is how a game actually streams from the disc. It queues an operation,
++ * carries on doing something else, and collects the answer later with poll or
++ * wait -- so the load never stalls the frame. Armored Core does all of its
++ * asset loading this way; the synchronous calls above are only used for
++ * metadata, which is why the disc was opened and never read.
++ *
++ * Here the "queue" completes before it returns: our reads are host reads from a
++ * file that is already in the page cache, and inventing a delay would only add
++ * a way to be wrong. So every operation stores its result immediately and poll
++ * reports it on the first ask.
++ *
++ * Behaviour follows PPSSPP's Core/HLE/sceIo.cpp:
++ *   - an operation still running    -> poll returns 1, wait blocks
++ *   - a result waiting              -> written as a 64-bit value, poll returns 0
++ *   - nothing outstanding           -> SCE_KERNEL_ERROR_NOASYNC
++ * The first case cannot arise here, which is the one place this differs from
++ * hardware: a game that depends on a read *not* having finished yet sees it
++ * finished. That is the safe direction -- the data is there either way.
++ */
++#define SCE_ERROR_BADF     0x80020323u
++#define SCE_ERROR_NOASYNC  0x80020321u
++
++static void async_done(io_file *h, int64_t value) {
++    h->result = value;
++    h->has_result = 1;
++}
++
++/* The async calls reuse the synchronous handlers rather than repeating them:
++ * the work is identical and the only difference is where the answer goes. A
++ * second copy of the read path would be a second thing to keep correct. */
++static void hle_OpenAsync(void) {
++    hle_Open();
++    const int32_t fd = (int32_t)psp_cpu.r[PSP_REG_V0] - 3;
++    if (fd >= 0 && fd < MAX_FILES && g_file[fd].used)
++        async_done(&g_file[fd], (int64_t)(int32_t)psp_cpu.r[PSP_REG_V0]);
++    /* Returns the descriptor, not a status: the caller needs it to poll on. */
++}
++
++static void hle_ReadAsync(void) {
++    io_file *h = fd_arg();
++    if (!h) { psp_ret(SCE_ERROR_BADF); return; }
++    hle_Read();
++    async_done(h, (int64_t)(int32_t)psp_cpu.r[PSP_REG_V0]);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++static void hle_WriteAsync(void) {
++    io_file *h = fd_arg();
++    if (!h) { psp_ret(SCE_ERROR_BADF); return; }
++    hle_Write();
++    async_done(h, (int64_t)(int32_t)psp_cpu.r[PSP_REG_V0]);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++static void hle_LseekAsync(void) {
++    io_file *h = fd_arg();
++    if (!h) { psp_ret(SCE_ERROR_BADF); return; }
++    hle_Lseek();
++    /* The seek result is 64-bit, returned in $v0:$v1. */
++    async_done(h, (int64_t)(((uint64_t)psp_cpu.r[PSP_REG_V1] << 32) |
++                            psp_cpu.r[PSP_REG_V0]));
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++/* The descriptor stays alive until the result is collected -- the close is
++ * the operation being waited on, and freeing the slot now would leave nothing
++ * to poll. */
++static void hle_CloseAsync(void) {
++    io_file *h = fd_arg();
++    if (!h) { psp_ret(SCE_ERROR_BADF); return; }
++    async_done(h, 0);
++    h->close_pending = 1;
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++static void collect_async(io_file *h) {
++    const uint32_t out = psp_arg(1);
++    if (out) {
++        psp_write32(out,     (uint32_t)(uint64_t)h->result);
++        psp_write32(out + 4, (uint32_t)((uint64_t)h->result >> 32));
++    }
++    h->has_result = 0;
++    if (h->close_pending) {
++        if (h->f) fclose(h->f);
++        h->f = NULL;
++        h->used = 0;
++        h->close_pending = 0;
++    }
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++static void hle_PollAsync(void) {
++    io_file *h = fd_arg();
++    if (!h) { psp_ret(SCE_ERROR_BADF); return; }
++    if (!h->has_result) { psp_ret(SCE_ERROR_NOASYNC); return; }
++    collect_async(h);
++}
++
++/* Nothing is ever still running, so waiting is collecting. */
++static void hle_WaitAsync(void) { hle_PollAsync(); }
++
+ void psp_io_register(void) {
+     psp_hle_register(0x109F50BC, "IoFileMgrForUser", "sceIoOpen",   hle_Open);
+     psp_hle_register(0x810C4BC3, "IoFileMgrForUser", "sceIoClose",  hle_Close);
+@@ -371,6 +802,16 @@ void psp_io_register(void) {
      psp_hle_register(0x42EC03AC, "IoFileMgrForUser", "sceIoWrite",  hle_Write);
      psp_hle_register(0x27EB27B8, "IoFileMgrForUser", "sceIoLseek",  hle_Lseek);
      psp_hle_register(0x779103A0, "IoFileMgrForUser", "sceIoRename", hle_Rename);
 +    psp_hle_register(0xACE946E8, "IoFileMgrForUser", "sceIoGetstat", hle_Getstat);
++
++    psp_hle_register(0x89AA9906, "IoFileMgrForUser", "sceIoOpenAsync",   hle_OpenAsync);
++    psp_hle_register(0xA0B5A7C2, "IoFileMgrForUser", "sceIoReadAsync",   hle_ReadAsync);
++    psp_hle_register(0x0FACAB19, "IoFileMgrForUser", "sceIoWriteAsync",  hle_WriteAsync);
++    psp_hle_register(0x71B19E77, "IoFileMgrForUser", "sceIoLseekAsync",  hle_LseekAsync);
++    psp_hle_register(0xFF5940B6, "IoFileMgrForUser", "sceIoCloseAsync",  hle_CloseAsync);
++    psp_hle_register(0x3251EA56, "IoFileMgrForUser", "sceIoPollAsync",   hle_PollAsync);
++    psp_hle_register(0xE23EEC33, "IoFileMgrForUser", "sceIoWaitAsync",   hle_WaitAsync);
++    psp_hle_register(0x35DBD746, "IoFileMgrForUser", "sceIoWaitAsyncCB", hle_WaitAsync);
      psp_hle_register(0xB29DDF9C, "IoFileMgrForUser", "sceIoDopen",  hle_Dopen);
      psp_hle_register(0xE3EB004C, "IoFileMgrForUser", "sceIoDread",  hle_Dread);
      psp_hle_register(0xEB092469, "IoFileMgrForUser", "sceIoDclose", hle_Dclose);
