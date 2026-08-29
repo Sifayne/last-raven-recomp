@@ -1,0 +1,299 @@
+diff --git a/tools/allegrexrecomp/analyze.c b/tools/allegrexrecomp/analyze.c
+index 8a9e174..a61f4c9 100644
+--- a/tools/allegrexrecomp/analyze.c
++++ b/tools/allegrexrecomp/analyze.c
+@@ -70,9 +70,13 @@ typedef struct {
+     u32list    *func_queue;
+     u32list    *imports;
+     u32list    *indirects;
+-    /* Branch targets already claimed by an earlier walk; promoted to entries
+-     * between rounds so they become reachable through dispatch. */
+-    u32list    *cross;
++    /* Pairs of function entries that a branch showed to be one function.
++     *
++     * A branch into a block another walk already claimed means both walks are
++     * inside the same original function -- whichever ran first simply took the
++     * block. Recorded here as (this function, the claimant) and reconciled
++     * once all walking is done. */
++    u32list    *merges;
+ } walk_ctx;
+ 
+ static int is_known_entry(const walk_ctx *c, uint32_t addr) {
+@@ -211,12 +215,16 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
+                          * walk-order artefact rather than a property of the
+                          * code -- whichever was traced first took it.
+                          *
+-                         * The emitter cannot express a branch into another C
+-                         * function's middle; it degrades to a dispatch, which
+-                         * then misses because the address is not an entry.
+-                         * Promoting it to one makes it reachable. Over-split
+-                         * is the safe direction; unreachable is not. */
+-                        u32_push(c->cross, in.target);
++                         * These are one function, so they are merged into one.
++                         * Promoting the target to an entry instead makes it
++                         * reachable, but at a price that is only visible at run
++                         * time: the branch becomes a C *call*, and when the two
++                         * blocks form a loop -- which is exactly what a branch
++                         * between them usually means -- every iteration of a
++                         * loop the guest runs in constant stack costs the host
++                         * a frame, until the stack is gone. */
++                        u32_push(c->merges, c->cur_owner);
++                        u32_push(c->merges, c->owner[ti]);
+                     } else {
+                         u32_push(&blocks, in.target);
+                     }
+@@ -263,10 +271,12 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
+                          * The branch path above has always promoted these. The
+                          * jump path did not, so a whole class of shared block
+                          * stayed unreachable. */
+-                        if ((c->seen[bi] & SEEN_CODE) && !c->entry_map[bi])
+-                            u32_push(c->cross, in.target);
+-                        else
++                        if ((c->seen[bi] & SEEN_CODE) && !c->entry_map[bi]) {
++                            u32_push(c->merges, c->cur_owner);
++                            u32_push(c->merges, c->owner[bi]);
++                        } else {
+                             u32_push(&blocks, in.target);
++                        }
+                     } else {
+                         uint32_t ti = word_index(an, in.target);
+                         if (!c->entry_map[ti]) {
+@@ -458,6 +468,91 @@ static int cmp_func(const void *a, const void *b) {
+     return (x > y) - (x < y);
+ }
+ 
++
++/* ---- reconciling functions that share a block ---------------------------- */
++
++/* Index of the function whose entry is exactly `addr`, or -1. `funcs` sorted. */
++static int func_index(const a_func *funcs, int n, uint32_t addr) {
++    int lo = 0, hi = n - 1;
++    while (lo <= hi) {
++        const int mid = (lo + hi) / 2;
++        if (funcs[mid].addr == addr) return mid;
++        if (funcs[mid].addr < addr) lo = mid + 1; else hi = mid - 1;
++    }
++    return -1;
++}
++
++static int uf_find(int *parent, int i) {
++    while (parent[i] != i) { parent[i] = parent[parent[i]]; i = parent[i]; }
++    return i;
++}
++
++/* Always keep the lower index -- and so the lower address -- as the
++ * representative, which makes the result independent of the order the merges
++ * were discovered in. */
++static void uf_union(int *parent, int a, int b) {
++    a = uf_find(parent, a);
++    b = uf_find(parent, b);
++    if (a == b) return;
++    if (a < b) parent[b] = a; else parent[a] = b;
++}
++
++/* Collapse each set of functions that share blocks into one.
++ *
++ * Ownership is rewritten to the representative, the a_func records are folded
++ * together, and the entries that stop being functions are recorded so the
++ * emitter still gives them a label -- something may call one, and it has to
++ * remain reachable through dispatch even though it is no longer a C function
++ * of its own.
++ *
++ * Returns the new function count. */
++static int merge_shared(a_analysis *an, a_func *funcs, int nfuncs,
++                        const u32list *merges, uint8_t *split_entry) {
++    if (nfuncs <= 0) return nfuncs;
++
++    int *parent = (int *)malloc((size_t)nfuncs * sizeof *parent);
++    if (!parent) return nfuncs;
++    for (int i = 0; i < nfuncs; i++) parent[i] = i;
++
++    for (int i = 0; i + 1 < merges->n; i += 2) {
++        const int a = func_index(funcs, nfuncs, merges->v[i]);
++        const int b = func_index(funcs, nfuncs, merges->v[i + 1]);
++        if (a >= 0 && b >= 0) uf_union(parent, a, b);
++    }
++
++    /* Fold the members into their representative. */
++    for (int i = 0; i < nfuncs; i++) {
++        const int r = uf_find(parent, i);
++        if (r == i) continue;
++        a_func *rep = &funcs[r], *m = &funcs[i];
++        if (m->start < rep->start) rep->start = m->start;
++        if (m->end   > rep->end)   rep->end   = m->end;
++        rep->insns        += m->insns;
++        rep->has_return   |= m->has_return;
++        rep->has_indirect |= m->has_indirect;
++        rep->has_vfpu     |= m->has_vfpu;
++        if (a_in_range(an, m->addr))
++            split_entry[word_index(an, m->addr)] = 1;
++    }
++
++    /* Rewrite ownership to the representative. */
++    for (uint32_t w = 0; w < an->nwords; w++) {
++        if (an->owner[w] == A_NO_OWNER) continue;
++        const int i = func_index(funcs, nfuncs, an->owner[w]);
++        if (i < 0) continue;
++        an->owner[w] = funcs[uf_find(parent, i)].addr;
++    }
++
++    /* Compact, keeping only the representatives. Order is preserved, so the
++     * result is still sorted by address. */
++    int out = 0;
++    for (int i = 0; i < nfuncs; i++)
++        if (uf_find(parent, i) == i) funcs[out++] = funcs[i];
++
++    free(parent);
++    return out;
++}
++
+ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+     an->funcs = NULL; an->nfuncs = 0;
+     an->imports = NULL; an->nimports = 0;
+@@ -481,9 +576,9 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+     if (!owner) { free(seen); free(entry_map); return -1; }
+     for (uint32_t i = 0; i < nwords; i++) owner[i] = A_NO_OWNER;
+ 
+-    u32list queue = { 0 }, imports = { 0 }, indirects = { 0 }, cross = { 0 };
++    u32list queue = { 0 }, imports = { 0 }, indirects = { 0 }, merges = { 0 };
+     walk_ctx ctx = { an, seen, entry_map, owner, A_NO_OWNER,
+-                     &queue, &imports, &indirects, &cross };
++                     &queue, &imports, &indirects, &merges };
+ 
+     /* Pass 1: establish the complete set of function entries before walking
+      * anything. Both the tail-call test and the ran-off-the-end test need to
+@@ -535,14 +630,15 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+  * converges in a handful of rounds. */
+     for (int round = 0; round < 8; round++) {
+     if (round > 0) {
+-        if (!an->image && !cross.n && !indirects.n) break;
++        /* Merges no longer drive another round: they change ownership, not the
++         * entry set, so re-walking would produce exactly the same split. Only
++         * jump tables can still reveal new entries. */
++        if (!an->image && !indirects.n) break;
+         u32list targets = { 0 };
+         for (int i = 0; i < indirects.n; i++) {
+             int n = resolve_jump_table(an, indirects.v[i], &targets);
+             if (n > 0) { an->ntables++; an->ntable_targets += n; }
+         }
+-        for (int i = 0; i < cross.n; i++) u32_push(&targets, cross.v[i]);
+-        cross.n = 0;
+         indirects.n = 0;
+         int added = 0;
+         for (int i = 0; i < targets.n; i++) {
+@@ -574,6 +670,9 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+          * afterwards is not. */
+         memset(seen, 0, nwords);
+         for (uint32_t i = 0; i < nwords; i++) owner[i] = A_NO_OWNER;
++        /* Ownership is about to be rebuilt, so merges naming the old owners
++         * mean nothing. Only the final walk's are applied. */
++        merges.n = 0;
+         an->insns = an->vfpu = an->invalid = 0;
+         nfuncs = 0;
+ 
+@@ -613,6 +712,20 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+ 
+     qsort(funcs, (size_t)nfuncs, sizeof *funcs, cmp_func);
+ 
++    an->owner = owner;
++    an->nwords = nwords;
++
++    /* Ownership has to be final before the emitter sees it, and merging is
++     * what makes a branch between two shared blocks an ordinary `goto` rather
++     * than a call that never returns. Ownership is published first because the
++     * merge rewrites it in place. */
++    an->split_entry = (uint8_t *)calloc(nwords ? nwords : 1, 1);
++    if (an->split_entry) {
++        const int before = nfuncs;
++        nfuncs = merge_shared(an, funcs, nfuncs, &merges, an->split_entry);
++        an->nmerged = before - nfuncs;
++    }
++
+     an->funcs = funcs;
+     an->nfuncs = nfuncs;
+     an->imports = imports.v;
+@@ -620,10 +733,7 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+     an->indirects = indirects.v;
+     an->nindirects = indirects.n;
+ 
+-    an->owner = owner;
+-    an->nwords = nwords;
+-
+-    free(cross.v);
++    free(merges.v);
+     free(queue.v);
+     free(seen);
+     free(entry_map);
+@@ -657,6 +767,7 @@ void a_analysis_free(a_analysis *an) {
+     free(an->imports);
+     free(an->indirects);
+     free(an->owner);
++    free(an->split_entry);
+     an->funcs = NULL;
+     an->imports = NULL;
+     an->indirects = NULL;
+diff --git a/tools/allegrexrecomp/analyze.h b/tools/allegrexrecomp/analyze.h
+index 041c130..463339d 100644
+--- a/tools/allegrexrecomp/analyze.h
++++ b/tools/allegrexrecomp/analyze.h
+@@ -118,6 +118,13 @@ typedef struct {
+      * whole [addr, end) range instead would pull in a neighbour's code. */
+     uint32_t *owner;
+     uint32_t  nwords;
++
++    /* Words that were a function entry until the function was merged into
++     * another. They are no longer C functions, so the emitter has to give them
++     * a label and a dispatch thunk: something may still call one, and the call
++     * becomes a dispatch on the address. */
++    uint8_t  *split_entry;
++    int       nmerged;      /* functions folded into another */
+ } a_analysis;
+ 
+ #define A_NO_OWNER 0xFFFFFFFFu
+diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
+index e8bc9e9..140d24e 100644
+--- a/tools/allegrexrecomp/emit.c
++++ b/tools/allegrexrecomp/emit.c
+@@ -519,8 +519,21 @@ static void emit_slot_alias(ectx *c, uint32_t a, const a_insn *slot, int falls_t
+     const uint32_t after = a + 8;
+ 
+     if (falls_through) {
+-        if (owned_by(an, after, owner)) fprintf(c->out, "    goto L_%08X;\n", after);
+-        else                            fprintf(c->out, "    return;\n");
++        /* Jumping past the standalone copy needs a label to jump to, and the
++         * main pass prints one only for an address it actually emits -- which
++         * it does not when that address is itself a delay slot, since a slot is
++         * emitted with its branch. That happens when a *branch* sits in a delay
++         * slot, which real code never does; it appears where data is being
++         * decoded as instructions. Dispatching instead of jumping keeps such a
++         * region compiling, and it can only ever be reached by executing the
++         * data, which reports a dispatch miss rather than failing silently. */
++        const uint32_t ai = widx(an, after);
++        if (owned_by(an, after, owner) && c->is_label[ai] && !c->is_slot[ai])
++            fprintf(c->out, "    goto L_%08X;\n", after);
++        else if (owned_by(an, after, owner))
++            fprintf(c->out, "    psp_dispatch(0x%08Xu);\n    return;\n", after);
++        else
++            fprintf(c->out, "    return;\n");
+     }
+     fprintf(c->out, "L_%08X:\n", a + 4);
+     comment(c, slot);
+@@ -568,6 +581,18 @@ static void emit_function(ectx *c, const a_func *fn) {
+      * against a label nothing declared. */
+     c->is_label[widx(an, fn->addr)] = 1;
+ 
++    /* An entry that stopped being a function when discovery merged it into
++     * this one. Nothing here need branch to it -- the merge was driven by a
++     * branch to some *other* block of it -- but a `jal` elsewhere still names
++     * the address, and that call is now emitted as a dispatch. Without a label
++     * there is no thunk to dispatch to. */
++    if (an->split_entry) {
++        for (uint32_t a = fn->start; a < fn->end; a += 4) {
++            if (!owned_by(an, a, owner)) continue;
++            if (an->split_entry[widx(an, a)]) c->is_label[widx(an, a)] = 1;
++        }
++    }
++
+     /* Any address another function falls through into has to be reachable
+      * here, even though nothing in this function branches to it. */
+     if (c->is_fallthrough_target) {
