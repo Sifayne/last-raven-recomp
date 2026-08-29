@@ -134,6 +134,17 @@ something inexplicable, check what it was last told.
 - **The GE block transfer as how textures arrive.** Implemented, and never
   used — the command does not appear in the stream, and the game imports no
   `sceDmac` either. How textures reach memory here is still unknown.
+- **`sceDisplayGetFramePerSec` as the reason the game draws nothing.** It was
+  28,470 of the 28,482 unimplemented calls in a run and returns a float on the
+  frame path, so a zero looked certain to poison the frame timing. Implemented:
+  the picture did not change by a single pixel.
+- **The `sceKernelWaitSema cannot be satisfied` report as a blocker.** It is
+  teardown noise *after* the 60s drain deadline — drain gives up, the main
+  context takes the token back, and the still-running thread's next wait then
+  finds main `RUNNING` rather than `READY`. It fires once, after the
+  `still running after 60s` line. Check the order before reading anything into
+  it; stderr is unbuffered and stdout is not, so the two interleave misleadingly
+  in a redirected log.
 - **The scheduler as the reason the game does not progress.** Measured three
   ways: the current build, the scheduler with its token fix reverted, and the
   fully original semantics. All three are functionally identical — same 19
@@ -149,14 +160,25 @@ it from transcripts, and inherited a stale premise doing so. Anything worth
 picking up next session goes here, in the repository, with enough context to act
 on without the conversation that produced it.
 
-1. **The frame loop presents forever without submitting geometry.** The game is
-   not stuck; it repeats. ~1.7M frame presents against 21 GE lists for the whole
-   run. Thread `0x40021` (entry `0x0027594C`) is parked on a semaphore — find
-   which, and who was supposed to signal it. Start with `PSPRECOMP_HLE_LOG=1`,
-   which tags every call with its thread. Note the 28,637 unimplemented
-   firmware calls in the same run, `0xDBA6C4C4` among them: an unimplemented
-   call returns 0, 0 is `SCE_KERNEL_ERROR_OK`, and this project has been bitten
-   by that four times already.
+1. **The game never leaves its intro-movie state.** It is not stuck; it
+   repeats — ~2.3M frame presents against 21 GE lists for the whole run. The
+   blocked-thread dump now names the object, and that settles it:
+
+   ```
+   uid 0x00040021  entry 0x0027594C  prio 16  blocked on sceKernelWaitSema(Movie Sync sema)
+   ```
+
+   Nothing can ever signal it, because sceMpeg playback is refused. So the game
+   waits out a movie that cannot finish, presenting blank frames, and the state
+   machine never advances to anything that would submit geometry. Making the
+   movie path terminate is the next move — either drive the game's own teardown
+   from the refusal, or report a clean end-of-stream instead of refusing, which
+   is the more honest of the two.
+
+   `sceDisplayGetFramePerSec` was the obvious suspect and is **not** the cause:
+   28,470 of the run's 28,482 unimplemented calls, returning zero on the frame
+   path, and implementing it changed nothing at all. It is implemented anyway;
+   unimplemented calls are down to 12, all cold.
 2. **Shared epilogues split into pseudo-functions.** Partly fixed; the
    remainder is below. What the `$sp` reports are really about, now that the
    instrument can say so:
