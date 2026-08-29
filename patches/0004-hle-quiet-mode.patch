@@ -1,5 +1,5 @@
 diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
-index 780f40f..4124cd0 100644
+index 780f40f..35c9854 100644
 --- a/include/psprecomp/hle.h
 +++ b/include/psprecomp/hle.h
 @@ -40,6 +40,10 @@ int psp_hle_is_named(int index);
@@ -13,8 +13,20 @@ index 780f40f..4124cd0 100644
  /* Look up what is registered, for reporting. Returns NULL if absent. */
  const char *psp_hle_name(uint32_t nid);
  int         psp_hle_count(void);
+@@ -145,6 +149,11 @@ uint64_t psp_io_bytes_read(void);
+ void psp_misc_init(void);
+ void psp_misc_register(void);
+ void psp_misc_reset(void);
++
++/* ---- sceUmdUser ---------------------------------------------------------- */
++void psp_umd_init(void);
++void psp_umd_register(void);
++void psp_umd_reset(void);
+ int  psp_exit_requested(void);
+ void psp_ctrl_set(uint32_t buttons, uint8_t ax, uint8_t ay);
+ uint64_t psp_audio_blocks(void);
 diff --git a/src/hle/hle.c b/src/hle/hle.c
-index cc19336..4c2988a 100644
+index cc19336..778152a 100644
 --- a/src/hle/hle.c
 +++ b/src/hle/hle.c
 @@ -69,12 +69,37 @@ const psp_hle_entry *psp_hle_entries(int *count) {
@@ -94,3 +106,10 @@ index cc19336..4c2988a 100644
      psp_ret(0);
  }
  
+@@ -156,4 +182,6 @@ void psp_hle_init(void) {
+     psp_io_register();
+     psp_misc_init();
+     psp_misc_register();
++    psp_umd_init();
++    psp_umd_register();
+ }

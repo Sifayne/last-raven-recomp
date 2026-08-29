@@ -103,8 +103,6 @@ static void hle_stop_unload_self(void) {
      * here, which is the only practical way to tell *which* abort fired: the
      * abort wrapper has several callers and static analysis cannot say which
      * one ran. Without the define it compiles to nothing and says so. */
-    printf("    --- guest exit(%u); how it got here ---\n", g_exit_status);
-    psp_trace_dump();
     g_reason = 5;
     siglongjmp(g_abort, 1);
 }
@@ -155,6 +153,10 @@ static int guarded_call(uint32_t addr, unsigned timeout_s, const char *what) {
     if (g_reason == 1 || g_reason == 4) printf(" at 0x%08X", g_reason_addr);
     if (g_reason == 5) printf("(%u)", g_exit_status);
     printf("\n");
+    /* However the call stopped, the functions entered on the way there are the
+     * useful part -- and a timeout needs them most, because unlike a trap it
+     * carries no address of its own. Empty unless built -DPSPRECOMP_TRACE. */
+    psp_trace_dump();
     return -1;
 }
 
