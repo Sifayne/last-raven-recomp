@@ -54,7 +54,7 @@ index 0000000..6289560
 +
 +#endif /* PSPRECOMP_CLOCK_H */
 diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
-index 79424f8..4f0f5be 100644
+index 79424f8..669b45a 100644
 --- a/include/psprecomp/hle.h
 +++ b/include/psprecomp/hle.h
 @@ -61,8 +61,19 @@ const psp_hle_entry *psp_hle_entries(int *count);
@@ -87,6 +87,26 @@ index 79424f8..4f0f5be 100644
  #define SCE_KERNEL_ERROR_WAIT_TIMEOUT    0x800201A8
  
  /* ---- the subsystems ------------------------------------------------------ */
+@@ -125,6 +139,10 @@ void psp_display_reset(void);
+ int      psp_display_capture(const char *path);
+ uint64_t psp_display_vblanks(void);
+ uint32_t psp_display_framebuffer(void);
++/* The stride in pixels and the pixel format the display is scanning out, so a
++ * caller can read the framebuffer without guessing its shape. */
++uint32_t psp_display_stride(void);
++uint32_t psp_display_format(void);
+ 
+ void psp_ge_init(void);
+ void psp_ge_register(void);
+@@ -133,6 +151,8 @@ void psp_ge_dump_stats(FILE *out);
+ uint64_t psp_ge_command_count(void);
+ uint64_t psp_ge_vertex_count(void);
+ uint64_t psp_ge_pixels(void);
++/* The address the GE last rendered into, VRAM base applied. */
++uint32_t psp_ge_target(void);
+ 
+ void psp_sas_init(void);
+ void psp_sas_register(void);
 diff --git a/src/hle/clock.c b/src/hle/clock.c
 new file mode 100644
 index 0000000..f0006b7
@@ -121,7 +141,7 @@ index 0000000..f0006b7
 +
 +void psp_clock_frame(void) { g_us += PSP_FRAME_US; }
 diff --git a/src/hle/display.c b/src/hle/display.c
-index 0a619bb..fa8176c 100644
+index 0a619bb..4a43117 100644
 --- a/src/hle/display.c
 +++ b/src/hle/display.c
 @@ -10,6 +10,8 @@
@@ -133,7 +153,16 @@ index 0a619bb..fa8176c 100644
  #include "psprecomp/hle.h"
  
  #include <stdio.h>
-@@ -134,6 +136,13 @@ static void hle_SetFrameBuf(void) {
+@@ -46,6 +48,8 @@ void psp_display_init(void) { psp_display_reset(); }
+ 
+ uint64_t psp_display_vblanks(void) { return g_vblank_count; }
+ uint32_t psp_display_framebuffer(void) { return g_fb_addr; }
++uint32_t psp_display_stride(void)      { return g_fb_width; }
++uint32_t psp_display_format(void)      { return g_fb_format; }
+ 
+ /* Expand one source pixel to RGBA8888. The 16-bit formats replicate their high
+  * bits into the low ones on expansion; simply shifting left leaves the maximum
+@@ -134,6 +138,13 @@ static void hle_SetFrameBuf(void) {
   * stuck. */
  static void hle_WaitVblank(void) {
      g_vblank_count++;
@@ -147,7 +176,7 @@ index 0a619bb..fa8176c 100644
      psp_ret(SCE_KERNEL_ERROR_OK);
  }
  
-@@ -174,6 +183,7 @@ void psp_display_register(void) {
+@@ -174,6 +185,7 @@ void psp_display_register(void) {
      psp_hle_register(0x0E20F177, "sceDisplay", "sceDisplaySetMode",           hle_SetMode);
      psp_hle_register(0x289D82FE, "sceDisplay", "sceDisplaySetFrameBuf",       hle_SetFrameBuf);
      psp_hle_register(0x36CDFADE, "sceDisplay", "sceDisplayWaitVblank",        hle_WaitVblank);
@@ -155,6 +184,51 @@ index 0a619bb..fa8176c 100644
      psp_hle_register(0x46F186C3, "sceDisplay", "sceDisplayWaitVblankStartCB", hle_WaitVblank);
      psp_hle_register(0x9C6EAAD7, "sceDisplay", "sceDisplayGetVcount",         hle_GetVcount);
      psp_hle_register(0x210EAB3A, "sceDisplay", "sceDisplayGetAccumulatedHcount",
+diff --git a/src/hle/ge.c b/src/hle/ge.c
+index f610b98..b59a7cf 100644
+--- a/src/hle/ge.c
++++ b/src/hle/ge.c
+@@ -148,8 +148,25 @@ uint64_t psp_ge_vertex_count(void)  { return g_ge.vertices; }
+ #define VT_THROUGH(v) (((v) >> 23) & 1)
+ 
+ 
++/* Where the GE actually writes.
++ *
++ * FBP is an offset into VRAM, not an address: the base is implicit in the
++ * hardware and never appears in the display list. This game sets 0x00088000
++ * and expects 0x04088000 -- which it confirms itself, by flushing the cache
++ * over exactly that address before it presents.
++ *
++ * Taking the offset literally does not merely draw in the wrong place. The
++ * module image is mapped at zero, so 0x00088000 lands inside the game's own
++ * code, and every rasterized pixel overwrites an instruction. */
++static uint32_t ge_fb_address(uint32_t fbp) {
++    return PSP_VRAM_BASE | (fbp & 0x001FFFF0u);
++}
++
+ uint64_t psp_ge_pixels(void) { return psp_render_pixels(); }
+ 
++/* Where the GE last drew, as a real address. */
++uint32_t psp_ge_target(void) { return g_ge.fbp ? ge_fb_address(g_ge.fbp) : 0; }
++
+ /* Size of one vertex in bytes, and the offsets within it. Components appear in
+  * a fixed order (weights, texture, colour, normal, position) and each is
+  * aligned to its own size, which is what makes the stride awkward enough to be
+@@ -322,12 +339,12 @@ static void run_list(ge_queue *q) {
+         case GE_VTYPE: g_ge.vtype = arg; break;
+         case GE_FBP:
+             g_ge.fbp = (g_ge.fbp & 0xFF000000u) | arg;
+-            psp_render_current()->set_target(g_ge.fbp, g_ge.fbw, 0);
++            psp_render_current()->set_target(ge_fb_address(g_ge.fbp), g_ge.fbw, 0);
+             break;
+         case GE_FBW:
+             g_ge.fbw = arg & 0xFFFF;
+             g_ge.fbp = (g_ge.fbp & 0x00FFFFFFu) | ((arg & 0xFF0000) << 8);
+-            psp_render_current()->set_target(g_ge.fbp, g_ge.fbw, 0);
++            psp_render_current()->set_target(ge_fb_address(g_ge.fbp), g_ge.fbw, 0);
+             break;
+ 
+         case GE_VADDR: g_ge.vaddr = (q->base | (arg & 0xFFFFFF)); break;
 diff --git a/src/hle/hle.c b/src/hle/hle.c
 index 778152a..e179114 100644
 --- a/src/hle/hle.c

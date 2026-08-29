@@ -142,6 +142,63 @@ static void watch_hit(uint32_t addr) {
     }
 }
 
+/* Write the framebuffer the display is scanning out to a PPM.
+ *
+ * The whole point of a rasterizer is that you can look at what it produced,
+ * and until now nothing here could: the GE counted geometry and the summary
+ * reported numbers. A PPM because it needs no library and any viewer opens it.
+ *
+ * The image is what the *guest* believes it is showing -- the address comes
+ * from its last sceDisplaySetFrameBuf -- so an empty file is a real answer
+ * too: it means the game never pointed the display anywhere. */
+static void dump_framebuffer(void) {
+    /* The buffer the GE last drew into, falling back to the one the display is
+     * scanning out. They are usually different -- the game renders to the back
+     * buffer and presents the front -- and the interesting one during bring-up
+     * is where the drawing went. */
+    uint32_t base   = psp_ge_target();
+    if (!base) base = psp_display_framebuffer();
+    const uint32_t stride = psp_display_stride();
+    if (!base || !stride) {
+        printf("frame:    not dumped -- the guest never set a framebuffer\n");
+        return;
+    }
+
+    const char *path = getenv("PSPRECOMP_FRAME");
+    if (!path || !*path) path = "frame.ppm";
+
+    enum { W = 480, H = 272 };          /* the panel, whatever the stride is */
+    FILE *f = fopen(path, "wb");
+    if (!f) { printf("frame:    cannot write %s\n", path); return; }
+    fprintf(f, "P6\n%d %d\n255\n", W, H);
+
+    const uint32_t fmt = psp_display_format();
+    uint64_t nonzero = 0;
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            const uint32_t at = base + (uint32_t)(y * (int)stride + x) *
+                                (fmt == 3 ? 4u : 2u);
+            uint8_t rgb[3];
+            if (fmt == 3) {                       /* 8888 */
+                const uint32_t p = psp_read32(at);
+                rgb[0] = (uint8_t)(p & 0xFF);
+                rgb[1] = (uint8_t)((p >> 8) & 0xFF);
+                rgb[2] = (uint8_t)((p >> 16) & 0xFF);
+            } else {                              /* 5650 / 5551 / 4444 */
+                const uint16_t p = (uint16_t)psp_read16(at);
+                rgb[0] = (uint8_t)((p & 0x1F) << 3);
+                rgb[1] = (uint8_t)(((p >> 5) & 0x3F) << 2);
+                rgb[2] = (uint8_t)(((p >> 11) & 0x1F) << 3);
+            }
+            if (rgb[0] || rgb[1] || rgb[2]) nonzero++;
+            fwrite(rgb, 1, 3, f);
+        }
+    }
+    fclose(f);
+    printf("frame:    %s  (0x%08X stride %u fmt %u, %llu of %d pixels non-black)\n",
+           path, base, stride, fmt, (unsigned long long)nonzero, W * H);
+}
+
 static void install_watch(void) {
     const char *v = getenv("PSPRECOMP_WATCH");
     if (!v || !*v) return;
@@ -386,6 +443,10 @@ int main(int argc, char **argv) {
            live == 0 ? "all finished" : "still alive (see the deadlock report above)");
     printf("bad mem:  %llu accesses\n", (unsigned long long)psp_mem_bad_access);
     printf("disc read: %llu bytes\n", (unsigned long long)psp_io_bytes_read());
+    printf("pixels:   %llu drawn by the rasterizer\n",
+           (unsigned long long)psp_ge_pixels());
+    psp_ge_dump_stats(stdout);
+    dump_framebuffer();
     printf("  most-called firmware functions:\n");
     psp_hle_dump_calls(stdout, 12);
     psp_hle_dump_recent(stdout);
