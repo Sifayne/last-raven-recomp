@@ -653,11 +653,13 @@ int main(int argc, char **argv) {
      *
      * It used to default to the .text walk, which reads as "test everything"
      * and is not. The dispatch table holds interior labels as well as function
-     * entries -- 42,681 against 16,494 on this module -- so five sixths of what
-     * the walk attempts was never independently callable, and the $sp-balance
-     * check throws it away only after running it. Worse, at that table density
-     * (~7.8% of .text words resolve) a --limit of 5,000 stops around
-     * 0x0003D7B0: about 8% of a 3.03 MB .text, all of it at the low end. Two
+     * entries -- roughly five labels for every entry on this module, about
+     * 59,000 dispatch registrations against about 16,000 functions -- so most
+     * of what the walk attempts was never independently callable, and the
+     * $sp-balance check throws it away only after running it. Worse, at that
+     * table density (under a tenth of .text words resolve) a --limit of 5,000
+     * stops a few hundred KB in: single-digit percent of a 3 MB .text,
+     * all of it at the low end. Two
      * runs straddling an emitter change that reclaimed 171 functions produced
      * byte-identical reports for exactly that reason -- every function the
      * change touched was past the window.
@@ -810,14 +812,16 @@ int main(int argc, char **argv) {
      * limited run is representative and two runs at the same limit still line
      * up entry for entry. Round the stride *up*, so it reaches the last entry
      * instead of exhausting the budget at nine tenths of the way through; the
-     * cost is that `--limit 5000` on 16,494 entries selects about 4,124 rather
-     * than exactly 5,000. The header says which, so nobody has to infer it. */
+     * cost is that `--limit 5000` on ~16,000 entries strides by 4 and selects
+     * about 4,100 rather than exactly 5,000. The header says which, so nobody
+     * has to infer it -- and so this comment does not have to carry a count
+     * that changes every time discovery is rebuilt. */
     long stride = 1;
     if (worklist && limit > 0 && !want_prefix && nwork > limit)
         stride = (nwork + limit - 1) / limit;
 
     /* --from overrides whatever work-list was built, so do not describe one:
-     * a header advertising 16,494 entries above a run that tested a single
+     * a header advertising the whole entry list above a run that tested a single
      * address is exactly the sort of thing this change exists to stop. */
     if (have_only) {
         printf("only:     0x%08X (single function; work-list ignored)\n", only);

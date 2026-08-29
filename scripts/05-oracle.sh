@@ -43,9 +43,12 @@ cc -o "$BIN" "$GEN_OBJ/oracle_diff.o" \
 
 # The work-list is the discovered function *entries*, not every address the
 # dispatch table happens to resolve. The table also holds interior labels —
-# 42,681 of them against 16,494 entries on this module — and entering a function
+# roughly five labels for every entry on this module — and entering a function
 # past its own prologue is not a call, so those comparisons mean nothing and the
 # $sp-balance check discards them only after paying to run each one.
+#
+# Exact counts are deliberately not quoted here: they move every time discovery
+# is rebuilt. The run prints its own worklist size and sampled span.
 #
 # The .text walk still answers how much of the table is reachable at all, so it
 # stays available; asking for it means the entry list is not the work-list.

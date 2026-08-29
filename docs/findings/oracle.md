@@ -1,11 +1,16 @@
 # Phase 1 — the differential oracle
 
-**Status: goal reached. Four real emitter bugs found, fixed, and confirmed;
-every divergence across the full corpus has a verdict.**
+**Status: four real emitter bugs found, fixed, and confirmed. Every divergence
+of the *pre-merge* corpus had a verdict; the merged build's 9 do not yet.**
 
-12,240 functions compared, **12,237 agree**. Of the 3 that do not, 2 are an
-IEEE-754 NaN sign bit (not a bug) and 1 is documented as unresolved with a
-reproduction.
+Latest full-corpus run (2026-08-29, merged build, 15,858-entry discovery):
+**12,441 compared, 12,432 agree, 9 differ** — and the 9 are 4 distinct
+signatures, one of which accounts for six of them. None triaged yet.
+
+The earlier pre-merge run reported 12,240 compared / 12,237 agree / 3 differ,
+with verdicts on all three: 2 an IEEE-754 NaN sign bit (not a bug) and 1
+unresolved with a reproduction. Those verdicts stand for that build; they do not
+carry over to the 9 above.
 
 Reproduce with `scripts/05-oracle.sh` — an argument caps attempts, `0` runs the
 whole entry list — then `scripts/06-triage.py`. Measured 2026-08-27 against
@@ -160,26 +165,64 @@ The 27-function `$v0` cluster and every `$sp` cluster are gone.
 
 ## Corpus results — every divergence has a verdict
 
-All 26,462 discovered function entries, `reports/05-oracle-full.txt`:
+> **Counts below move whenever `psprecomp` is rebuilt.** Discovery changed three
+> times in the ten minutes around 2026-08-29 15:00 — entry counts of 16,494,
+> 16,665 and 15,858 in succession — as *reunite shared epilogues* landed. Every
+> table here is therefore a dated measurement against a named build, not a
+> standing fact. Re-measure with `scripts/05-oracle.sh 0`; it takes about six
+> and a half minutes and prints its own work-list size in the header.
+>
+> The full run below is against **15,858 entries, which is the state that
+> commit settled on** — so it describes current `HEAD`, not a superseded build.
 
-| | |
-|---|---:|
-| attempted | 26,462 |
-| **compared** | **12,240** |
-| **agree** | **12,237 (99.98%)** |
-| **differ** | **3** |
+### 2026-08-29, merged build, 15,858-entry discovery
 
-Skipped, and why each category is a skip rather than a failure:
+The first full-corpus run over the function-entry list after the work-list
+change. Build fingerprint: 15,858 entries, 59,174 dispatch registrations.
 
-| | count | |
+| | | |
 |---|---:|---|
-| trapped | 13,670 | an unimplemented instruction on one side, overwhelmingly VFPU |
-| interpreter hung | 300 | an HLE handler re-entered guest code and landed somewhere that does not return |
-| unbalanced `$sp` | 249 | the entry was not independently callable — discovery split past a prologue |
-| import thunk | 25 | the firmware boundary, not guest code |
-| host fault | 3 | recompiled code runs on the host stack; a deep guest chain overflows it |
+| attempted | 15,833 | 15,858 entries less 25 import thunks |
+| **compared** | **12,441** | **78.6% of attempts** |
+| **agree** | **12,432 (99.93%)** | |
+| **differ** | **9** | 4 distinct signatures — see below |
 
-### Verdicts on the remaining 3
+| skipped | count | |
+|---|---:|---|
+| trapped | 3,374 | an unimplemented instruction on one side, mostly VFPU |
+| unbalanced `$sp` | 16 | the entry was not independently callable |
+| import thunk | 25 | the firmware boundary, not guest code |
+| recomp hung | 2 | interpreter returned; recompiled C did not |
+| interpreter hung | 0 | |
+| host fault | 0 | |
+| unregistered | 0 | every discovered entry was registered by the emitter |
+
+The 9 divergences are **4 signatures**, not 9 independent findings:
+
+| addresses | signature |
+|---|---|
+| `0x001457A0`, `0x00145A14`, `0x001955B4`, `0x00195654`, `0x00195748`, `0x001957FC` | one stack word, `interp=005E2C2F recomp=003323A0` — identical on all six |
+| `0x0001093C` | the known one, below |
+| `0x00133A18` | `module[00421158]`, `interp=80202000 recomp=00000000` |
+| `0x001407B4` | `module[0032055C]` plus one stack word |
+
+The six-address cluster is one defect reported six times. None are triaged yet,
+and all are leads rather than bugs — see the base rate below.
+
+Also new and unexplained: the stop-reason tally lists `recomp: sll` twice and
+`recomp: sra` once. The *recompiled* side calling `psp_unimplemented` for
+ordinary shifts is not a shape that has appeared before and is worth a look.
+
+### Superseded: the pre-merge full run
+
+The table this section used to carry — 26,462 attempted, 12,240 compared, 3
+differ, 249 unbalanced `$sp`, 13,670 trapped — was measured against a
+pre-merge discovery with a different entry list, and `reports/05-oracle-full.txt`
+on disk is a *different, later* pre-merge run again (25,555 attempted, 12,479
+compared, 2 differ + 28 dispatch-miss, 204 unbalanced). Neither is comparable
+line-for-line with the run above. Kept only as a record that the numbers moved.
+
+### Verdicts on the 3 divergences of the pre-merge run
 
 **2 of 3 — NaN sign bit. Not a bug.** `0x00003630` and `0x001FC6A8` differ by one
 stack word: `7FC00000` against `FFC00000`. Those are quiet NaNs differing only in
@@ -232,9 +275,20 @@ calling it directly could never balance the stack, and a loop emitted as
 recursion is what exhausts the host stack. These particular ratios are just not
 evidence for it.
 
-The measurement that does support the change is the strided run below:
-`unbalanced $sp` is **4 in 4,118 attempts spanning the whole module**, and 0 of
-those attempts were host faults.
+The comparison that *does* hold is between the two full entry-list runs, which
+measure the same population the same way:
+
+| | pre-merge full | merged full (2026-08-29) |
+|---|---:|---:|
+| attempted | 25,555 | 15,833 |
+| unbalanced `$sp` | 204 (**0.80%**) | 16 (**0.10%**) |
+| host fault | 0 | 0 |
+| recomp hung | 9 | 2 |
+| comparability | 48.8% | **78.6%** |
+
+An eightfold drop in unbalanced `$sp`, on runs that are actually comparable.
+Host faults were already 0 before the merge in that run, so the "3 to 0" claim
+was never supported by it — the 3 came from an older run still.
 
 ### The one divergence: 0x0001093C
 
@@ -263,13 +317,16 @@ problem.
 
 There are two possible work-lists, and they are not the same question:
 
-| work-list | what it is | size |
+| work-list | what it is | size (2026-08-29) |
 |---|---|---:|
-| `--funcs LIST` — the default, generated by `scripts/05-oracle.sh` | function entries, from `allegrexrecomp funcs <elf> --list` | 16,494 |
-| `--text-walk` — opt-in | every `.text` address the dispatch table resolves | 59,175 |
+| `--funcs LIST` — the default, generated by `scripts/05-oracle.sh` | function entries, from `allegrexrecomp funcs <elf> --list` | ~16,000 |
+| `--text-walk` — opt-in | every `.text` address the dispatch table resolves | ~59,000 |
 
-The walk used to be the default and it is the wrong default. Five sixths of what
-it attempts are interior labels rather than entries — 42,681 against 16,494. A
+Both counts drift with every `psprecomp` rebuild; the ratio does not. The run
+prints the exact work-list size in its header, which is the number to trust.
+
+The walk used to be the default and it is the wrong default. Roughly five of
+every six addresses it attempts are interior labels rather than entries. A
 label sits past the prologue that set up the frame, so entering there is not a
 call, the comparison is meaningless, and the `$sp`-balance check discards it only
 after paying to run it. The walk answers how much of the dispatch table is
@@ -295,7 +352,8 @@ The same budget as a prefix would have covered `0x00000000..0x00009298` — 37 K
 1.2% of `.text`. `--prefix` still asks for that, for bisecting a region or
 reproducing an older report.
 
-Measured on the merged build, `--limit 5000` striding the 16,494 entries by 4:
+Measured against the 16,494-entry discovery (superseded since — the point here
+is the method, and the ratio survives the rebuild), `--limit 5000` striding by 4:
 
 | | strided entries | walk, prefix (`reports/05-oracle.txt`) |
 |---|---:|---:|
@@ -313,33 +371,31 @@ walk was spending most of its budget on addresses that could not be compared
 even in principle. `unbalanced $sp` falls for the same reason, though **not to zero** —
 4 entries in 4,118 still fail the balance check, so a handful of addresses on
 the entry list are not independently callable either, and the label/entry split
-does not account for all of them. And the run costs **80 seconds**, so
-`scripts/05-oracle.sh 0` over all 16,494 entries is a few minutes rather than an
-overnight job.
+does not account for all of them. And the run costs **80 seconds**; a measured
+`scripts/05-oracle.sh 0` over the whole list came in at **6m29s**, so a full
+corpus pass is a coffee break rather than an overnight job.
 
 The stride rounds up, so `--limit N` selects at most N and usually fewer: 5,000
-over 16,494 strides by 4 and selects 4,124. Rounding down would exhaust the
+over ~16,000 strides by 4 and selects ~4,100. Rounding down would exhaust the
 budget at nine tenths of the list and reintroduce the positional bias in
 miniature.
 
-### Two divergences the old default could not reach
+### What the old default could not reach
 
-`0x00133A18` and `0x00195748`, at 1.25 MB and 1.66 MB — both far outside the
-~250 KB the capped walk covered. Each reproduces in isolation, so neither is an
-artifact of sampling order:
+Every divergence in the merged full run except `0x0001093C` sits between 1.25 MB
+and 1.66 MB into `.text` — `0x00133A18`, `0x001407B4`, and the six-address
+`0x00145xxx`/`0x00195xxx` cluster. All of them are past the ~250 KB a capped
+walk covered, so the old default could not have reported any of them at any
+limit anyone actually ran.
+
+They reproduce individually, so none is an artifact of sampling order:
 
 ```bash
 build/host/oracle_diff game/extracted/ACLR_App.elf --from 0x133A18 --verbose
 ```
 
-```
-00133A18  module[00421158] interp=80202000 recomp=00000000
-00195748  stack[09FFEF84] interp=005E2C2F recomp=003323A0
-```
-
-Untriaged, and **leads rather than bugs** — the base rate below is the reason
-for that wording. `0x00133A18` writes a different value into the data segment;
-`0x00195748` differs in one stack word.
+That is the concrete cost of the positional sample: not a slightly worse number,
+but a whole region of the module that never got looked at.
 
 ## Method notes, and why they are not incidental
 
@@ -422,12 +478,19 @@ the interpreter side.
 
 ## Next
 
-1. Re-run the full entry list — `scripts/05-oracle.sh 0`, now a few minutes —
-   and triage `0x00133A18` and `0x00195748`. Every headline number on this page
-   predates the work-list change and was measured over a different work-list or
-   a positional slice of one.
-2. Triage the remaining divergence clusters — `scripts/06-triage.py` groups them
-   so each pattern is one investigation rather than N.
-3. Let the interpreter service `psp_dispatch`, closing the re-entry exclusion.
-4. Send `patches/0001`–`0005` upstream. Both emitter bugs are silent-truncation
+1. Triage the 4 signatures from the merged full run, starting with the
+   six-address `interp=005E2C2F recomp=003323A0` cluster — six reports, almost
+   certainly one defect, so it is the cheapest one to resolve per finding.
+   Then `recomp: sll` / `recomp: sra` in the stop tally: the recompiled side
+   hitting `psp_unimplemented` on ordinary shifts is a new shape.
+2. Reconcile with the capped run in *reunite shared epilogues*, which reports
+   "2 divergences before and after". That was ~4,000 attempts; the full 15,833
+   here reports 9. The extra 7 are very likely older than that change rather
+   than caused by it — every one sits past where a capped run reaches — but
+   "unchanged" is a claim about the corpus made from a quarter of it, and the
+   full run is now cheap enough that it does not have to be.
+3. Run `scripts/06-triage.py` over the full report — it groups divergences by
+   signature, which is how the six-address cluster was spotted by eye above.
+4. Let the interpreter service `psp_dispatch`, closing the re-entry exclusion.
+5. Send `patches/0001`–`0005` upstream. Both emitter bugs are silent-truncation
    defects that affect every title, not just this one.
