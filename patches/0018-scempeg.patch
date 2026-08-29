@@ -1,9 +1,9 @@
 diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
 new file mode 100644
-index 0000000..d535826
+index 0000000..b63bb8b
 --- /dev/null
 +++ b/src/hle/mpeg.c
-@@ -0,0 +1,371 @@
+@@ -0,0 +1,388 @@
 +/* psprecomp — sceMpeg.
 + *
 + * ## What this is, and what it is not
@@ -102,9 +102,26 @@ index 0000000..d535826
 +    g_inited = 0;
 +}
 +
-+static mpeg_ctx *ctx_of(uint32_t handle) {
++/* Look up the context for a `mpeg` argument.
++ *
++ * Every call after Create takes what SceMpeg actually is: a *pointer to* the
++ * handle, not the handle. Create is handed somewhere to put it, and the game
++ * keeps passing that same address back -- so the value has to be read through
++ * it. Comparing the argument directly matched nothing, and the game said so
++ * on its own stdout, sceMpegRegistStream() is failed..., which is what a
++ * returned handle of zero means to it.
++ *
++ * PPSSPP dereferences the same way in getMpegCtx. The raw value is still
++ * accepted, because it costs nothing and a caller that kept the handle itself
++ * would otherwise be turned away for no reason. */
++static mpeg_ctx *ctx_of(uint32_t mpeg_addr) {
++    if (!mpeg_addr) return NULL;
++
++    const uint32_t handle = psp_read32(mpeg_addr);
 +    for (int i = 0; i < MAX_MPEG; i++)
 +        if (g_mpeg[i].used && g_mpeg[i].handle == handle) return &g_mpeg[i];
++    for (int i = 0; i < MAX_MPEG; i++)
++        if (g_mpeg[i].used && g_mpeg[i].handle == mpeg_addr) return &g_mpeg[i];
 +    return NULL;
 +}
 +

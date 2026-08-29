@@ -1,0 +1,20 @@
+diff --git a/src/dispatch.c b/src/dispatch.c
+index fb6a625..d1d8304 100644
+--- a/src/dispatch.c
++++ b/src/dispatch.c
+@@ -99,7 +99,14 @@ psp_fn_t psp_lookup(uint32_t addr) {
+ 
+ /* ---- function-entry trace ------------------------------------------------ */
+ 
+-#define TRACE_DEPTH 32
++/* Deep enough that a failure still has its cause in the ring.
++ *
++ * 32 was too short to be useful for the question it kept being asked: when a
++ * game prints a diagnostic, the printf and its string handling alone fill the
++ * ring, so the code that decided to print has already been pushed out. The
++ * cost is one array; the whole point of the instrument is to reach past the
++ * reporting and into the deciding. */
++#define TRACE_DEPTH 512
+ static uint32_t g_trace[TRACE_DEPTH];
+ static uint64_t g_trace_n;
+ 
