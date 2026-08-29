@@ -4,7 +4,7 @@ Draft text for [sp00nznet/psprecomp](https://github.com/sp00nznet/psprecomp).
 **Nothing here has been posted.** Review and send it yourself, or ask for
 changes first.
 
-Five patches sit in `patches/`, applied by `scripts/build-tools.sh`. They apply
+Seven patches sit in `patches/`, applied by `scripts/build-tools.sh`. They apply
 to a pristine checkout in order and the suite stays green (11/11, including two
 new tests).
 
@@ -15,14 +15,18 @@ new tests).
 | `0003` | the interpreter oracle | issue first — it fills a roadmap slot, and the author may have a design in mind |
 | `0004` | `psp_hle_set_quiet`, drop a leftover debug line | small PR |
 | `0005` | two regression tests | folds into the `0002` PR |
+| `0006` | **PRX relocations are never applied** | issue + PR — arguably the highest-impact of the lot |
+| `0007` | relocate before analysis, not after loading | folds into the `0006` PR |
 
-The four codegen bugs are the valuable part. All four are **silent truncation**
-— the generated C does less than the hardware, with no crash, no dispatch miss
-and no log line. They affect every title, not just the one they were found on.
+The four codegen bugs and the relocation pass are the valuable parts, and they
+fail the same way: **silently**. The codegen bugs make the generated C do less
+than the hardware; the missing relocation pass makes every cross-segment pointer
+read as null. No crash, no dispatch miss, no log line in either case. Both affect
+every title, not just the one they were found on.
 
 Suggested order: send `0001` and `0004` first as trivially reviewable fixes,
-then the `0002`+`0005` bundle, and open `0003` as a discussion rather than a
-drop-in PR.
+then the `0002`+`0005` bundle, then `0006`+`0007`, and open `0003` as a
+discussion rather than a drop-in PR.
 
 ---
 
@@ -123,6 +127,52 @@ reverting the fix and confirming the test fails. 2a and 2b do not — every
 synthetic shape tried got promoted to its own entry by discovery, giving a test
 that passes before *and* after, which is worse than none. `test_emit.c` records
 why. Reproducing them needs `a_discover`'s ownership rules pinned down.
+
+---
+
+## Issue 5 — the module is never relocated
+
+`ROADMAP.md` lists "implement minimal module loader to apply relocations" as a
+Phase 2 item and it is not done, so every cross-segment pointer in a loaded
+module reads as a small number — usually zero.
+
+A PRX stores such addresses relative to the segment they point into. Code that
+builds one with a `lui`/`addiu` pair therefore computes address 0, and a table
+walk started there scans `.text`, which is nonzero everywhere, and never finds
+its terminator.
+
+It does not crash and it does not show up as a difference between the
+interpreter and the recompiled C, because both are equally wrong. It shows up as
+runs that never finish. On Armored Core, profiling the busiest address per
+non-terminating run put **58% of them at a single instruction** — the load in
+exactly such a table walk.
+
+`0x00299B30` looked like an infinite loop and is not: it is a module initialiser
+that sorts 3,420 entries and returns cleanly in 915,297 instructions once its
+table pointer is real.
+
+### Where it has to happen
+
+This is the part worth reviewing carefully, because the obvious placement is
+wrong. Relocating **guest memory after loading** fixes the interpreter, which
+fetches instructions from memory, and leaves the recompiled C alone, because its
+address literals were baked in when the emitter read the file. The same
+instruction then computes two different addresses — 108 manufactured divergences
+in 1,500 functions when tried that way.
+
+`0007` therefore relocates the **file image** inside `load_and_discover`, before
+analysis and emission, so `emit`, `funcs` and `cover` all consume the same bytes
+the interpreter will execute. Both segments stay at their linked addresses, so
+no code address moves and every `psp_func_XXXXXXXX` keeps its name.
+
+There is a comment in the existing code warning that relocating would break
+address agreement. It is right about the hazard; the resolution is to relocate
+earlier rather than not at all.
+
+`0006` implements the relocation pass itself: `SHT_PRXRELOC` (0x700000A0)
+sections, `r_info` split into type / OFS_BASE / ADDR_BASE, and HI16 queued until
+the LO16 that completes it — several HI16 may share one LO16, so it is a list.
+102,615 relocations apply on this module.
 
 ---
 

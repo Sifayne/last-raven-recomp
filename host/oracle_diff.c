@@ -33,6 +33,7 @@
 #include "interp.h"
 #include "decode.h"
 #include "container.h"
+#include "loader.h"
 
 #include "psprecomp/cpu.h"
 #include "psprecomp/mem.h"
@@ -56,6 +57,10 @@ void psp_recomp_register(void);
 #define RA_DONE    0x0DEAD000u
 /* Where seeded pointer arguments point: RAM, well clear of the stack. */
 #define ARG_ARENA  (PSP_RAM_BASE + 0x00400000u)
+/* Generous, because real work happens here: one module initialiser sorts
+ * 3,420 entries and legitimately runs 915,297 instructions. The old 200k
+ * ceiling was reporting that as a hang. */
+#define INTERP_BUDGET  4000000u
 
 /* ---- trap capture ---------------------------------------------------------
  *
@@ -142,6 +147,23 @@ static void note_miss(uint32_t addr) {
     g_miss_count++;
 }
 
+/* Guest re-entry from an HLE handler, stopped at the source.
+ *
+ * During the interpreter's run, psp_dispatch() must not run recompiled code:
+ * it would destroy this side's independence, and -- because native code has no
+ * instruction budget -- it can simply never come back. Detecting the re-entry
+ * afterwards, which is what the dispatch counter does, cannot prevent that; the
+ * run has already hung by the time anyone looks.
+ *
+ * A dispatch budget of zero turns the first such call into an immediate exit
+ * instead. Relocating the module made this urgent rather than academic: guest
+ * code now reaches real thread-creation and callback paths, so handlers re-enter
+ * far more often than they did when every pointer read as null. */
+static void on_reentry(void) {
+    g_trapped = 4;
+    siglongjmp(g_trap, 1);
+}
+
 static void watchdog(int sig) {
     (void)sig;
     g_trapped = 2;
@@ -188,12 +210,21 @@ static void install_fault_handler(void) {
  * seconds of wall clock. setitimer gives sub-second granularity. A function
  * the interpreter finished in under 200k instructions has no business taking
  * this long as native code. */
-#define WATCHDOG_USEC  200000
+/* Asymmetric on purpose. The interpreter bounds itself by instruction count,
+ * so its watchdog is only a backstop against an HLE handler that re-enters
+ * guest code and never comes back -- it can afford to be generous, and once
+ * the module is relocated real functions genuinely run millions of
+ * instructions. The recompiled side has no self-bound at all: it is ordinary C,
+ * and a loop that does not terminate does not terminate. That one stays tight. */
+#define WATCHDOG_INTERP_USEC  2000000
+#define WATCHDOG_RECOMP_USEC   200000
 
-static void watchdog_arm(void) {
-    struct itimerval t = {{0, 0}, {0, WATCHDOG_USEC}};
+static void watchdog_arm_us(long usec) {
+    struct itimerval t = {{0, 0}, {0, usec}};
     setitimer(ITIMER_REAL, &t, NULL);
 }
+
+static void watchdog_arm(void) { watchdog_arm_us(WATCHDOG_RECOMP_USEC); }
 
 static void watchdog_disarm(void) {
     struct itimerval t = {{0, 0}, {0, 0}};
@@ -422,7 +453,7 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
 
     /* --- interpreter --- */
     psp_interp it;
-    psp_interp_init(&it, addr, RA_DONE, 200000);
+    psp_interp_init(&it, addr, RA_DONE, INTERP_BUDGET);
     psp_interp_hle_reset();
     psp_interp_profile_reset();
     psp_interp_hle_reset();
@@ -444,13 +475,19 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     const uint64_t miss_before     = g_miss_count;
     g_trapped = 0;
     if (sigsetjmp(g_trap, 1) == 0) {
-        watchdog_arm();
+        /* 1, not 0: psp_dispatch treats a zero budget as unlimited, so a
+         * budget of one fires on the very first re-entry. */
+        psp_dispatch_set_budget(1, on_reentry);
+        watchdog_arm_us(WATCHDOG_INTERP_USEC);
         psp_interp_run(&it);
         watchdog_disarm();
+        psp_dispatch_set_budget(0, NULL);
     } else {
         watchdog_disarm();
+        psp_dispatch_set_budget(0, NULL);
     }
     phase("interp-done");
+    if (g_trapped == 4) return R_SKIP_REENTRY;
     if (g_trapped == 2) return R_HANG_INTERP;
     if (g_trapped == 3) return R_FAULT;
     if (g_trapped)      return R_SKIP_TRAP;
@@ -584,15 +621,17 @@ int main(int argc, char **argv) {
     if (elf_parse(b.data, b.size, &e) != 0) { fprintf(stderr, "not an ELF/PRX\n"); return 1; }
     if (psp_mem_init() != 0) { fprintf(stderr, "no guest memory\n"); return 1; }
 
-    uint32_t lo = UINT32_MAX, hi = 0;
-    for (int i = 0; i < e.nsegments; i++) {
-        if (e.seg[i].addr < lo) lo = e.seg[i].addr;
-        if (e.seg[i].addr + e.seg[i].memsz > hi) hi = e.seg[i].addr + e.seg[i].memsz;
+    /* Load *and relocate*. Without the relocation pass every cross-segment
+     * pointer in the module reads as a small number, usually zero, and code
+     * that walks a table from such a pointer runs off into .text and never
+     * terminates -- on this module that shape alone was 58% of all runs that
+     * failed to finish. It affects both sides equally, so it never showed up
+     * as a divergence, only as runs the harness had to throw away. */
+    psp_load_info li;
+    if (psp_load_module(&b, &e, &li) != 0) {
+        fprintf(stderr, "cannot load module\n"); return 1;
     }
-    psp_mem_map_module(lo, hi - lo);
-    for (int i = 0; i < e.nsegments; i++)
-        if (e.seg[i].filesz)
-            psp_mem_write_block(e.seg[i].addr, b.data + e.seg[i].offset, e.seg[i].filesz);
+    const uint32_t lo = li.lo, hi = li.hi;
 
     g_module_lo   = lo;
     g_module_size = hi - lo;
@@ -642,6 +681,7 @@ int main(int argc, char **argv) {
 
     printf("module:   %s\n", path);
     printf("mapped:   0x%08X + %u bytes\n", lo, g_module_size);
+    printf("relocs:   %d applied\n", li.nrelocs);
     printf("stubs:    0x%08X..0x%08X (%u bytes, %d routed to HLE)\n",
            g_stub_lo, g_stub_hi, e.stub_size, nimp);
     printf("text:     0x%08X + %u bytes\n", e.text_addr, e.text_size);
