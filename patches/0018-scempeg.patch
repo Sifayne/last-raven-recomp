@@ -1,9 +1,9 @@
 diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
 new file mode 100644
-index 0000000..b63bb8b
+index 0000000..d54de7e
 --- /dev/null
 +++ b/src/hle/mpeg.c
-@@ -0,0 +1,388 @@
+@@ -0,0 +1,406 @@
 +/* psprecomp — sceMpeg.
 + *
 + * ## What this is, and what it is not
@@ -25,11 +25,28 @@ index 0000000..b63bb8b
 + * the bookkeeping honestly is what lets startup finish; decoding is a separate,
 + * much larger piece of work that only matters once a movie actually plays.
 + *
-+ * The calls that would hand back decoded data therefore report
-+ * SCE_MPEG_ERROR_NO_DATA. That is the code a player already handles -- it is
-+ * what it sees at the end of a stream -- so a game gets a movie that finishes
-+ * immediately rather than one that hangs waiting for a frame that is never
-+ * coming.
++ * The calls that would hand back decoded data report SCE_MPEG_ERROR_INVALID_VALUE
++ * rather than SCE_MPEG_ERROR_NO_DATA, which is not the obvious choice and was
++ * arrived at by reading what this game actually does with each:
++ *
++ *     002751A4  bne   $s3, $zero, 0x00275288    ; an error at all?
++ *     00275288  addiu $a0, $a0, -32767          ; a0 = 0x80618001, NO_DATA
++ *     0027528C  beq   $s3, $a0, 0x00275268      ; exactly NO_DATA -> go round again
++ *     00275290  ...                             ; anything else -> report and stop
++ *
++ * NO_DATA means "not yet", so a player waits on it -- correctly. Returning it
++ * from a decoder that will never produce a frame is therefore an instruction to
++ * spin forever, and that is what happened: fifteen million ring buffer queries
++ * and nearly eight million GetAvcAu calls in a single minute, with the game
++ * never leaving its intro movie.
++ *
++ * Any other code ends playback, so the honest one is used: the request cannot
++ * be satisfied. The game prints
++ *
++ *     sceMpegGetAvcAu() is failed...ret=806101FE
++ *
++ * and gives up on the movie, which is the desired outcome and says out loud
++ * what happened rather than pretending a stream ended.
 + *
 + * Constants and structure layouts are PPSSPP's (Core/HLE/sceMpeg.cpp and
 + * sceMpeg.h), which is the closest thing to a specification these have.
@@ -338,19 +355,20 @@ index 0000000..b63bb8b
 +    static int said;
 +    if (!said++)
 +        fprintf(stderr,
-+            "psprecomp: %s -- sceMpeg decoding is not implemented, so every\n"
-+            "  stream reports end-of-data. Video and FMV audio will not play;\n"
-+            "  everything else continues. Further calls are not reported.\n", what);
++            "psprecomp: %s -- sceMpeg decoding is not implemented. Playback is\n"
++            "  refused outright rather than reported as empty, because a player\n"
++            "  waits out an empty stream and would never stop. Video and FMV\n"
++            "  audio will not play; everything else continues.\n", what);
 +}
 +
 +static void hle_GetAvcAu(void)      { no_decoder("sceMpegGetAvcAu");
-+                                      psp_ret(SCE_MPEG_ERROR_NO_DATA); }
++                                      psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); }
 +static void hle_GetAtracAu(void)    { no_decoder("sceMpegGetAtracAu");
-+                                      psp_ret(SCE_MPEG_ERROR_NO_DATA); }
++                                      psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); }
 +static void hle_AvcDecode(void)     { no_decoder("sceMpegAvcDecode");
-+                                      psp_ret(SCE_MPEG_ERROR_NO_DATA); }
++                                      psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); }
 +static void hle_AtracDecode(void)   { no_decoder("sceMpegAtracDecode");
-+                                      psp_ret(SCE_MPEG_ERROR_NO_DATA); }
++                                      psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); }
 +static void hle_AvcDecodeStop(void) {
 +    /* Reports zero frames left, so a drain loop terminates. */
 +    if (psp_arg(3)) psp_write32(psp_arg(3), 0);
