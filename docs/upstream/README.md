@@ -149,8 +149,8 @@ non-terminating run put **58% of them at a single instruction** — the load in
 exactly such a table walk.
 
 `0x00299B30` looked like an infinite loop and is not: it is a module initialiser
-that sorts 3,420 entries and returns cleanly in 915,297 instructions once its
-table pointer is real.
+that walks the module's 151-entry `.cplinit` table and returns cleanly in
+915,297 instructions once its table pointer is real.
 
 ### Where it has to happen
 

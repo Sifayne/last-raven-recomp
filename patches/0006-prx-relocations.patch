@@ -1,9 +1,9 @@
 diff --git a/tools/allegrexrecomp/loader.c b/tools/allegrexrecomp/loader.c
 new file mode 100644
-index 0000000..6cc001b
+index 0000000..89194fe
 --- /dev/null
 +++ b/tools/allegrexrecomp/loader.c
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,252 @@
 +/* allegrexrecomp — module loading. See loader.h. */
 +
 +#include "loader.h"
@@ -216,6 +216,34 @@ index 0000000..6cc001b
 +    return 0;
 +}
 +
++int psp_find_section(const psp_blob *b, const elf_info *e, const char *name,
++                     psp_section *out) {
++    if (!e->shoff || !e->shnum || b->size < 52) return -1;
++
++    /* e_shstrndx lives at offset 50 of the ELF header and is not carried in
++     * elf_info; reading it here beats widening that struct for one caller. */
++    const uint32_t shstrndx = (uint32_t)b->data[50] | ((uint32_t)b->data[51] << 8);
++    if (shstrndx >= e->shnum) return -1;
++
++    const size_t strtab_hdr = (size_t)e->shoff + (size_t)shstrndx * e->shentsize;
++    if (strtab_hdr + 24 > b->size) return -1;
++    const uint32_t names_off = rd32(b->data + strtab_hdr + 16);
++
++    for (uint32_t i = 0; i < e->shnum; i++) {
++        const size_t so = (size_t)e->shoff + (size_t)i * e->shentsize;
++        if (so + 24 > b->size) break;
++        const uint32_t name_idx = rd32(b->data + so);
++        const size_t   np = (size_t)names_off + name_idx;
++        if (np >= b->size) continue;
++        if (strcmp((const char *)b->data + np, name) != 0) continue;
++        out->addr   = rd32(b->data + so + 12);
++        out->offset = rd32(b->data + so + 16);
++        out->size   = rd32(b->data + so + 20);
++        return 0;
++    }
++    return -1;
++}
++
 +int psp_load_module(psp_blob *b, const elf_info *e, psp_load_info *out) {
 +    if (psp_relocate_image(b->data, b->size, e, out) != 0) return -1;
 +
@@ -230,10 +258,10 @@ index 0000000..6cc001b
 +}
 diff --git a/tools/allegrexrecomp/loader.h b/tools/allegrexrecomp/loader.h
 new file mode 100644
-index 0000000..dfb58d0
+index 0000000..4a7b238
 --- /dev/null
 +++ b/tools/allegrexrecomp/loader.h
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,71 @@
 +/* allegrexrecomp — module loading.
 + *
 + * Maps a decrypted module into guest memory and applies its relocations.
@@ -288,6 +316,17 @@ index 0000000..dfb58d0
 +/* Relocate, then map every PT_LOAD at its linked address.
 + * psp_mem_init() must already have been called. Returns 0 on success. */
 +int psp_load_module(psp_blob *b, const elf_info *e, psp_load_info *out);
++
++/* Look a section up by name.
++ *
++ * Worth preferring over a heuristic scan wherever the module names what it
++ * wants. `psp_ctors_find` looks for the longest null-terminated run of code
++ * pointers, which is a guess that vtables also satisfy; `.cplinit` says so
++ * outright. The same lesson as the relocation tables: the metadata is in the
++ * file, so read it. */
++typedef struct { uint32_t addr, offset, size; } psp_section;
++int psp_find_section(const psp_blob *b, const elf_info *e, const char *name,
++                     psp_section *out);
 +
 +#ifdef __cplusplus
 +}

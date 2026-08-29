@@ -117,7 +117,8 @@ consume the same relocated image. 102,615 relocations are applied.
 
 The function that started this — `0x00299B30` — now runs to a clean return in
 915,297 instructions. It was never an infinite loop: it is a real module
-initialiser sorting 3,420 entries, and it only looked like a hang because its
+initialiser -- it walks the 151-entry `.cplinit` table -- and it only looked
+like a hang because its
 table pointer read as null and the instruction budget was 200,000.
 
 Full corpus, 25,555 discovered function entries:
