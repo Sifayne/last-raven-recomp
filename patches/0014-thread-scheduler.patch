@@ -25,10 +25,10 @@ index e6a88df..d063d63 100644
      if(PSPRECOMP_LIBM)
 diff --git a/include/psprecomp/sched.h b/include/psprecomp/sched.h
 new file mode 100644
-index 0000000..6ba131a
+index 0000000..eb0dd24
 --- /dev/null
 +++ b/include/psprecomp/sched.h
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,142 @@
 +/* psprecomp — thread scheduling.
 + *
 + * Why host threads and not saved registers
@@ -52,10 +52,11 @@ index 0000000..6ba131a
 + *
 + * What this is not
 + * ----------------
-+ * There is no preemption and no clock. A thread runs until it blocks, yields or
-+ * exits. A game that relies on being interrupted will not be, and one that
-+ * spins waiting for another thread without ever calling into the kernel will
-+ * hang -- reported, rather than silently.
++ * There is no clock, and preemption is approximate: a thread gives way to its
++ * equals every so many firmware calls (see psp_sched_tick) rather than on a
++ * timer, because recompiled C is an ordinary host call stack and cannot be
++ * interrupted part-way. A thread that spins without ever calling into the
++ * kernel therefore still hangs -- reported, rather than silently.
 + */
 +#ifndef PSPRECOMP_SCHED_H
 +#define PSPRECOMP_SCHED_H
@@ -110,6 +111,12 @@ index 0000000..6ba131a
 + * against a scheduler handing the token straight back. */
 +int  psp_sched_block(uint32_t uid, psp_sched_state why, const char *what);
 +void psp_sched_yield(void);
++
++/* Charge the running thread one tick of its timeslice, and rotate to an equal
++ * if it has used the slice up. Called from the firmware-call path: a PSP
++ * preempts on a timer, and nothing here can interrupt recompiled C part-way, so
++ * kernel calls are where a thread that never blocks gives way to its equals. */
++void psp_sched_tick(void);
 +
 +/* Make a parked thread runnable. No effect on one that is already ready.
 + *
@@ -166,10 +173,10 @@ index 0000000..6ba131a
 +#endif /* PSPRECOMP_SCHED_H */
 diff --git a/src/hle/sched.c b/src/hle/sched.c
 new file mode 100644
-index 0000000..9412967
+index 0000000..9369010
 --- /dev/null
 +++ b/src/hle/sched.c
-@@ -0,0 +1,371 @@
+@@ -0,0 +1,411 @@
 +/* psprecomp — thread scheduling. See include/psprecomp/sched.h. */
 +
 +#include "psprecomp/sched.h"
@@ -250,7 +257,14 @@ index 0000000..9412967
 + * measurable gain. */
 +static void handoff_locked(void) {
 +    int best = -1;
-+    for (int i = 0; i < MAX_SCHED_THREADS; i++) {
++    /* Scanned starting *after* the current thread, so that among threads of
++     * equal priority the next one round-robins in rather than the lowest slot
++     * index winning every time. Priority still decides first -- this only
++     * settles ties, which is what a PSP does: equal-priority threads share the
++     * CPU in turn, and one of them cannot monopolise it. */
++    const int start = g_running >= 0 ? g_running : 0;
++    for (int k = 1; k <= MAX_SCHED_THREADS; k++) {
++        const int i = (start + k) % MAX_SCHED_THREADS;
 +        if (!g_slot[i].used || g_slot[i].state != PSP_SCHED_READY) continue;
 +        if (best < 0 || g_slot[i].priority < g_slot[best].priority) best = i;
 +    }
@@ -413,6 +427,39 @@ index 0000000..9412967
 +    handoff_locked();
 +    await_turn_locked(me);
 +    pthread_mutex_unlock(&g_lock);
++}
++
++/* The timeslice, counted in firmware calls rather than microseconds.
++ *
++ * A PSP preempts on a timer, so a thread that never blocks still gives way to
++ * its equals. Nothing here can interrupt recompiled C part-way -- it is an
++ * ordinary host call stack -- so the closest honest approximation is to
++ * reschedule every so many kernel calls. Every firmware call is already a point
++ * where the guest is between instructions and its register file is coherent,
++ * which is exactly what a switch needs.
++ *
++ * This is what stops one thread starving the rest. Armored Core posts its disc
++ * reads to a pool of equal-priority workers and then carries on; without a
++ * timeslice the poster keeps the CPU, the workers never run, and nothing is
++ * ever read from the disc. */
++#define PSP_SCHED_SLICE 64
++
++static unsigned g_slice;
++
++void psp_sched_tick(void) {
++    if (!g_threading) return;
++    if (++g_slice < PSP_SCHED_SLICE) return;
++    g_slice = 0;
++
++    /* Only worth a switch if somebody else could actually run. */
++    pthread_mutex_lock(&g_lock);
++    int other = 0;
++    for (int i = 0; i < MAX_SCHED_THREADS; i++)
++        if (i != g_running && g_slot[i].used && g_slot[i].state == PSP_SCHED_READY)
++            { other = 1; break; }
++    pthread_mutex_unlock(&g_lock);
++
++    if (other) psp_sched_yield();
 +}
 +
 +int psp_sched_wake(uint32_t uid) {
