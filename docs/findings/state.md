@@ -8,8 +8,9 @@ out so it is not investigated twice.
 ## What the game does today
 
 It boots. Constructors run, `module_start` returns, the disc is read through
-async I/O, the intro movie ends, and a frame loop runs to a steady state it
-never leaves:
+async I/O, and a frame loop runs to a steady state it never leaves. The intro
+movie does **not** end — see the open work below; that is the thing holding
+everything else up.
 
 ```
 entry:     returned
@@ -25,9 +26,9 @@ clears — drawn with no vertex colour, which defaults to white. There is nothin
 else to draw yet.
 
 **It does not stop. It repeats.** Over a 60-second run the game issues
-1,717,502 `sceDisplaySetFrameBuf` and 1,717,501 `sceGeListUpdateStallAddr`
+2,309,200 `sceDisplaySetFrameBuf` and 2,309,199 `sceGeListUpdateStallAddr`
 calls — and 21 GE lists, 19 prims, 2,350,081 pixels *in total*. It presents the
-same nineteen clears about 1.7 million times. Whatever would produce geometry
+same nineteen clears about 2.3 million times. Whatever would produce geometry
 never runs.
 
 **The renderer is not the blocker**, and neither is the scheduler. Work on
@@ -45,7 +46,7 @@ psprecomp: guest threads still running after 60s; 5 alive, not waiting further
     uid 0x00000000  prio 32  running
     uid 0x00040000  prio 32  blocked on sceKernelWaitThreadEnd
     uid 0x00040001  prio 16  running
-    uid 0x00040021  prio 16  blocked on sceKernelWaitSema
+    uid 0x00040021  prio 16  blocked on sceKernelWaitSema(Movie Sync sema)
 ```
 
 Two slots say `running` because that is what the timeout path does: a guest
