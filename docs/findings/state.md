@@ -73,6 +73,24 @@ the GE state (framebuffer, texture, vertex type of geometry that actually
 *draws*), a VRAM survey of which 64K blocks hold data, and the live thread list
 with what each is parked on.
 
+### Three ways to measure nothing
+
+Each of these produced a confident number that meant nothing. All three were
+believed before they were checked.
+
+- **A capped oracle run used to be positional.** `--limit` bounds *attempts*,
+  and the old work-list walked `.text` from the bottom testing whatever the
+  dispatch table resolved — mostly interior labels. 5,000 attempts reached the
+  first ~256KB of 3.03MB, so two runs across an emitter change that reclaimed
+  171 functions produced **byte-identical output files**. Fixed since: the
+  work-list is the entry list and a capped run strides the whole module.
+- **Counting `UNBALANCED` log lines counts the print cap.** `psp_trace_sp`
+  stops at 24 sites, `psp_trace_sp_call` at 16, and both saturate here. The
+  boot summary reports the real totals now.
+- **The unbalanced-return total is not a before/after metric.** It counts
+  returns, so it tracks how many frame-loop iterations fit in the drain window.
+  Two runs of the *same* build differed by 5,688. Use distinct sites and leaks.
+
 ### The trace ring is not a call stack
 
 It records function *entries in order*. A loop calling a four-function chain
@@ -139,15 +157,32 @@ on without the conversation that produced it.
    firmware calls in the same run, `0xDBA6C4C4` among them: an unimplemented
    call returns 0, 0 is `SCE_KERNEL_ERROR_OK`, and this project has been bitten
    by that four times already.
-2. **Blocks promoted to function entries by the pointer-seed scan, whose
-   back-edges stay C calls.** `a_scan_data_pointers` accepts any word that lands
-   in `.text` and decodes, so data pointing into the middle of a function
-   becomes an "entry"; both merge sites in `analyze.c` are guarded on
-   `!entry_map[ti]`, so those addresses block their own merge and the loop
-   back-edge ships as a call. Give seeds provenance — hard (entry, exports,
-   `jal` targets, table targets) against soft (pointer guesses) — and guard on
-   hard only. The metric is the oracle's unbalanced-`$sp` skip bucket, not its
-   agreement count. This is the deepest thing still known-broken in the emitter.
+2. **Shared epilogues split into pseudo-functions.** Partly fixed; the
+   remainder is below. What the `$sp` reports are really about, now that the
+   instrument can say so:
+
+   There are **zero** stack leaks. Every imbalance is a *positive* delta, which
+   `psp_trace_sp` identifies as a continuation holding an epilogue without its
+   matching prologue — an artifact of discovery, not corruption. The reported
+   address is the **return instruction**, not the function, so the list is of
+   return sites and one function with two returns appears twice.
+
+   Two of the six hot sites were a single shared epilogue at
+   `0x002B5884`–`0x002B5898` cut into pieces. Neither merge site could see it:
+   both fire on a *transfer* into a claimed block, and this arrives by
+   **fall-through**, which broke the walk silently. Merging on fall-through —
+   both into an unwalked soft entry and into an already-claimed block — took it
+   from 52 sites / 7.0M returns to **50 sites / 4.5M returns**.
+
+   What is left: `0x002B5784` is a well-formed function, `-16` prologue and
+   `+16` epilogue, balanced. It only trips the check when the merged body is
+   entered at `case 0x002B5884: goto L_002B5884`, skipping the prologue. So
+   something enters a shared epilogue as though it were a function, ~1.8M times
+   a run. Find that caller; that is the rest of this.
+
+   Seed provenance (soft/hard) landed with it and is correct — a pointer guess
+   should not veto a merge — but be clear that on its own it changed **nothing**
+   measurable: same 52 sites, same addresses, same deltas.
 3. **The two composed-chain oracle divergences.** Each callee agrees in
    isolation; the disagreement only appears in the chain. Needs
    instruction-level trace diffing, not another hypothesis — which means giving

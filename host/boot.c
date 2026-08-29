@@ -469,6 +469,32 @@ int main(int argc, char **argv) {
     printf("disc read: %llu bytes\n", (unsigned long long)psp_io_bytes_read());
     printf("pixels:   %llu drawn by the rasterizer\n",
            (unsigned long long)psp_ge_pixels());
+
+    /* Stack-balance totals, not just the first few.
+     *
+     * psp_trace_sp stops printing after 24 sites and psp_trace_sp_call after
+     * 16, which is the right call for a log -- but it means counting lines in
+     * the output measures the cap rather than the module. Both counters
+     * saturate on this game, so a change that halved the real number would
+     * look identical from the log alone. Only meaningful in a TRACE=1 build;
+     * both are zero otherwise, so the line reports that rather than implying a
+     * clean run. */
+    {
+        const unsigned long long sp_bad  = (unsigned long long)psp_sp_violations();
+        const unsigned long long spc_bad = (unsigned long long)psp_sp_call_violations();
+        if (sp_bad || spc_bad) {
+            /* Leaks and sites first: the raw total counts returns, so one hot
+             * function buries the rest, and a positive delta is an artifact of
+             * discovery splitting a function rather than a defect. */
+            printf("sp:       %llu leak(s) in %u site(s); %llu unbalanced return(s), "
+                   "%llu callee(s) that did not restore\n",
+                   (unsigned long long)psp_sp_leaks(), psp_sp_sites(),
+                   sp_bad, spc_bad);
+            psp_sp_dump(stdout, 12);
+        } else {
+            printf("sp:       no imbalance recorded (build with TRACE=1 to measure)\n");
+        }
+    }
     psp_ge_dump_stats(stdout);
     survey_vram();
     dump_framebuffer();
