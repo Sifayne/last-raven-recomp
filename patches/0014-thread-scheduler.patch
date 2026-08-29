@@ -178,10 +178,10 @@ index 0000000..9160316
 +#endif /* PSPRECOMP_SCHED_H */
 diff --git a/src/hle/sched.c b/src/hle/sched.c
 new file mode 100644
-index 0000000..0fb8bb1
+index 0000000..e27e81c
 --- /dev/null
 +++ b/src/hle/sched.c
-@@ -0,0 +1,449 @@
+@@ -0,0 +1,536 @@
 +/* psprecomp — thread scheduling. See include/psprecomp/sched.h. */
 +
 +#include "psprecomp/sched.h"
@@ -214,10 +214,20 @@ index 0000000..0fb8bb1
 +static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 +static pthread_cond_t  g_turn = PTHREAD_COND_INITIALIZER;
 +static int             g_running = MAIN_SLOT;
-+static int             g_deadlocked;
 +static void          (*g_end_hook)(uint32_t uid, uint32_t status);
 +static void          (*g_thread_hook)(void);
 +static int             g_threading = 1;
++
++/* Which slot this host thread *is*, as opposed to which slot holds the token.
++ *
++ * Identity has to come from the host thread. Deriving it from g_running instead
++ * answers with whoever currently holds the token -- and g_running is -1 while a
++ * handoff has found nobody, which read back as uid 0, which is the main
++ * context's uid. A guest thread then blocked the main context's slot rather
++ * than its own, and the main context sat marked RUNNING with no token.
++ *
++ * MAIN_SLOT is 0, so the main context needs no initialisation. */
++static _Thread_local int g_self = MAIN_SLOT;
 +
 +/* ---- slots ---------------------------------------------------------------- */
 +
@@ -227,11 +237,11 @@ index 0000000..0fb8bb1
 +    return -1;
 +}
 +
-+/* The caller's slot. The main context is not a guest thread and has no uid, so
-+ * it answers to MAIN_SLOT whenever it holds the token. */
++/* The caller's slot. An explicit uid wins when it names a live slot; otherwise
++ * the caller is whoever this host thread is. */
 +static int self_slot(uint32_t uid) {
 +    const int s = slot_of(uid);
-+    return s >= 0 ? s : MAIN_SLOT;
++    return s >= 0 ? s : g_self;
 +}
 +
 +void psp_sched_init(void) { psp_sched_reset(); }
@@ -250,7 +260,6 @@ index 0000000..0fb8bb1
 +    g_slot[MAIN_SLOT].state    = PSP_SCHED_RUNNING;
 +    g_slot[MAIN_SLOT].priority = 32;
 +    g_running    = MAIN_SLOT;
-+    g_deadlocked = 0;
 +    pthread_mutex_unlock(&g_lock);
 +}
 +
@@ -260,8 +269,32 @@ index 0000000..0fb8bb1
 + * everyone; each sleeper re-checks whether it is the one. A broadcast is
 + * wasteful in principle and irrelevant here -- a PSP title runs a handful of
 + * threads, and the alternative is a condition variable per slot for no
-+ * measurable gain. */
-+static void handoff_locked(void) {
++ * measurable gain.
++ *
++ * Returns the slot that now holds the token, or -1 if nothing could run.
++ *
++ * The result is returned rather than left in a global on purpose. It used to be
++ * a sticky `g_deadlocked` flag, which conflated two different things -- "this
++ * handoff found nobody" and "the scheduler has stopped" -- and no path that set
++ * it cleared it. A later handoff that succeeded would then be read as a
++ * deadlock by whoever looked at the flag next, and that caller would take the
++ * token back from the thread this function had just marked RUNNING. Two slots
++ * were left RUNNING, one of them holding nothing, and since only READY slots
++ * are ever selected that thread could never be scheduled again. */
++static int handoff_locked(void) {
++    /* One token, one RUNNING slot. Cheap -- the selection scan below already
++     * walks the same array -- and it turns a silent corruption into a named
++     * one, which is the whole reason the bug above took as long as it did. */
++    int cur = -1, dup = -1;
++    for (int i = 0; i < MAX_SCHED_THREADS; i++) {
++        if (!g_slot[i].used || g_slot[i].state != PSP_SCHED_RUNNING) continue;
++        if (cur < 0) cur = i; else { dup = i; break; }
++    }
++    if (dup >= 0)
++        fprintf(stderr, "psprecomp: scheduler invariant broken -- uid 0x%08X and "
++                        "uid 0x%08X are both RUNNING\n",
++                g_slot[cur].uid, g_slot[dup].uid);
++
 +    int best = -1;
 +    /* Scanned starting *after* the current thread, so that among threads of
 +     * equal priority the next one round-robins in rather than the lowest slot
@@ -277,25 +310,39 @@ index 0000000..0fb8bb1
 +
 +    if (best < 0) {
 +        /* Nothing can run. Every thread is blocked on something no running
-+         * thread will ever provide, which is a deadlock -- and worth saying so,
-+         * because the symptom is otherwise a process that simply stops. */
-+        g_deadlocked = 1;
++         * thread will ever provide. The token is left with nobody, and the
++         * broadcast is what lets the main context notice inside its drain --
++         * a guest thread that wakes here finds g_running still not its own and
++         * goes back to waiting, which is the point. */
 +        g_running = -1;
 +        pthread_cond_broadcast(&g_turn);
-+        return;
++        return -1;
 +    }
 +
 +    g_slot[best].state = PSP_SCHED_RUNNING;
 +    g_running = best;
 +    pthread_cond_broadcast(&g_turn);
++    return best;
 +}
 +
 +/* Wait until this slot holds the token, then adopt its register state.
-+ * Called with the lock held. */
-+static void await_turn_locked(int me) {
-+    while (g_running != me && !g_deadlocked)
++ * Called with the lock held.
++ *
++ * Returns 0 holding the token, or -1 if this slot was killed while waiting --
++ * psp_sched_stop_all is the only thing that does that, and a thread it killed
++ * must not carry on running guest code.
++ *
++ * Waking is not the same as being scheduled. This used to break out of its wait
++ * on a deadlock flag and return regardless, so every parked thread resumed at
++ * once, none of them holding the token and none with psp_cpu restored -- and
++ * psp_cpu is a single global. Nothing may run without g_running == me. */
++static int await_turn_locked(int me) {
++    while (g_running != me) {
++        if (g_slot[me].state == PSP_SCHED_DEAD) return -1;
 +        pthread_cond_wait(&g_turn, &g_lock);
-+    if (g_running == me) psp_cpu = g_slot[me].ctx;
++    }
++    psp_cpu = g_slot[me].ctx;
++    return 0;
 +}
 +
 +/* Give up the token: save state, change our own, hand over, wait to come back.
@@ -314,10 +361,12 @@ index 0000000..0fb8bb1
 +    g_slot[me].ctx        = psp_cpu;
 +    g_slot[me].state      = why;
 +    g_slot[me].waiting_on = what;
-+    handoff_locked();
 +
-+    if (g_deadlocked) {
-+        g_deadlocked          = 0;
++    if (handoff_locked() < 0) {
++        /* This handoff found nobody, so undo the wait and say so. Decided from
++         * the handoff's own result, never from a flag some earlier handoff may
++         * have left behind -- acting on a stale flag here is what used to take
++         * the token back from a thread that had just been given it. */
 +        g_slot[me].state      = PSP_SCHED_RUNNING;
 +        g_slot[me].waiting_on = NULL;
 +        g_running             = me;
@@ -325,7 +374,12 @@ index 0000000..0fb8bb1
 +        return -1;
 +    }
 +
-+    await_turn_locked(me);
++    if (await_turn_locked(me) != 0) {          /* killed by psp_sched_stop_all */
++        g_slot[me].waiting_on = NULL;
++        pthread_mutex_unlock(&g_lock);
++        if (me != MAIN_SLOT) pthread_exit(NULL);
++        return -1;
++    }
 +    g_slot[me].waiting_on = NULL;
 +    pthread_mutex_unlock(&g_lock);
 +    return 0;
@@ -337,11 +391,15 @@ index 0000000..0fb8bb1
 +    sched_slot *t = (sched_slot *)arg;
 +    const int me = (int)(t - g_slot);
 +
++    /* Before anything else: this host thread's identity. Everything that asks
++     * "which guest thread am I" reads it, including the firmware calls made
++     * from the hook below. */
++    g_self = me;
++
 +    if (g_thread_hook) g_thread_hook();
 +
 +    pthread_mutex_lock(&g_lock);
-+    await_turn_locked(me);
-+    if (g_deadlocked) { pthread_mutex_unlock(&g_lock); return NULL; }
++    if (await_turn_locked(me) != 0) { pthread_mutex_unlock(&g_lock); return NULL; }
 +    pthread_mutex_unlock(&g_lock);
 +
 +    /* The register file the thread starts with. $ra is zero: returning from the
@@ -363,7 +421,10 @@ index 0000000..0fb8bb1
 +
 +    pthread_mutex_lock(&g_lock);
 +    t->state = PSP_SCHED_DEAD;
-+    handoff_locked();
++    /* A failed handoff here means this was the last thread that could run. The
++     * token is left with nobody and the main context's drain reports it; there
++     * is nothing for a dead thread to do about it. */
++    (void)handoff_locked();
 +    pthread_mutex_unlock(&g_lock);
 +    return NULL;
 +}
@@ -448,8 +509,23 @@ index 0000000..0fb8bb1
 +    if (me < 0) { pthread_mutex_unlock(&g_lock); return; }
 +    g_slot[me].ctx   = psp_cpu;
 +    g_slot[me].state = PSP_SCHED_READY;
-+    handoff_locked();
-+    await_turn_locked(me);
++
++    /* This handoff cannot fail: the caller was just marked READY, so the scan
++     * finds at least the caller. Handled rather than assumed, because the cost
++     * is three lines and the failure mode it guards against -- running on with
++     * the token held by nobody -- is the bug this file was fixed for. */
++    if (handoff_locked() < 0) {
++        g_slot[me].state = PSP_SCHED_RUNNING;
++        g_running        = me;
++        pthread_mutex_unlock(&g_lock);
++        return;
++    }
++
++    if (await_turn_locked(me) != 0) {          /* killed by psp_sched_stop_all */
++        pthread_mutex_unlock(&g_lock);
++        if (me != MAIN_SLOT) pthread_exit(NULL);
++        return;
++    }
 +    pthread_mutex_unlock(&g_lock);
 +}
 +
@@ -514,25 +590,30 @@ index 0000000..0fb8bb1
 +    const int me = self_slot(uid);
 +    pthread_mutex_lock(&g_lock);
 +    g_slot[me].state = PSP_SCHED_DEAD;
-+    handoff_locked();
++    /* As in thread_main: a failed handoff leaves the token with nobody, which
++     * is the drain's to report. This thread is leaving either way. */
++    (void)handoff_locked();
 +    pthread_mutex_unlock(&g_lock);
 +    if (me != MAIN_SLOT) pthread_exit(NULL);
 +}
 +
 +/* Called with the lock held. Like await_turn_locked, but gives up at `deadline`.
-+ * Returns 0 if the token arrived, -1 on timeout.
++ * Returns 0 if the token arrived, -1 on timeout, -2 if the scheduler stopped --
++ * some other thread's handoff found nobody runnable and left the token with no
++ * one, which only the main context is entitled to notice and report.
 + *
 + * A timeout is how a runaway guest thread is escaped. It cannot be interrupted:
 + * unwinding a host thread from outside means longjmp-ing across threads, which
 + * is undefined. So the main context stops waiting for it instead, reports it,
 + * and the process ends with the thread still running. */
 +static int await_turn_deadline_locked(int me, const struct timespec *deadline) {
-+    while (g_running != me && !g_deadlocked) {
++    while (g_running != me) {
++        if (g_running < 0) return -2;
 +        if (pthread_cond_timedwait(&g_turn, &g_lock, deadline) == ETIMEDOUT &&
-+            g_running != me && !g_deadlocked)
-+            return -1;
++            g_running != me)
++            return g_running < 0 ? -2 : -1;
 +    }
-+    if (g_running == me) psp_cpu = g_slot[me].ctx;
++    psp_cpu = g_slot[me].ctx;
 +    return 0;
 +}
 +
@@ -550,7 +631,6 @@ index 0000000..0fb8bb1
 +        if (g_slot[i].used) g_slot[i].state = PSP_SCHED_DEAD;
 +    g_slot[MAIN_SLOT].state = PSP_SCHED_RUNNING;
 +    g_running    = MAIN_SLOT;
-+    g_deadlocked = 0;
 +    pthread_cond_broadcast(&g_turn);
 +    pthread_mutex_unlock(&g_lock);
 +    if (me != MAIN_SLOT) pthread_exit(NULL);
@@ -567,13 +647,14 @@ index 0000000..0fb8bb1
 +     * runnable again only when they are all finished -- or when none of them
 +     * can proceed, which handoff_locked reports as a deadlock. */
 +    pthread_mutex_lock(&g_lock);
-+    int timed_out = 0;
-+    while (live_locked() && !g_deadlocked) {
++    int timed_out = 0, stalled = 0;
++    while (live_locked()) {
 +        g_slot[MAIN_SLOT].ctx   = psp_cpu;
 +        g_slot[MAIN_SLOT].state = PSP_SCHED_BLOCKED;
-+        handoff_locked();
-+        if (await_turn_deadline_locked(MAIN_SLOT, &deadline) != 0) { timed_out = 1; break; }
-+        if (g_deadlocked) break;
++        if (handoff_locked() < 0) { stalled = 1; break; }
++        const int rc = await_turn_deadline_locked(MAIN_SLOT, &deadline);
++        if (rc == -2) { stalled = 1; break; }
++        if (rc != 0)  { timed_out = 1; break; }
 +    }
 +
 +    const int live = live_locked();
@@ -581,7 +662,7 @@ index 0000000..0fb8bb1
 +    if (timed_out) {
 +        fprintf(stderr, "psprecomp: guest threads still running after %ds; "
 +                        "%d alive, not waiting further\n", timeout_s, live);
-+    } else if (g_deadlocked && live) {
++    } else if (stalled && live) {
 +        fprintf(stderr, "psprecomp: deadlock -- %d thread(s) alive, none runnable:\n", live);
 +        for (int i = 1; i < MAX_SCHED_THREADS; i++) {
 +            if (!g_slot[i].used || g_slot[i].state == PSP_SCHED_DEAD) continue;
@@ -626,8 +707,14 @@ index 0000000..0fb8bb1
 +}
 +
 +uint32_t psp_sched_current(void) {
++    /* From this host thread's own slot, not from whoever holds the token. The
++     * two agree while a thread is running, which is why reading g_running here
++     * looked correct -- but it answered 0 whenever the token was held by
++     * nobody, and 0 is the main context's uid. Callers pass the result straight
++     * back to psp_sched_block, so a guest thread parked the main context's slot
++     * and left its own marked RUNNING. */
 +    pthread_mutex_lock(&g_lock);
-+    const uint32_t uid = (g_running >= 0) ? g_slot[g_running].uid : 0;
++    const uint32_t uid = g_slot[g_self].uid;
 +    pthread_mutex_unlock(&g_lock);
 +    return uid;
 +}
@@ -1136,6 +1223,23 @@ index bba5683..751531e 100644
  
      psp_hle_register(0x55C20A00, "ThreadManForUser", "sceKernelCreateEventFlag",         hle_CreateEventFlag);
      psp_hle_register(0xEF9E4C70, "ThreadManForUser", "sceKernelDeleteEventFlag",         hle_DeleteEventFlag);
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index ab2395f..f889d0b 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -40,6 +40,12 @@ add_executable(test_ctors test_ctors.c)
+ target_link_libraries(test_ctors PRIVATE psprecomp)
+ add_test(NAME ctors COMMAND test_ctors)
+ 
++# The handoff token. Guest thread bodies are plain C functions registered in
++# the dispatch table, so no module and no game data is involved.
++add_executable(test_sched test_sched.c)
++target_link_libraries(test_sched PRIVATE psprecomp)
++add_test(NAME sched COMMAND test_sched)
++
+ add_executable(test_raster test_raster.c)
+ target_link_libraries(test_raster PRIVATE psprecomp)
+ add_test(NAME raster COMMAND test_raster)
 diff --git a/tests/test_hle.c b/tests/test_hle.c
 index 142777e..1e1a524 100644
 --- a/tests/test_hle.c
@@ -1195,3 +1299,280 @@ index 142777e..1e1a524 100644
  
      /* Deleting frees the stack. */
      uint32_t before_delete = psp_sysmem_free();
+diff --git a/tests/test_sched.c b/tests/test_sched.c
+new file mode 100644
+index 0000000..a12b84a
+--- /dev/null
++++ b/tests/test_sched.c
+@@ -0,0 +1,271 @@
++/* Scheduler tests — the handoff token, with no game data involved.
++ *
++ * The PSP is single-core and never runs two threads at once, so this layer has
++ * exactly one invariant worth the name: **at most one slot is RUNNING, and it
++ * is the one holding the token.** Everything else here is a corollary.
++ *
++ * That invariant was broken for a while, and the way it broke is why these
++ * tests are shaped the way they are. A handoff that found nobody runnable
++ * reported it by setting a sticky global and broadcasting on the condition
++ * variable. Two things followed. Every parked thread woke, and — because the
++ * wait loop exited on the flag rather than on the token — returned to its
++ * caller as though it had been scheduled, so several host threads ran guest
++ * code at once against the single global `psp_cpu`. And the flag was never
++ * cleared, so a *later* handoff that succeeded was still read as a deadlock by
++ * whoever looked next, and that caller took the token back from the thread the
++ * handoff had just marked RUNNING. Two slots were left RUNNING, one of them
++ * holding nothing — and since only READY slots are ever selected, that thread
++ * could never be scheduled again. The game stopped, and the scheduler called it
++ * a deadlock.
++ *
++ * So the checks below are not about internals. They pin the observable
++ * contract, which is what makes the whole class of bug detectable rather than
++ * just the one instance: the RUNNING count after every transition, the
++ * documented return value of an unsatisfiable wait, and thread identity.
++ *
++ * Guest thread bodies are ordinary C functions registered in the dispatch
++ * table. Nothing here reads guest memory, so no module and no image is needed.
++ */
++
++#include "psprecomp/sched.h"
++#include "psprecomp/dispatch.h"
++#include "psprecomp/cpu.h"
++
++#include <stdio.h>
++#include <string.h>
++
++static int failures;
++
++#define CHECK(cond, ...)                                       \
++    do {                                                       \
++        if (!(cond)) {                                         \
++            printf("FAIL %s:%d: ", __FILE__, __LINE__);        \
++            printf(__VA_ARGS__);                               \
++            printf("\n");                                      \
++            failures++;                                        \
++        }                                                      \
++    } while (0)
++
++/* Synthetic guest addresses. Any value the dispatch table can hold will do —
++ * they are never fetched from, only looked up. */
++#define ENTRY_TRIVIAL  0x00001000u
++#define ENTRY_WAITER   0x00002000u
++#define ENTRY_WAKER    0x00003000u
++#define ENTRY_STRANDED 0x00004000u
++
++#define UID_WAITER     0x00040001u
++#define UID_WAKER      0x00040002u
++#define UID_TRIVIAL    0x00040003u
++#define UID_STRANDED   0x00040004u
++
++/* A guest stack pointer. Never dereferenced — thread_main only copies it into
++ * $sp, and none of these bodies touch memory. */
++#define FAKE_SP        0x09FF0000u
++
++/* ---- the invariant ---------------------------------------------------------
++ *
++ * Asked through the public dump rather than by reaching into the slot table,
++ * so the test constrains the interface a host actually sees. */
++static int running_slots(void) {
++    FILE *f = tmpfile();
++    if (!f) return -1;
++    psp_sched_dump_threads(f);
++
++    char buf[4096];
++    rewind(f);
++    size_t n = fread(buf, 1, sizeof buf - 1, f);
++    buf[n] = '\0';
++    fclose(f);
++
++    int count = 0;
++    for (const char *p = buf; (p = strstr(p, "running")) != NULL; p += 7) count++;
++    return count;
++}
++
++/* Checked after every transition below. One token, one RUNNING slot. */
++static void check_one_running(const char *where) {
++    const int n = running_slots();
++    CHECK(n == 1, "%s: %d slots RUNNING, expected exactly 1", where, n);
++}
++
++/* ---- guest thread bodies --------------------------------------------------- */
++
++static int  waiter_ran, waiter_resumed, stranded_ran;
++static int  trivial_ran, waker_ran;
++static int  waiter_block_rc, stranded_block_rc;
++static uint32_t waiter_uid_before, waiter_uid_after, trivial_uid;
++
++static void body_trivial(void) {
++    trivial_ran = 1;
++    trivial_uid = psp_sched_current();
++    check_one_running("inside trivial thread");
++}
++
++/* Blocks on something the waker will satisfy. */
++static void body_waiter(void) {
++    waiter_ran = 1;
++    waiter_uid_before = psp_sched_current();
++    check_one_running("inside waiter, before block");
++
++    waiter_block_rc = psp_sched_block(psp_sched_current(),
++                                      PSP_SCHED_BLOCKED, "test-object");
++
++    waiter_resumed = 1;
++    waiter_uid_after = psp_sched_current();
++    check_one_running("inside waiter, after resume");
++}
++
++static void body_waker(void) {
++    waker_ran = 1;
++    check_one_running("inside waker");
++    psp_sched_wake(UID_WAITER);
++}
++
++/* Blocks on something nothing will ever satisfy. */
++static void body_stranded(void) {
++    stranded_ran = 1;
++    stranded_block_rc = psp_sched_block(psp_sched_current(),
++                                        PSP_SCHED_BLOCKED, "test-unsatisfiable");
++    check_one_running("inside stranded thread, after refused wait");
++}
++
++/* ---- tests ----------------------------------------------------------------- */
++
++/* The contract in sched.h: a wait that would leave nothing runnable is refused
++ * with -1 rather than parked, and the caller comes back running.
++ *
++ * A caller that blocks in a loop until its condition holds would otherwise spin
++ * against a scheduler handing the token straight back — a busy hang, and worse
++ * than the fabricated timeout this replaced. */
++static void test_unsatisfiable_wait_is_refused(void) {
++    psp_sched_reset();
++    psp_sched_set_threading(1);
++
++    check_one_running("before a refused wait");
++
++    const int rc = psp_sched_block(0, PSP_SCHED_BLOCKED, "test-nothing-can-wake-this");
++    CHECK(rc == -1, "block with no other thread returned %d, expected -1", rc);
++
++    check_one_running("after a refused wait");
++    CHECK(psp_sched_current() == 0,
++          "main context reports uid 0x%08X after a refused wait, expected 0",
++          psp_sched_current());
++}
++
++/* The regression the sticky flag caused: a refused wait must leave no residue.
++ *
++ * Under the old code the refusal path was also the only place the deadlock flag
++ * was cleared, which made "did a previous wait fail?" change the outcome of the
++ * next one. Scheduling after a refusal has to work exactly as it would have
++ * before it. */
++static void test_scheduling_survives_a_refused_wait(void) {
++    psp_sched_reset();
++    psp_sched_set_threading(1);
++    trivial_ran = 0;
++    trivial_uid = 0;
++
++    const int rc = psp_sched_block(0, PSP_SCHED_BLOCKED, "test-nothing-can-wake-this");
++    CHECK(rc == -1, "setup: expected a refused wait, got %d", rc);
++
++    CHECK(psp_sched_spawn(UID_TRIVIAL, ENTRY_TRIVIAL, FAKE_SP, 0, 0, 32) == 0,
++          "spawn after a refused wait failed");
++
++    const int live = psp_sched_drain(5);
++    CHECK(live == 0, "%d thread(s) still alive after a refused wait", live);
++    CHECK(trivial_ran, "the thread spawned after a refused wait never ran");
++    check_one_running("after draining a thread spawned post-refusal");
++}
++
++/* A full round trip: block, hand the token over, wake, resume.
++ *
++ * The waker is spawned at a lower priority number so the spawn-time reschedule
++ * does not run it before the waiter has parked — the waiter has to be blocked
++ * for the wake to be the thing that releases it. */
++static void test_block_and_wake_round_trip(void) {
++    psp_sched_reset();
++    psp_sched_set_threading(1);
++    waiter_ran = waiter_resumed = waker_ran = 0;
++    waiter_block_rc = -99;
++    waiter_uid_before = waiter_uid_after = 0;
++
++    CHECK(psp_sched_spawn(UID_WAITER, ENTRY_WAITER, FAKE_SP, 0, 0, 32) == 0,
++          "spawning the waiter failed");
++    CHECK(psp_sched_spawn(UID_WAKER, ENTRY_WAKER, FAKE_SP, 0, 0, 32) == 0,
++          "spawning the waker failed");
++
++    const int live = psp_sched_drain(5);
++
++    CHECK(waiter_ran,     "the waiter never ran");
++    CHECK(waker_ran,      "the waker never ran");
++    CHECK(waiter_resumed, "the waiter blocked but was never resumed");
++    CHECK(waiter_block_rc == 0,
++          "the waiter's block returned %d, expected 0 — it was satisfiable",
++          waiter_block_rc);
++    CHECK(live == 0, "%d thread(s) still alive after a satisfiable wait", live);
++    check_one_running("after a completed block/wake round trip");
++}
++
++/* Identity comes from the host thread, not from the token.
++ *
++ * psp_sched_current() used to read whoever held the token, which is the same
++ * answer while a thread runs — but it returned 0 whenever the token was held by
++ * nobody, and 0 is the main context's uid. Callers hand the result straight
++ * back to psp_sched_block, so a guest thread parked the *main context's* slot
++ * and left its own marked RUNNING. Checked on both sides of a block, since the
++ * gap either side of a handoff is where it went wrong. */
++static void test_thread_identity(void) {
++    CHECK(waiter_uid_before == UID_WAITER,
++          "waiter reports uid 0x%08X before blocking, expected 0x%08X",
++          waiter_uid_before, UID_WAITER);
++    CHECK(waiter_uid_after == UID_WAITER,
++          "waiter reports uid 0x%08X after resuming, expected 0x%08X",
++          waiter_uid_after, UID_WAITER);
++    CHECK(trivial_uid == UID_TRIVIAL,
++          "trivial thread reports uid 0x%08X, expected 0x%08X",
++          trivial_uid, UID_TRIVIAL);
++}
++
++/* A guest thread whose wait nothing can satisfy is refused, exactly as the main
++ * context is — and the scheduler stays coherent afterwards rather than being
++ * left with a slot marked RUNNING that holds no token. */
++static void test_guest_thread_unsatisfiable_wait(void) {
++    psp_sched_reset();
++    psp_sched_set_threading(1);
++    stranded_ran = 0;
++    stranded_block_rc = -99;
++
++    CHECK(psp_sched_spawn(UID_STRANDED, ENTRY_STRANDED, FAKE_SP, 0, 0, 32) == 0,
++          "spawning the stranded thread failed");
++
++    const int live = psp_sched_drain(5);
++
++    CHECK(stranded_ran, "the stranded thread never ran");
++    CHECK(stranded_block_rc == -1,
++          "the stranded thread's block returned %d, expected -1",
++          stranded_block_rc);
++    CHECK(live == 0, "%d thread(s) still alive; the refusal did not let it finish",
++          live);
++    check_one_running("after a guest thread's wait was refused");
++}
++
++int main(void) {
++    psp_register(ENTRY_TRIVIAL,  body_trivial);
++    psp_register(ENTRY_WAITER,   body_waiter);
++    psp_register(ENTRY_WAKER,    body_waker);
++    psp_register(ENTRY_STRANDED, body_stranded);
++
++    psp_sched_init();
++
++    test_unsatisfiable_wait_is_refused();
++    test_scheduling_survives_a_refused_wait();
++    test_block_and_wake_round_trip();
++    test_thread_identity();
++    test_guest_thread_unsatisfiable_wait();
++
++    if (failures) {
++        printf("\n%d check(s) failed\n", failures);
++        return 1;
++    }
++    printf("all scheduler checks passed\n");
++    return 0;
++}

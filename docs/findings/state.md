@@ -8,10 +8,12 @@ out so it is not investigated twice.
 ## What the game does today
 
 It boots. Constructors run, `module_start` returns, the disc is read through
-async I/O, the intro movie ends, and a frame loop runs to a steady state:
+async I/O, the intro movie ends, and a frame loop runs to a steady state it
+never leaves:
 
 ```
 entry:     returned
+threads:   still alive
 bad mem:   0 accesses
 disc read: 1,912,832 bytes
 pixels:    2,350,081 drawn by the rasterizer
@@ -22,10 +24,36 @@ reaching the rasterizer is nineteen untextured full-screen quads — screen
 clears — drawn with no vertex colour, which defaults to white. There is nothing
 else to draw yet.
 
-**The renderer is not the blocker.** The game stops issuing geometry because it
-reaches a false deadlock (task #1), not because anything about the GE is
-missing. Work on textures, sampling or the block transfer will not change the
-picture until that is fixed.
+**It does not stop. It repeats.** Over a 60-second run the game issues
+1,717,502 `sceDisplaySetFrameBuf` and 1,717,501 `sceGeListUpdateStallAddr`
+calls — and 21 GE lists, 19 prims, 2,350,081 pixels *in total*. It presents the
+same nineteen clears about 1.7 million times. Whatever would produce geometry
+never runs.
+
+**The renderer is not the blocker**, and neither is the scheduler. Work on
+textures, sampling or the block transfer will not change the picture while
+nothing is submitted to draw.
+
+### The run ends on a deadline, not on a deadlock
+
+The boot host's `psp_sched_drain` gives up after 60 seconds and prints the live
+thread list. That report is easy to misread as a deadlock — it is not one, and
+mistaking it for one cost a session:
+
+```
+psprecomp: guest threads still running after 60s; 5 alive, not waiting further
+    uid 0x00000000  prio 32  running
+    uid 0x00040000  prio 32  blocked on sceKernelWaitThreadEnd
+    uid 0x00040001  prio 16  running
+    uid 0x00040021  prio 16  blocked on sceKernelWaitSema
+```
+
+Two slots say `running` because that is what the timeout path does: a guest
+thread cannot be unwound from outside, so the main context stops waiting for it
+and takes the token back, leaving the runaway thread genuinely still running.
+`sched.h` documents it. **A real deadlock prints `deadlock -- N thread(s)
+alive, none runnable`, and this game has never printed it.** Check for that
+string before concluding anything about the scheduler.
 
 ## The instruments, and what each can and cannot tell you
 
@@ -88,19 +116,65 @@ something inexplicable, check what it was last told.
 - **The GE block transfer as how textures arrive.** Implemented, and never
   used — the command does not appear in the stream, and the game imports no
   `sceDmac` either. How textures reach memory here is still unknown.
+- **The scheduler as the reason the game does not progress.** Measured three
+  ways: the current build, the scheduler with its token fix reverted, and the
+  fully original semantics. All three are functionally identical — same 19
+  prims, same 2,350,081 pixels, same five live threads, and `deadlock -- `
+  printed zero times in all three. The scheduler had a real bug (see the patch
+  series note below) and fixing it changed nothing the game does.
 
 ## Open work, in the order it is worth doing
 
-1. **Task #1 — two slots marked RUNNING at once.** The false deadlock that
-   stops the game. Everything else is downstream of it. The task carries the
-   suspect path and a cheap assertion that should localise it in one run.
-2. **Tasks #22 / #24 / #32 are one bug.** Blocks promoted to function entries
-   by the relocation-pointer seed scan, whose back-edges stay C calls.
-   `merge_shared` skips them precisely because they are known entries. This is
-   the deepest thing still known-broken in the emitter.
-3. **Task #25 — the two composed-chain oracle divergences.** Each callee agrees
-   in isolation; the disagreement only appears in the chain. Needs
-   instruction-level trace diffing, not another hypothesis.
+**This list is the source of truth.** It used to live only in an agent's task
+tracker, which does not survive a session — one session opened by reconstructing
+it from transcripts, and inherited a stale premise doing so. Anything worth
+picking up next session goes here, in the repository, with enough context to act
+on without the conversation that produced it.
+
+1. **The frame loop presents forever without submitting geometry.** The game is
+   not stuck; it repeats. ~1.7M frame presents against 21 GE lists for the whole
+   run. Thread `0x40021` (entry `0x0027594C`) is parked on a semaphore — find
+   which, and who was supposed to signal it. Start with `PSPRECOMP_HLE_LOG=1`,
+   which tags every call with its thread. Note the 28,637 unimplemented
+   firmware calls in the same run, `0xDBA6C4C4` among them: an unimplemented
+   call returns 0, 0 is `SCE_KERNEL_ERROR_OK`, and this project has been bitten
+   by that four times already.
+2. **Blocks promoted to function entries by the pointer-seed scan, whose
+   back-edges stay C calls.** `a_scan_data_pointers` accepts any word that lands
+   in `.text` and decodes, so data pointing into the middle of a function
+   becomes an "entry"; both merge sites in `analyze.c` are guarded on
+   `!entry_map[ti]`, so those addresses block their own merge and the loop
+   back-edge ships as a call. Give seeds provenance — hard (entry, exports,
+   `jal` targets, table targets) against soft (pointer guesses) — and guard on
+   hard only. The metric is the oracle's unbalanced-`$sp` skip bucket, not its
+   agreement count. This is the deepest thing still known-broken in the emitter.
+3. **The two composed-chain oracle divergences.** Each callee agrees in
+   isolation; the disagreement only appears in the chain. Needs
+   instruction-level trace diffing, not another hypothesis — which means giving
+   the recompiled side a per-instruction register dump to match
+   `allegrexrecomp interp --regs`.
+4. **The guest's panic message.** The abort chain is `sceKernelStdout` ->
+   `sceIoWrite` -> `abort()`, but no text reaches stderr. Worth having before
+   the HLE push, for the same reason as the 0-is-OK pattern above.
+5. **`$k0` thread control block and reent.** Bring-up completeness, not a live
+   blocker — only twelve sites in the whole module read `r_k0`.
+
+### Two measurements worth taking before building further
+
+Neither is on the critical path today, and both could redirect months of work:
+
+- **What the rasterizer costs on a real scene.** Everything from here — texturing,
+  blending, lighting — is built on the software rasterizer. If a mid-poly frame
+  costs tens of milliseconds, the GE needs GPU-backed display-list translation
+  instead, and that is a rewrite of whatever is stacked on top by then. Capture
+  one real display list and time it.
+- **A behavioural oracle.** The differential oracle validates *translation*, and
+  everything left is *environment* — the HLE, the scheduler, save data. Anything
+  missing from the execution environment is missing from both sides and agrees
+  perfectly, so the current instrument is structurally blind to exactly the work
+  that remains. `pspautotests` are small PSP programs with real-hardware expected
+  output; run through both the interpreter and the recompiled module they give
+  ground truth where the oracle cannot.
 
 ## The patch series
 
@@ -108,4 +182,17 @@ Everything upstream-able lives in `patches/`, applied to the `tools/psprecomp`
 submodule by `scripts/build-tools.sh`. After changing anything under
 `tools/psprecomp`, regenerate the affected patch and check the whole series
 still applies to a pristine checkout **and builds green there** — a stale build
-directory will happily report 11/11 for code you did not build.
+directory will happily report 12/12 for code you did not build.
+
+Regenerating a patch in the middle of the series has two traps. Files a patch
+*creates* are untracked in the submodule, so a plain `git diff` cannot see them
+and silently produces a patch with the file missing — `git add -N` first. And a
+patch must be diffed against the state *after* its predecessors, not against
+pristine HEAD, or it will clobber their hunks in a shared file. The recipe:
+clone the submodule, apply `0001`..`N-1`, commit that as a baseline, apply the
+old `N`, fold the new change in, and diff.
+
+The check that actually proves it is not `ctest` but a tree diff: apply the
+whole series to a pristine checkout and compare every file the series owns
+against the working tree. Byte-identical is the bar. Green tests only
+approximate it.
