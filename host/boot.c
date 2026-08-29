@@ -151,6 +151,30 @@ static void watch_hit(uint32_t addr) {
  * The image is what the *guest* believes it is showing -- the address comes
  * from its last sceDisplaySetFrameBuf -- so an empty file is a real answer
  * too: it means the game never pointed the display anywhere. */
+/* Which parts of VRAM have anything in them.
+ *
+ * "The texture sampled black" has two very different causes -- the texture is
+ * not there, or it is somewhere else -- and guessing between them has already
+ * cost more than measuring would have. This walks VRAM in 64K blocks and says
+ * which ones are non-zero, so the answer is visible rather than inferred. */
+static void survey_vram(void) {
+    enum { BLOCK = 0x10000 };
+    printf("vram:     ");
+    int any = 0;
+    for (uint32_t off = 0; off < PSP_VRAM_SIZE; off += BLOCK) {
+        uint64_t nz = 0;
+        for (uint32_t i = 0; i < BLOCK; i += 4)
+            if (psp_read32(PSP_VRAM_BASE + off + i)) nz++;
+        if (nz) {
+            printf("%s0x%08X:%llu", any ? "  " : "",
+                   PSP_VRAM_BASE + off, (unsigned long long)nz);
+            any = 1;
+        }
+    }
+    if (!any) printf("entirely zero");
+    printf("\n");
+}
+
 static void dump_framebuffer(void) {
     /* The buffer the GE last drew into, falling back to the one the display is
      * scanning out. They are usually different -- the game renders to the back
@@ -446,6 +470,7 @@ int main(int argc, char **argv) {
     printf("pixels:   %llu drawn by the rasterizer\n",
            (unsigned long long)psp_ge_pixels());
     psp_ge_dump_stats(stdout);
+    survey_vram();
     dump_framebuffer();
     printf("  most-called firmware functions:\n");
     psp_hle_dump_calls(stdout, 12);
