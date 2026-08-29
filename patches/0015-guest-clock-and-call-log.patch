@@ -185,10 +185,70 @@ index 0a619bb..4a43117 100644
      psp_hle_register(0x9C6EAAD7, "sceDisplay", "sceDisplayGetVcount",         hle_GetVcount);
      psp_hle_register(0x210EAB3A, "sceDisplay", "sceDisplayGetAccumulatedHcount",
 diff --git a/src/hle/ge.c b/src/hle/ge.c
-index f610b98..b59a7cf 100644
+index f610b98..1a23478 100644
 --- a/src/hle/ge.c
 +++ b/src/hle/ge.c
-@@ -148,8 +148,25 @@ uint64_t psp_ge_vertex_count(void)  { return g_ge.vertices; }
+@@ -50,6 +50,18 @@
+ #define GE_VTYPE        0x12
+ #define GE_OFFSET_ADDR  0x13
+ #define GE_ORIGIN_ADDR  0x14
++/* Texture state. Numbers from PPSSPP's GPU/ge_constants.h. */
++#define GE_TEXADDR0     0xA0
++#define GE_TEXBUFWIDTH0 0xA8
++#define GE_CLUTADDR     0xB0
++#define GE_TEXSIZE0     0xB8
++#define GE_TEXMODE      0xC2
++#define GE_TEXFORMAT    0xC3
++#define GE_LOADCLUT     0xC4
++#define GE_CLUTFORMAT   0xC5
++#define GE_TEXFILTER    0xC6
++#define GE_TEXFUNC      0xC9
++
+ #define GE_FBP          0x9C
+ #define GE_FBW          0x9D
+ 
+@@ -80,6 +92,13 @@ static uint64_t g_unsupported;     /* vertices in a format we do not read */
+ /* Tracked state, and the counters that make the report worth reading. */
+ static struct {
+     uint32_t fbp, fbw, vtype, vaddr;
++    /* Texture state, recorded so the sampler can be built against what this
++     * game uses rather than against the whole hardware surface. */
++    uint32_t tex_addr, tex_stride, tex_w, tex_h;
++    uint32_t tex_format, tex_func, tex_filter, tex_swizzled;
++    uint32_t clut_addr, clut_format;
++    uint32_t tex_formats_seen, tex_funcs_seen;
++    uint64_t clut_loads;
+     uint64_t commands;
+     uint64_t prims[8];
+     uint64_t vertices;
+@@ -103,6 +122,26 @@ void psp_ge_dump_stats(FILE *out) {
+             (unsigned long long)g_ge.lists,
+             (unsigned long long)g_ge.commands,
+             (unsigned long long)g_ge.finishes);
++    if (g_ge.tex_addr || g_ge.tex_formats_seen) {
++        static const char *const TF[16] = {
++            "5650","5551","4444","8888","clut4","clut8","clut16","clut32",
++            "dxt1","dxt3","dxt5","?","?","?","?","?" };
++        static const char *const FN[8] = {
++            "modulate","decal","blend","replace","add","?","?","?" };
++        fprintf(out, "    texture    0x%08X %ux%u stride %u, %s, %s%s\n",
++                g_ge.tex_addr, g_ge.tex_w, g_ge.tex_h, g_ge.tex_stride,
++                TF[g_ge.tex_format & 15], FN[g_ge.tex_func & 7],
++                g_ge.tex_swizzled ? ", swizzled" : "");
++        fprintf(out, "    formats used:");
++        for (int i = 0; i < 16; i++)
++            if (g_ge.tex_formats_seen & (1u << i)) fprintf(out, " %s", TF[i]);
++        for (int i = 0; i < 8; i++)
++            if (g_ge.tex_funcs_seen & (1u << i)) fprintf(out, " %s", FN[i]);
++        if (g_ge.clut_loads)
++            fprintf(out, "  (%llu clut loads, fmt %u)",
++                    (unsigned long long)g_ge.clut_loads, g_ge.clut_format);
++        fprintf(out, "\n");
++    }
+     fprintf(out, "    framebuffer 0x%08X stride %u, vertex type 0x%06X\n",
+             g_ge.fbp, g_ge.fbw, g_ge.vtype);
+     fprintf(out, "    vertices submitted: %llu\n", (unsigned long long)g_ge.vertices);
+@@ -148,8 +187,25 @@ uint64_t psp_ge_vertex_count(void)  { return g_ge.vertices; }
  #define VT_THROUGH(v) (((v) >> 23) & 1)
  
  
@@ -214,8 +274,54 @@ index f610b98..b59a7cf 100644
  /* Size of one vertex in bytes, and the offsets within it. Components appear in
   * a fixed order (weights, texture, colour, normal, position) and each is
   * aligned to its own size, which is what makes the stride awkward enough to be
-@@ -322,12 +339,12 @@ static void run_list(ge_queue *q) {
+@@ -320,14 +376,58 @@ static void run_list(ge_queue *q) {
+         case GE_OFFSET_ADDR: q->base = arg << 8; break;
+ 
          case GE_VTYPE: g_ge.vtype = arg; break;
++        /* ---- texture state -------------------------------------------------
++         *
++         * Recorded, not yet sampled. What the sampler has to support is a
++         * question about this game rather than about the hardware, and the
++         * cheapest way to answer it is to watch which formats and sizes it
++         * actually sets -- the PSP offers eleven pixel formats, four palette
++         * formats and a swizzle, and building all of that before knowing which
++         * are used is how a rasterizer ends up mostly untested code. */
++        case GE_TEXADDR0:
++            g_ge.tex_addr = (g_ge.tex_addr & 0xFF000000u) | (arg & 0xFFFFFFu);
++            break;
++        case GE_TEXBUFWIDTH0:
++            g_ge.tex_stride = arg & 0xFFFF;
++            g_ge.tex_addr   = (g_ge.tex_addr & 0x00FFFFFFu) | ((arg & 0xFF0000u) << 8);
++            break;
++        case GE_TEXSIZE0:
++            /* log2 of each dimension, width in the low byte. */
++            g_ge.tex_w = 1u << (arg & 0xFF);
++            g_ge.tex_h = 1u << ((arg >> 8) & 0xFF);
++            break;
++        case GE_TEXFORMAT:
++            g_ge.tex_format = arg & 0xF;
++            g_ge.tex_formats_seen |= 1u << (arg & 0xF);
++            break;
++        case GE_TEXMODE:
++            g_ge.tex_swizzled = arg & 1;        /* bit 0 selects swizzled */
++            break;
++        case GE_CLUTFORMAT:
++            g_ge.clut_format = arg & 3;
++            break;
++        case GE_CLUTADDR:
++            g_ge.clut_addr = (g_ge.clut_addr & 0xFF000000u) | (arg & 0xFFFFFFu);
++            break;
++        case GE_TEXFUNC:
++            g_ge.tex_func = arg & 7;
++            g_ge.tex_funcs_seen |= 1u << (arg & 7);
++            break;
++        case GE_TEXFILTER:
++            g_ge.tex_filter = arg & 0xFFFF;
++            break;
++        case GE_LOADCLUT:
++            g_ge.clut_loads++;
++            break;
++
          case GE_FBP:
              g_ge.fbp = (g_ge.fbp & 0xFF000000u) | arg;
 -            psp_render_current()->set_target(g_ge.fbp, g_ge.fbw, 0);
