@@ -162,6 +162,19 @@ static void install_alt_stack(void) {
     if (ss.ss_sp) sigaltstack(&ss, NULL);
 }
 
+static void on_signal(int sig);
+
+static void *g_fault_addr;
+
+static void on_signal_info(int sig, siginfo_t *si, void *uc) {
+    (void)uc;
+    /* The address a fault touched is the difference between "a crash" and a
+     * diagnosis: zero means a null dereference, a small value means an offset
+     * from one, and a wild value means a corrupt pointer. */
+    g_fault_addr = (sig == SIGSEGV || sig == SIGBUS) && si ? si->si_addr : NULL;
+    on_signal(sig);
+}
+
 static void on_signal(int sig) {
     g_reason = (sig == SIGALRM) ? 2 : 3;
 
@@ -170,9 +183,11 @@ static void on_signal(int sig) {
      * generated code. So it reports and ends the process. Losing the boot
      * summary is a fair trade for a diagnosis instead of a core dump. */
     if (psp_sched_current() != 0) {
-        fprintf(stderr, "\npsprecomp: %s in guest thread 0x%08X, last fn 0x%08X\n",
+        fprintf(stderr, "\npsprecomp: %s in guest thread 0x%08X, last fn 0x%08X",
                 sig == SIGALRM ? "timed out" : "host fault (SIGSEGV/SIGBUS)",
                 psp_sched_current(), psp_trace_last());
+        if (sig != SIGALRM) fprintf(stderr, ", touching %p", g_fault_addr);
+        fprintf(stderr, "\n");
         psp_trace_dump();
         fflush(NULL);
         _exit(2);
@@ -198,8 +213,8 @@ static void install_handlers(void) {
 
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
-    sa.sa_handler = on_signal;
-    sa.sa_flags   = SA_ONSTACK | SA_NODEFER;
+    sa.sa_flags     = SA_ONSTACK | SA_NODEFER | SA_SIGINFO;
+    sa.sa_sigaction = on_signal_info;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS,  &sa, NULL);

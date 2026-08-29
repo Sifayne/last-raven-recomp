@@ -174,10 +174,10 @@ index 0000000..eb0dd24
 +#endif /* PSPRECOMP_SCHED_H */
 diff --git a/src/hle/sched.c b/src/hle/sched.c
 new file mode 100644
-index 0000000..9369010
+index 0000000..ede1704
 --- /dev/null
 +++ b/src/hle/sched.c
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,430 @@
 +/* psprecomp — thread scheduling. See include/psprecomp/sched.h. */
 +
 +#include "psprecomp/sched.h"
@@ -192,6 +192,7 @@ index 0000000..9369010
 +
 +#define MAX_SCHED_THREADS 130      /* the kernel's 128, plus the main context */
 +#define MAIN_SLOT         0        /* the context module_start runs on */
++#define PSP_HOST_STACK_SIZE (16u * 1024u * 1024u)
 +
 +typedef struct {
 +    int             used;
@@ -383,7 +384,25 @@ index 0000000..9369010
 +    t->a0 = a0;  t->a1 = a1;  t->priority = priority;
 +    t->state = PSP_SCHED_READY;
 +
-+    if (pthread_create(&t->host, NULL, thread_main, t) != 0) {
++    /* A generous host stack, unrelated to the guest stack size the game asked
++     * for. A recompiled frame is much larger than the MIPS one it came from --
++     * every local the original kept in a register becomes a variable, and the
++     * dispatcher adds a frame per guest call -- so a call chain that fits a
++     * PSP thread's 16K can still run a host thread out of its default 8MB. The
++     * same reasoning already applies to the boot host's entry stack.
++     *
++     * It is headroom, not a fix. A guest loop emitted as recursion exhausts any
++     * stack; raising this to 64MB did not save MovieReadThread, which is how
++     * that was ruled out as the cause. */
++    pthread_attr_t attr;
++    pthread_attr_t *attrp = NULL;
++    if (pthread_attr_init(&attr) == 0) {
++        pthread_attr_setstacksize(&attr, PSP_HOST_STACK_SIZE);
++        attrp = &attr;
++    }
++    const int rc = pthread_create(&t->host, attrp, thread_main, t);
++    if (attrp) pthread_attr_destroy(attrp);
++    if (rc != 0) {
 +        t->used = 0;
 +        pthread_mutex_unlock(&g_lock);
 +        return -1;
