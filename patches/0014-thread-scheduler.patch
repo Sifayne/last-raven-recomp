@@ -590,7 +590,7 @@ index 0000000..9369010
 +    return uid;
 +}
 diff --git a/src/hle/threadman.c b/src/hle/threadman.c
-index bba5683..98458cd 100644
+index bba5683..5458ec8 100644
 --- a/src/hle/threadman.c
 +++ b/src/hle/threadman.c
 @@ -5,35 +5,27 @@
@@ -812,7 +812,9 @@ index bba5683..98458cd 100644
 +        fprintf(stderr, "hle: thread 0x%08X exiting with status %u\n",
 +                psp_sched_current(), status);
 +        psp_trace_dump();
-+    }
+     }
+-    /* Nothing to unwind to: the module called ExitThread from its entry rather
+-     * than from a started thread. Nothing further can run. */
 +    psp_thread *t = find_thread(psp_sched_current());
 +    if (t) {
 +        t->exit_status = status;
@@ -820,9 +822,7 @@ index bba5683..98458cd 100644
 +        for (int i = 0; i < t->nenders && i < MAX_SEMA_WAITERS; i++)
 +            psp_sched_wake(t->enders[i]);
 +        t->nenders = 0;
-     }
--    /* Nothing to unwind to: the module called ExitThread from its entry rather
--     * than from a started thread. Nothing further can run. */
++    }
 +    /* Does not return when called from a guest thread: the scheduler ends the
 +     * host thread underneath it. From the main context there is nothing to
 +     * unwind, so it falls through. */
@@ -942,7 +942,7 @@ index bba5683..98458cd 100644
  }
  
  /* ---- semaphores ---------------------------------------------------------- */
-@@ -305,20 +394,50 @@ static void hle_SignalSema(void) {
+@@ -305,20 +394,72 @@ static void hle_SignalSema(void) {
      if (!s) { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_UID); return; }
      s->count += (int32_t)psp_arg(1);
      if (s->max_count > 0 && s->count > s->max_count) s->count = s->max_count;
@@ -956,11 +956,33 @@ index bba5683..98458cd 100644
 +        urgent |= psp_sched_wake(s->waiters[i]);
 +    s->nwaiters = 0;
 +
-     psp_ret(SCE_KERNEL_ERROR_OK);
++    psp_ret(SCE_KERNEL_ERROR_OK);
 +    /* Released a thread that outranks us, so it runs now. */
 +    if (urgent) psp_sched_yield();
++}
++
++/* Take the semaphore if it can be taken, and never block. The distinction from
++ * WaitSema is the whole point of the call: a caller uses it precisely because
++ * it has something else to do when the answer is no. */
++static void hle_PollSema(void) {
++    psp_sema *s = find_sema(psp_arg(0));
++    if (!s) { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_UID); return; }
++    const int32_t need = (int32_t)psp_arg(1);
++    if (s->count < need) { psp_ret(SCE_KERNEL_ERROR_SEMA_ZERO); return; }
++    s->count -= need;
+     psp_ret(SCE_KERNEL_ERROR_OK);
  }
  
++/* Give the rest of this priority level a turn. With round-robin handoff a
++ * plain yield already does exactly that, and the priority argument only
++ * selects a level we would reach anyway. */
++static void hle_RotateReadyQueue(void) {
++    psp_sched_yield();
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++static void hle_DeleteCallback(void) { psp_ret(SCE_KERNEL_ERROR_OK); }
++
  static void hle_WaitSema(void) {
      psp_sema *s = find_sema(psp_arg(0));
      if (!s) { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_UID); return; }
@@ -1000,7 +1022,7 @@ index bba5683..98458cd 100644
  }
  
  /* ---- event flags --------------------------------------------------------- */
-@@ -431,6 +550,9 @@ void psp_threadman_register(void) {
+@@ -431,6 +572,9 @@ void psp_threadman_register(void) {
      psp_hle_register(0xCEADEB47, "ThreadManForUser", "sceKernelDelayThread",             hle_DelayThread);
      psp_hle_register(0x68DA9E36, "ThreadManForUser", "sceKernelDelayThreadCB",           hle_DelayThread);
      psp_hle_register(0x278C0DF5, "ThreadManForUser", "sceKernelWaitThreadEnd",           hle_WaitThreadEnd);
@@ -1010,6 +1032,22 @@ index bba5683..98458cd 100644
      psp_hle_register(0x293B45B8, "ThreadManForUser", "sceKernelGetThreadId",             hle_GetThreadId);
      psp_hle_register(0x9944F31F, "ThreadManForUser", "sceKernelSuspendThread",           hle_SuspendThread);
      psp_hle_register(0x75156E8F, "ThreadManForUser", "sceKernelResumeThread",            hle_ResumeThread);
+@@ -443,6 +587,15 @@ void psp_threadman_register(void) {
+     psp_hle_register(0x28B6489C, "ThreadManForUser", "sceKernelDeleteSema",              hle_DeleteSema);
+     psp_hle_register(0x3F53E640, "ThreadManForUser", "sceKernelSignalSema",              hle_SignalSema);
+     psp_hle_register(0x4E3A1105, "ThreadManForUser", "sceKernelWaitSema",                hle_WaitSema);
++    /* The CB form additionally runs the thread's pending callbacks while it
++     * waits. Callbacks are delivered by sceKernelCheckCallback here, so the
++     * two differ only in that -- and unimplemented was much worse than
++     * imperfect: it returned zero, and zero means "you have the semaphore",
++     * so a thread carried on holding a lock it had never taken. */
++    psp_hle_register(0x6D212BAC, "ThreadManForUser", "sceKernelWaitSemaCB",              hle_WaitSema);
++    psp_hle_register(0x58B1F937, "ThreadManForUser", "sceKernelPollSema",                hle_PollSema);
++    psp_hle_register(0x912354A7, "ThreadManForUser", "sceKernelRotateThreadReadyQueue",  hle_RotateReadyQueue);
++    psp_hle_register(0xEDBA5844, "ThreadManForUser", "sceKernelDeleteCallback",          hle_DeleteCallback);
+ 
+     psp_hle_register(0x55C20A00, "ThreadManForUser", "sceKernelCreateEventFlag",         hle_CreateEventFlag);
+     psp_hle_register(0xEF9E4C70, "ThreadManForUser", "sceKernelDeleteEventFlag",         hle_DeleteEventFlag);
 diff --git a/tests/test_hle.c b/tests/test_hle.c
 index 142777e..ff60cff 100644
 --- a/tests/test_hle.c

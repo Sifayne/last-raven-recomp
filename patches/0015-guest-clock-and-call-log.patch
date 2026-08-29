@@ -54,7 +54,7 @@ index 0000000..6289560
 +
 +#endif /* PSPRECOMP_CLOCK_H */
 diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
-index 79424f8..7d62b77 100644
+index 79424f8..4f0f5be 100644
 --- a/include/psprecomp/hle.h
 +++ b/include/psprecomp/hle.h
 @@ -61,8 +61,19 @@ const psp_hle_entry *psp_hle_entries(int *count);
@@ -77,6 +77,16 @@ index 79424f8..7d62b77 100644
  /* Register everything the toolkit implements. Call once at startup. */
  void psp_hle_init(void);
  
+@@ -111,6 +122,9 @@ const char *psp_str(uint32_t addr, char *dst, size_t cap);
+ #define SCE_KERNEL_ERROR_UNKNOWN_UID     0x800201A2
+ #define SCE_KERNEL_ERROR_ILLEGAL_MEMBLOCK 0x800201A9
+ #define SCE_KERNEL_ERROR_ILLEGAL_THID    0x80020197
++/* A poll that would have blocked. Distinct from an error: it is the ordinary
++ * answer to "is this free?" when it is not. */
++#define SCE_KERNEL_ERROR_SEMA_ZERO       0x800201AD
+ #define SCE_KERNEL_ERROR_WAIT_TIMEOUT    0x800201A8
+ 
+ /* ---- the subsystems ------------------------------------------------------ */
 diff --git a/src/hle/clock.c b/src/hle/clock.c
 new file mode 100644
 index 0000000..f0006b7
