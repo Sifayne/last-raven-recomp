@@ -14,13 +14,18 @@ index 780f40f..4124cd0 100644
  const char *psp_hle_name(uint32_t nid);
  int         psp_hle_count(void);
 diff --git a/src/hle/hle.c b/src/hle/hle.c
-index cc19336..7e16f81 100644
+index cc19336..4c2988a 100644
 --- a/src/hle/hle.c
 +++ b/src/hle/hle.c
-@@ -72,6 +72,24 @@ const psp_hle_entry *psp_hle_entries(int *count) {
- static struct { uint32_t nid; const char *name; } g_zero[ZERO_HISTORY];
+@@ -69,12 +69,37 @@ const psp_hle_entry *psp_hle_entries(int *count) {
+  * long gone. Keeping the last few makes the answer immediate instead of
+  * requiring a second run with different instrumentation. */
+ #define ZERO_HISTORY 16
+-static struct { uint32_t nid; const char *name; } g_zero[ZERO_HISTORY];
++static struct { uint32_t nid; const char *name; int handled; } g_zero[ZERO_HISTORY];
  static int g_zero_n;
  
+-static void note_zero(uint32_t nid, const char *name) {
 +/* Suppresses the unimplemented-call message. Two reasons a batch caller wants
 + * this, and the second one matters more than it looks:
 + *
@@ -39,10 +44,28 @@ index cc19336..7e16f81 100644
 +
 +void psp_hle_set_quiet(int quiet) { g_quiet = quiet; }
 +
- static void note_zero(uint32_t nid, const char *name) {
++/* `handled` distinguishes "we ran a handler that returned zero" from "no
++ * handler existed". A NULL name used to stand for both, so a function
++ * registered without a known name -- psp_hle_register_unnamed, for the NIDs
++ * whose exported symbol is not known -- was reported as unimplemented. That is
++ * actively misleading during bring-up: it sends you looking for a handler that
++ * is already there. */
++static void note_zero(uint32_t nid, const char *name, int handled) {
      g_zero[g_zero_n % ZERO_HISTORY].nid = nid;
      g_zero[g_zero_n % ZERO_HISTORY].name = name;
-@@ -103,8 +121,6 @@ void psp_hle_dump_recent(FILE *out) {
++    g_zero[g_zero_n % ZERO_HISTORY].handled = handled;
+     g_zero_n++;
+ }
+ 
+@@ -98,21 +123,21 @@ void psp_hle_dump_recent(FILE *out) {
+     for (int i = 1; i <= n; i++) {
+         int k = (g_zero_n - i) % ZERO_HISTORY;
+         fprintf(out, "    0x%08X  %s\n", g_zero[k].nid,
+-                g_zero[k].name ? g_zero[k].name : "(unimplemented)");
++                g_zero[k].name ? g_zero[k].name
++                               : (g_zero[k].handled ? "(handled, name unknown)"
++                                                    : "(unimplemented)"));
+     }
  }
  
  void psp_hle_call(uint32_t nid) {
@@ -51,7 +74,17 @@ index cc19336..7e16f81 100644
      for (int i = 0; i < g_count; i++) {
          if (g_entry[i].nid == nid) {
              g_fn[i]();
-@@ -122,7 +138,8 @@ void psp_hle_call(uint32_t nid) {
+-            if (psp_cpu.r[PSP_REG_V0] == 0) note_zero(nid, g_entry[i].name);
++            if (psp_cpu.r[PSP_REG_V0] == 0) note_zero(nid, g_entry[i].name, 1);
+             return;
+         }
+     }
+-    note_zero(nid, NULL);
++    note_zero(nid, NULL, 0);
+ 
+     /* Unimplemented. Naming the function is the whole point — bringing a game
+      * up is largely the process of watching this message stop appearing, and
+@@ -122,7 +147,8 @@ void psp_hle_call(uint32_t nid) {
       * advisory (version reporting, profiling hooks) and a game will run past
       * them happily. One that genuinely needed the result will fail visibly
       * soon after, with this line already in the log. */

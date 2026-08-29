@@ -99,6 +99,12 @@ static uint32_t g_exit_status;
 static void hle_stop_unload_self(void) {
     g_guest_exited = 1;
     g_exit_status  = psp_arg(0);
+    /* Built with -DPSPRECOMP_TRACE this prints the functions entered on the way
+     * here, which is the only practical way to tell *which* abort fired: the
+     * abort wrapper has several callers and static analysis cannot say which
+     * one ran. Without the define it compiles to nothing and says so. */
+    printf("    --- guest exit(%u); how it got here ---\n", g_exit_status);
+    psp_trace_dump();
     g_reason = 5;
     siglongjmp(g_abort, 1);
 }
