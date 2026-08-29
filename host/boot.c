@@ -390,7 +390,24 @@ int main(int argc, char **argv) {
     psp_hle_dump_calls(stdout, 12);
     psp_hle_dump_recent(stdout);
 
+    /* Guest threads that would not stop are still running guest code, and that
+     * code is still reading and writing guest memory. Freeing it here is a
+     * use-after-free against a thread we have already admitted we cannot
+     * unwind -- it showed up as an intermittent SIGSEGV inside psp_write32,
+     * three frames deep, on a pointer the memory layer had correctly judged to
+     * be in range before the range was handed back to the allocator.
+     *
+     * There is nothing to be gained by freeing at all here: the process is
+     * about to end and the kernel reclaims everything. So the teardown is
+     * skipped whenever anything is still live, and _exit avoids running
+     * atexit handlers that would reach the same memory. */
+    const int rc = (ctors_ok == 0 && entry_ok == 0) ? 0 : 1;
+    if (live > 0) {
+        fflush(NULL);
+        _exit(rc);
+    }
+
     psp_mem_free();
     psp_blob_free(&b);
-    return (ctors_ok == 0 && entry_ok == 0) ? 0 : 1;
+    return rc;
 }
