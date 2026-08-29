@@ -30,7 +30,7 @@ index cdad3d4..cd74671 100644
      if (an.nfuncs != 1) return 1;
      CHECK(an.funcs[0].addr == BASE, "function entry is the seed");
 diff --git a/tools/allegrexrecomp/analyze.c b/tools/allegrexrecomp/analyze.c
-index 8a9e174..ff5bba6 100644
+index 8a9e174..1b6cdf0 100644
 --- a/tools/allegrexrecomp/analyze.c
 +++ b/tools/allegrexrecomp/analyze.c
 @@ -70,14 +70,30 @@ typedef struct {
@@ -185,7 +185,7 @@ index 8a9e174..ff5bba6 100644
                          /* Backward `j` -- a loop back-edge into this function's
                           * own blocks, unless another walk already claimed the
                           * target. Then the two functions share a block, exactly
-@@ -263,14 +343,26 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
+@@ -263,15 +343,46 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                           * The branch path above has always promoted these. The
                           * jump path did not, so a whole class of shared block
                           * stayed unreachable. */
@@ -211,12 +211,33 @@ index 8a9e174..ff5bba6 100644
                          uint32_t ti = word_index(an, in.target);
                          if (!c->entry_map[ti]) {
 -                            c->entry_map[ti] = 1;
-+                            /* The code jumps here, so it is entered: hard. */
-+                            c->entry_map[ti] = A_ENTRY_HARD;
-                             u32_push(c->func_queue, in.target); /* tail call */
+-                            u32_push(c->func_queue, in.target); /* tail call */
++                            /* A *forward* `j` is a tail call, and its target is
++                             * genuinely another function's entry: hard.
++                             *
++                             * A *backward* one only reaches here because this
++                             * walk began on the jump itself -- the `a != entry`
++                             * test above failed -- which happens when a block
++                             * was split out and its first instruction jumps
++                             * back into the function it came from. That is not
++                             * a tail call and the target is not a function, so
++                             * calling it hard makes it veto its own merge for
++                             * good: the target keeps the epilogue while the
++                             * prologue stays behind in the original, and the
++                             * two can never be put back together.
++                             *
++                             * Soft still makes it an entry -- walked, labelled,
++                             * dispatchable -- it just stops it from blocking
++                             * the merge. Observed at 0x002B60C0, whose only
++                             * reference in the whole module is the backward
++                             * `j` at 0x002B60CC. */
++                            c->entry_map[ti] = (in.target <= a) ? A_ENTRY_SOFT
++                                                                : A_ENTRY_HARD;
++                            u32_push(c->func_queue, in.target);
                          }
                      }
-@@ -458,13 +550,99 @@ static int cmp_func(const void *a, const void *b) {
+                 }
+@@ -458,13 +569,99 @@ static int cmp_func(const void *a, const void *b) {
      return (x > y) - (x < y);
  }
  
@@ -317,19 +338,20 @@ index 8a9e174..ff5bba6 100644
      /* The import stubs sit at the end of .text, so their extent is the best
       * available executable bound when no section header gives one. */
      if (!an->text_size && an->stub_addr && an->stub_size)
-@@ -481,9 +659,9 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+@@ -481,9 +678,10 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
      if (!owner) { free(seen); free(entry_map); return -1; }
      for (uint32_t i = 0; i < nwords; i++) owner[i] = A_NO_OWNER;
  
 -    u32list queue = { 0 }, imports = { 0 }, indirects = { 0 }, cross = { 0 };
 +    u32list queue = { 0 }, imports = { 0 }, indirects = { 0 }, merges = { 0 };
++    u32list jr_sites = { 0 };   /* the `jr` sites of the final walk */
      walk_ctx ctx = { an, seen, entry_map, owner, A_NO_OWNER,
 -                     &queue, &imports, &indirects, &cross };
 +                     &queue, &imports, &indirects, &merges };
  
      /* Pass 1: establish the complete set of function entries before walking
       * anything. Both the tail-call test and the ran-off-the-end test need to
-@@ -491,7 +669,12 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+@@ -491,7 +689,12 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
       * entries are still being discovered as the walk proceeds. */
      for (int i = 0; i < nseeds; i++) {
          if (!a_in_range(an, seeds[i])) continue;
@@ -343,7 +365,7 @@ index 8a9e174..ff5bba6 100644
          u32_push(&queue, seeds[i]);
      }
  
-@@ -513,9 +696,13 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+@@ -513,9 +716,13 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
              if (!a_in_range(an, in.target) || is_import_stub(an, in.target)) continue;
  
              uint32_t ti = word_index(an, in.target);
@@ -360,7 +382,7 @@ index 8a9e174..ff5bba6 100644
          }
      }
  
-@@ -535,22 +722,32 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+@@ -535,22 +742,38 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
   * converges in a handful of rounds. */
      for (int round = 0; round < 8; round++) {
      if (round > 0) {
@@ -376,6 +398,12 @@ index 8a9e174..ff5bba6 100644
          }
 -        for (int i = 0; i < cross.n; i++) u32_push(&targets, cross.v[i]);
 -        cross.n = 0;
++        /* Keep the sites. They are cleared just below and the round that
++         * finds nothing new exits before any walk refills them, so by the time
++         * ownership is final `indirects` is empty -- and the table targets have
++         * to be reconciled against ownership, which only exists then. */
++        jr_sites.n = 0;
++        for (int i = 0; i < indirects.n; i++) u32_push(&jr_sites, indirects.v[i]);
          indirects.n = 0;
          int added = 0;
          for (int i = 0; i < targets.n; i++) {
@@ -398,7 +426,7 @@ index 8a9e174..ff5bba6 100644
              added++;
          }
          free(targets.v);
-@@ -574,6 +771,9 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+@@ -574,6 +797,9 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
           * afterwards is not. */
          memset(seen, 0, nwords);
          for (uint32_t i = 0; i < nwords; i++) owner[i] = A_NO_OWNER;
@@ -408,12 +436,50 @@ index 8a9e174..ff5bba6 100644
          an->insns = an->vfpu = an->invalid = 0;
          nfuncs = 0;
  
-@@ -613,6 +813,20 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+@@ -613,6 +839,58 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
  
      qsort(funcs, (size_t)nfuncs, sizeof *funcs, cmp_func);
  
 +    an->owner = owner;
 +    an->nwords = nwords;
++
++    /* A switch case belongs to the function whose `jr` selects it.
++     *
++     * Nothing else can establish that. The walk stops dead at a computed jump,
++     * so the owning function never reaches its own cases by control flow, and
++     * the cases are only discovered later by resolving the table -- at which
++     * point they are walked as functions in their own right and no branch,
++     * jump or fall-through ever connects them back. Every other merge here is
++     * driven by the walk noticing a collision; this one has to be stated.
++     *
++     * Left unstated, a `jr` through a table calls its own switch case, and the
++     * case runs the function's epilogue on a frame its caller allocated: two
++     * host frames per switch, and a stack-balance report against a prologue
++     * that ran in a different invocation. That is the whole of 0x002B608C,
++     * whose case at 0x002B60B8 holds the epilogue at 0x002B60C0.
++     *
++     * Only soft targets. A table that dispatches to genuine functions -- an
++     * array of handlers rather than a switch -- has `jal` targets in it, and
++     * those are hard and left alone. */
++    for (int i = 0; i < jr_sites.n; i++) {
++        const uint32_t site = jr_sites.v[i];
++        if (!a_in_range(an, site)) continue;
++        const uint32_t site_owner = owner[word_index(an, site)];
++        if (site_owner == A_NO_OWNER) continue;
++
++        u32list t = { 0 };
++        if (resolve_jump_table(an, site, &t) > 0) {
++            for (int k = 0; k < t.n; k++) {
++                if (!a_in_range(an, t.v[k])) continue;
++                const uint32_t ti = word_index(an, t.v[k]);
++                if (entry_map[ti] == A_ENTRY_HARD) continue;
++                if (owner[ti] == A_NO_OWNER || owner[ti] == site_owner) continue;
++                u32_push(&merges, site_owner);
++                u32_push(&merges, owner[ti]);
++            }
++        }
++        free(t.v);
++    }
 +
 +    /* Ownership has to be final before the emitter sees it, and merging is
 +     * what makes a branch between two shared blocks an ordinary `goto` rather
@@ -429,7 +495,7 @@ index 8a9e174..ff5bba6 100644
      an->funcs = funcs;
      an->nfuncs = nfuncs;
      an->imports = imports.v;
-@@ -620,10 +834,7 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+@@ -620,10 +898,8 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
      an->indirects = indirects.v;
      an->nindirects = indirects.n;
  
@@ -437,11 +503,12 @@ index 8a9e174..ff5bba6 100644
 -    an->nwords = nwords;
 -
 -    free(cross.v);
++    free(jr_sites.v);
 +    free(merges.v);
      free(queue.v);
      free(seen);
      free(entry_map);
-@@ -657,6 +868,7 @@ void a_analysis_free(a_analysis *an) {
+@@ -657,6 +933,7 @@ void a_analysis_free(a_analysis *an) {
      free(an->imports);
      free(an->indirects);
      free(an->owner);

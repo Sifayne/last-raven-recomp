@@ -197,15 +197,32 @@ on without the conversation that produced it.
 
    A computed jump now re-enters the body's own `switch (_entry)` when the
    target is one of this function's labels, and only falls back to
-   `psp_dispatch` for a genuine cross-function transfer. That took it to **37
-   sites / 889,348 returns**, from 52 / 7.0M at the start. It mattered beyond
-   the noise: each transfer cost two host frames rather than a jump, so a
-   computed jump used as a loop back-edge would grow the host stack without
-   bound — the same failure as the loop back-edges already fixed, by a
-   different route.
+   `psp_dispatch` for a genuine cross-function transfer.
 
-   Still open: `0x002B60C4` at 888k of the remaining 889k. Same instrument, same
-   method — one site left carrying almost all of it.
+   The last of it was the same thing one level up: **a switch case belongs to
+   the function whose `jr` selects it**, and nothing could establish that. The
+   walk stops dead at a computed jump, so the owning function never reaches its
+   own cases; the cases surface later when the table is resolved, are walked as
+   functions, and no branch, jump or fall-through ever connects them back.
+   Every other merge is the walk noticing a collision — this one has to be
+   stated outright, against final ownership. Only soft targets are folded, so a
+   table of genuine handlers (whose entries are `jal` targets, hence hard) is
+   untouched.
+
+   ```
+   session start                    52 sites   7,067,959 returns
+   fall-through merge               50         4,509,431
+   computed jump jumps              37           889,348
+   switch cases join their function 36             1,159
+   ```
+
+   Zero leaks at every step — that was never the problem. `entry`, `bad mem`,
+   `disc read` and `pixels` are unchanged throughout, and the oracle holds at
+   2 divergences with **dispatch miss 0**, which is the number that would report
+   a `jr` whose target stopped resolving.
+
+   What is left is 36 sites of 85 hits or fewer, ~1,200 in total. Nothing in it
+   is hot, and none of it is a leak.
 3. **The two composed-chain oracle divergences.** Each callee agrees in
    isolation; the disagreement only appears in the chain. Needs
    instruction-level trace diffing, not another hypothesis — which means giving
