@@ -384,10 +384,27 @@ index e9f93d4..a132c13 100644
      main.c
  )
 diff --git a/tools/allegrexrecomp/decode.c b/tools/allegrexrecomp/decode.c
-index 7512695..23b015d 100644
+index 7512695..e4585db 100644
 --- a/tools/allegrexrecomp/decode.c
 +++ b/tools/allegrexrecomp/decode.c
-@@ -789,3 +789,19 @@ int a_format(const a_insn *in, char *buf, int buflen) {
+@@ -644,7 +644,15 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
+         case 0x10: op = A_VMSCL; break;
+         case 0x14: op = A_VCRSP; break;
+         case 0x1C:
+-            if (RS_F(word) == 0x1D) { op = A_VROT; break; }
++            if (RS_F(word) == 0x1D) {
++                /* vrot's operand is a 5-bit control field, not a register:
++                 * two lane selectors and a sign bit. It shares its position
++                 * with vt, so name it in `imm` rather than leaving consumers
++                 * to re-derive it. */
++                in.imm = (int32_t)((word >> 16) & 0x1F);
++                op = A_VROT;
++                break;
++            }
+             switch ((word >> 16) & 0xF) {   /* VFPUMatrix1 */
+             case 0x0: op = A_VMMOV;  break;
+             case 0x3: op = A_VMIDT;  break;
+@@ -789,3 +797,19 @@ int a_format(const a_insn *in, char *buf, int buflen) {
          return snprintf(buf, buflen, ".word     0x%08X", in->raw);
      }
  }
@@ -427,10 +444,10 @@ index 481001d..00a2a70 100644
  #endif
 diff --git a/tools/allegrexrecomp/interp.c b/tools/allegrexrecomp/interp.c
 new file mode 100644
-index 0000000..ace058d
+index 0000000..93ac2de
 --- /dev/null
 +++ b/tools/allegrexrecomp/interp.c
-@@ -0,0 +1,682 @@
+@@ -0,0 +1,683 @@
 +/* allegrexrecomp — the Allegrex interpreter oracle. See interp.h.
 + *
 + * The switch below deliberately mirrors emit.c's emit_simple() case for case.
@@ -812,6 +829,7 @@ index 0000000..ace058d
 +    case A_VTFM2: case A_VTFM3: case A_VTFM4:
 +        psp_vtfm(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
 +    case A_VMSCL: psp_vmscl(in->vd, in->vs, in->vt, in->vsize); return I_RUNNING;
++    case A_VROT:  psp_vrot(in->vd, in->vs, (uint32_t)in->imm & 0x1F, in->vsize); return I_RUNNING;
 +    case A_VMMOV: psp_vmmov(in->vd, in->vs, in->vsize);  return I_RUNNING;
 +    case A_VMIDT: psp_vmidt(in->vd, in->vsize);          return I_RUNNING;
 +    case A_VMZERO:psp_vmzero(in->vd, in->vsize);         return I_RUNNING;

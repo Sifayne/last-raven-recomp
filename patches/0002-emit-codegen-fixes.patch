@@ -1,5 +1,5 @@
 diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
-index e1285c5..c33d9f7 100644
+index e1285c5..e8bc9e9 100644
 --- a/tools/allegrexrecomp/emit.c
 +++ b/tools/allegrexrecomp/emit.c
 @@ -3,6 +3,7 @@
@@ -72,7 +72,17 @@ index e1285c5..c33d9f7 100644
  
      /* Matrix ops that need no multiply. `vsize` is the matrix order here. */
      case A_VMMUL:
-@@ -540,6 +547,34 @@ static void emit_function(ectx *c, const a_func *fn) {
+@@ -447,6 +454,9 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
+         fprintf(f, "%spsp_vtfm(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+     case A_VMSCL:
+         fprintf(f, "%spsp_vmscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
++    case A_VROT:
++        fprintf(f, "%spsp_vrot(%u, %u, 0x%02Xu, %u);\n",
++                ind, in->vd, in->vs, (unsigned)in->imm & 0x1F, in->vsize); return;
+     case A_VMIDT:
+         fprintf(f, "%spsp_vmidt(%u, %u);\n", ind, in->vd, in->vsize); return;
+     case A_VMZERO:
+@@ -540,6 +550,34 @@ static void emit_function(ectx *c, const a_func *fn) {
              c->is_slot[widx(an, a + 4)] = 1;
      }
  
@@ -107,7 +117,7 @@ index e1285c5..c33d9f7 100644
      /* A delay slot can also be somebody's branch target. Arriving through the
       * branch, it runs as part of that transfer; arriving by a jump straight to
       * its address, it is an ordinary instruction. Both paths are real, so it
-@@ -565,17 +600,6 @@ static void emit_function(ectx *c, const a_func *fn) {
+@@ -565,17 +603,6 @@ static void emit_function(ectx *c, const a_func *fn) {
          fprintf(f, " * Contains a computed jump routed through the dispatch table.\n");
      fprintf(f, " * ------------------------------------------------------------- */\n");
  
@@ -125,7 +135,7 @@ index e1285c5..c33d9f7 100644
      /* The body takes the address to start at, and every label is reachable
       * through it.
       *
-@@ -653,14 +677,40 @@ static void emit_function(ectx *c, const a_func *fn) {
+@@ -653,14 +680,40 @@ static void emit_function(ectx *c, const a_func *fn) {
          a_decode(fetch(an, a), a, &in);
  
          if (c->is_label[i]) fprintf(f, "L_%08X: PSP_MARK(0x%08Xu);\n", a, a);
@@ -170,7 +180,7 @@ index e1285c5..c33d9f7 100644
              a_decode(fetch(an, a + 4), a + 4, &slot);
              have_slot = 1;
          }
-@@ -795,6 +845,26 @@ static void emit_function(ectx *c, const a_func *fn) {
+@@ -795,6 +848,26 @@ static void emit_function(ectx *c, const a_func *fn) {
          if (is_function(an, next)) {
              fprintf(f, "    /* falls through into the next function */\n");
              fprintf(f, "    psp_func_%08X();\n", next);
@@ -197,7 +207,7 @@ index e1285c5..c33d9f7 100644
          }
      }
      fprintf(f, "}\n");
-@@ -965,13 +1035,32 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
+@@ -965,13 +1038,32 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
      c.an = an;
      c.is_label = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
      c.is_slot  = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
