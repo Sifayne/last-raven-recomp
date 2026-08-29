@@ -543,10 +543,19 @@ index 68af6aa..a59b013 100644
      psp_hle_register(0xE3EB004C, "IoFileMgrForUser", "sceIoDread",  hle_Dread);
      psp_hle_register(0xEB092469, "IoFileMgrForUser", "sceIoDclose", hle_Dclose);
 diff --git a/src/hle/misc.c b/src/hle/misc.c
-index 4f1cf0f..1ccc341 100644
+index 4f1cf0f..e2f7082 100644
 --- a/src/hle/misc.c
 +++ b/src/hle/misc.c
-@@ -74,6 +74,44 @@ static void hle_Stdout(void) { psp_ret(1); }
+@@ -11,6 +11,8 @@
+ 
+ #include <stdio.h>
+ #include <string.h>
++#include <strings.h>
++#include <stdlib.h>
+ #include <time.h>
+ 
+ /* ---- Kernel_Library ------------------------------------------------------
+@@ -74,6 +76,44 @@ static void hle_Stdout(void) { psp_ret(1); }
  static void hle_Stderr(void) { psp_ret(2); }
  
  /* ---- sceSuspendForUser --------------------------------------------------- */
@@ -591,7 +600,61 @@ index 4f1cf0f..1ccc341 100644
  /* Power management around suspend. Nothing suspends here. */
  static void hle_ok(void) { psp_ret(SCE_KERNEL_ERROR_OK); }
  
-@@ -220,6 +258,12 @@ void psp_misc_register(void) {
+@@ -134,8 +174,53 @@ void psp_ctrl_set(uint32_t buttons, uint8_t ax, uint8_t ay) {
+ 
+ static void hle_CtrlSet(void) { psp_ret(SCE_KERNEL_ERROR_OK); }
+ 
++/* PSPRECOMP_PAD=start,cross holds those buttons for the whole run.
++ *
++ * There is no window and no gamepad here, so the pad reads neutral and a game
++ * sits on its title screen forever waiting for a press. Being able to hold a
++ * button is what gets bring-up past that -- it is the difference between
++ * "renders a menu" and "renders whatever is behind the menu". Read once, on
++ * the first poll, because a game asks about the pad every frame. */
++static uint32_t parse_pad(void) {
++    static const struct { const char *name; uint32_t bit; } B[] = {
++        { "select",   0x000001 }, { "start",    0x000008 },
++        { "up",       0x000010 }, { "right",    0x000020 },
++        { "down",     0x000040 }, { "left",     0x000080 },
++        { "ltrigger", 0x000100 }, { "rtrigger", 0x000200 },
++        { "l",        0x000100 }, { "r",        0x000200 },
++        { "triangle", 0x001000 }, { "circle",   0x002000 },
++        { "cross",    0x004000 }, { "square",   0x008000 },
++    };
++    const char *v = getenv("PSPRECOMP_PAD");
++    if (!v || !*v) return 0;
++
++    uint32_t held = 0;
++    for (const char *p = v; *p; ) {
++        while (*p == ',' || *p == ' ') p++;
++        if (!*p) break;
++        size_t n = 0;
++        while (p[n] && p[n] != ',' && p[n] != ' ') n++;
++
++        int matched = 0;
++        for (size_t i = 0; i < sizeof B / sizeof B[0]; i++) {
++            if (strlen(B[i].name) == n && !strncasecmp(B[i].name, p, n)) {
++                held |= B[i].bit; matched = 1; break;
++            }
++        }
++        if (!matched)
++            fprintf(stderr, "psprecomp: PSPRECOMP_PAD: unknown button \"%.*s\"\n",
++                    (int)n, p);
++        p += n;
++    }
++    if (held) fprintf(stderr, "psprecomp: holding pad buttons 0x%06X\n", held);
++    return held;
++}
++
+ /* SceCtrlData: u32 timestamp, u32 buttons, u8 lx, u8 ly, then padding to 16. */
+ static void hle_ReadBufferPositive(void) {
++    static int looked;
++    if (!looked) { looked = 1; g_buttons |= parse_pad(); }
++
+     uint32_t buf = psp_arg(0), count = psp_arg(1);
+     if (!count) count = 1;
+     for (uint32_t i = 0; i < count; i++) {
+@@ -220,6 +305,12 @@ void psp_misc_register(void) {
  
      psp_hle_register(0xEADB1BD7, "sceSuspendForUser", "sceKernelPowerLock",   hle_ok);
      psp_hle_register(0x3AEE7261, "sceSuspendForUser", "sceKernelPowerUnlock", hle_ok);
@@ -604,6 +667,16 @@ index 4f1cf0f..1ccc341 100644
      psp_hle_register(0x090CCB3F, "sceSuspendForUser", "sceKernelPowerTick",   hle_ok);
  
      psp_hle_register(0x05572A5F, "LoadExecForUser", "sceKernelExitGame",             hle_ExitGame);
+@@ -240,6 +331,9 @@ void psp_misc_register(void) {
+     psp_hle_register(0x1F4011E6, "sceCtrl", "sceCtrlSetSamplingMode",     hle_CtrlSet);
+     psp_hle_register(0x6A2774F3, "sceCtrl", "sceCtrlSetSamplingCycle",    hle_CtrlSet);
+     psp_hle_register(0x1F803938, "sceCtrl", "sceCtrlReadBufferPositive",  hle_ReadBufferPositive);
++    /* Peek differs only in not waiting for the next sample. Nothing samples
++     * here, so the two are the same call. */
++    psp_hle_register(0x3A622550, "sceCtrl", "sceCtrlPeekBufferPositive",  hle_ReadBufferPositive);
+ 
+     psp_hle_register(0x5EC81C55, "sceAudio", "sceAudioChReserve",            hle_ChReserve);
+     psp_hle_register(0x6FC46853, "sceAudio", "sceAudioChRelease",            hle_ChRelease);
 diff --git a/src/mem.c b/src/mem.c
 index 0ca48bd..587be50 100644
 --- a/src/mem.c
