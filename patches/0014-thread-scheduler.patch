@@ -25,10 +25,10 @@ index e6a88df..d063d63 100644
      if(PSPRECOMP_LIBM)
 diff --git a/include/psprecomp/sched.h b/include/psprecomp/sched.h
 new file mode 100644
-index 0000000..9888bef
+index 0000000..6ba131a
 --- /dev/null
 +++ b/include/psprecomp/sched.h
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,135 @@
 +/* psprecomp — thread scheduling.
 + *
 + * Why host threads and not saved registers
@@ -78,6 +78,22 @@ index 0000000..9888bef
 +
 +void psp_sched_init(void);
 +void psp_sched_reset(void);
++
++/* Turn real threading off, for a caller that must stay single-context and
++ * deterministic.
++ *
++ * The differential oracle is the case this exists for. It runs one guest
++ * function at a time and compares register files, so a function that happens
++ * to call sceKernelStartThread would have it run concurrently -- which makes
++ * the comparison depend on scheduling, and hangs the harness outright when the
++ * spawned thread never gives the token back. Neither is something an oracle
++ * can tolerate: it exists to attribute a disagreement to a codegen bug, and a
++ * disagreement it cannot reproduce is worse than no oracle.
++ *
++ * With threading off, spawning records the thread and reports success but runs
++ * nothing, waits fail rather than parking, and yields do nothing -- the
++ * behaviour batch callers had before the scheduler existed. */
++void psp_sched_set_threading(int on);
 +
 +/* Create a host thread for a guest thread and leave it READY. `entry` is the
 + * guest address to dispatch, `sp` its stack top, `a0`/`a1` the two arguments
@@ -150,10 +166,10 @@ index 0000000..9888bef
 +#endif /* PSPRECOMP_SCHED_H */
 diff --git a/src/hle/sched.c b/src/hle/sched.c
 new file mode 100644
-index 0000000..3ce9dee
+index 0000000..9412967
 --- /dev/null
 +++ b/src/hle/sched.c
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,371 @@
 +/* psprecomp — thread scheduling. See include/psprecomp/sched.h. */
 +
 +#include "psprecomp/sched.h"
@@ -188,6 +204,7 @@ index 0000000..3ce9dee
 +static int             g_deadlocked;
 +static void          (*g_end_hook)(uint32_t uid, uint32_t status);
 +static void          (*g_thread_hook)(void);
++static int             g_threading = 1;
 +
 +/* ---- slots ---------------------------------------------------------------- */
 +
@@ -205,6 +222,8 @@ index 0000000..3ce9dee
 +}
 +
 +void psp_sched_init(void) { psp_sched_reset(); }
++
++void psp_sched_set_threading(int on) { g_threading = on; }
 +
 +void psp_sched_reset(void) {
 +    pthread_mutex_lock(&g_lock);
@@ -331,6 +350,12 @@ index 0000000..3ce9dee
 +
 +int psp_sched_spawn(uint32_t uid, uint32_t entry, uint32_t sp,
 +                    uint32_t a0, uint32_t a1, int priority) {
++    /* Threading off: the thread exists as far as the guest is concerned and
++     * never runs. Reporting failure instead would send a game down its
++     * out-of-memory path, which is a different and less useful lie. */
++    if (!g_threading) { (void)uid; (void)entry; (void)sp;
++                        (void)a0; (void)a1; (void)priority; return 0; }
++
 +    pthread_mutex_lock(&g_lock);
 +
 +    int idx = -1;
@@ -372,10 +397,12 @@ index 0000000..3ce9dee
 +/* ---- the operations threadman drives -------------------------------------- */
 +
 +int psp_sched_block(uint32_t uid, psp_sched_state why, const char *what) {
++    if (!g_threading) return -1;      /* nothing could ever wake it */
 +    return switch_away(self_slot(uid), why, what);
 +}
 +
 +void psp_sched_yield(void) {
++    if (!g_threading) return;
 +    /* A yield differs from a block only in that the caller stays runnable --
 +     * so a lone thread that yields simply gets the token straight back. */
 +    pthread_mutex_lock(&g_lock);
@@ -389,6 +416,7 @@ index 0000000..3ce9dee
 +}
 +
 +int psp_sched_wake(uint32_t uid) {
++    if (!g_threading) return 0;
 +    pthread_mutex_lock(&g_lock);
 +    int urgent = 0;
 +    const int s = slot_of(uid);
@@ -411,6 +439,7 @@ index 0000000..3ce9dee
 +void psp_sched_set_end_hook(void (*fn)(uint32_t uid, uint32_t status)) { g_end_hook = fn; }
 +
 +void psp_sched_exit(uint32_t uid) {
++    if (!g_threading) return;         /* returns to the caller, as it used to */
 +    const int me = self_slot(uid);
 +    pthread_mutex_lock(&g_lock);
 +    g_slot[me].state = PSP_SCHED_DEAD;
@@ -457,6 +486,8 @@ index 0000000..3ce9dee
 +}
 +
 +int psp_sched_drain(int timeout_s) {
++    if (!g_threading) return 0;
++
 +    struct timespec deadline;
 +    clock_gettime(CLOCK_REALTIME, &deadline);
 +    deadline.tv_sec += timeout_s;

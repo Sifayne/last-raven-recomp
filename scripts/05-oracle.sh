@@ -29,7 +29,7 @@ cc -c -O1 -I "$ROOT/tools/psprecomp/include" \
 cc -o "$BIN" "$GEN_OBJ/oracle_diff.o" \
        "$GEN_OBJ/aclr_funcs.o" "$GEN_OBJ/aclr_imports.o" \
        "$ROOT/build/psprecomp/tools/allegrexrecomp/liballegrex_core.a" \
-       "$ROOT/build/psprecomp/libpsprecomp.a" -lm
+       "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread
 
 info "comparing $LIMIT functions (interpreter vs recompiled C)"
 # stderr carries the runtime's own unimplemented-firmware chatter, which is

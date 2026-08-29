@@ -39,6 +39,7 @@
 #include "psprecomp/mem.h"
 #include "psprecomp/dispatch.h"
 #include "psprecomp/hle.h"
+#include "psprecomp/sched.h"
 
 #include <setjmp.h>
 #include <signal.h>
@@ -662,6 +663,14 @@ int main(int argc, char **argv) {
     psp_set_miss_handler(note_miss);
     psp_recomp_register();
     psp_hle_init();
+
+    /* No real threads. A function under test that calls sceKernelStartThread
+     * would otherwise run it concurrently, on a host thread that shares the one
+     * global register file -- so the comparison stops being about codegen and
+     * starts being about scheduling, and the run hangs outright when the
+     * spawned thread never hands the token back. Observed exactly that: two
+     * threads in futex_wait, ten hours elapsed and ten seconds of CPU. */
+    psp_sched_set_threading(0);
     /* Millions of firmware calls follow, and the watchdog longjmps out of a
      * signal handler -- an fprintf interrupted mid-call would leave stdio's
      * lock held and deadlock the next one. See psp_hle_set_quiet in hle.c. */
