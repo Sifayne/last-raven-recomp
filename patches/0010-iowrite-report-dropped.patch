@@ -1,0 +1,35 @@
+diff --git a/src/hle/iofilemgr.c b/src/hle/iofilemgr.c
+index b9b4168..3d75f58 100644
+--- a/src/hle/iofilemgr.c
++++ b/src/hle/iofilemgr.c
+@@ -169,7 +169,29 @@ static void hle_Write(void) {
+         psp_ret(size);
+         return;
+     }
+-    if (!h) { psp_ret(0x80020323); return; }
++    if (!h) {
++        /* A write to a descriptor nothing opened. Returning the error silently
++         * is right for a shipped port and wrong during bring-up: a game's panic
++         * path is usually "get the stdout fd, write the message, abort", so the
++         * one write most worth seeing is exactly the one most likely to land on
++         * a descriptor this layer does not know about. Dropping it costs the
++         * message that would have named the failure.
++         *
++         * Rate-limited, because a game that logs in a loop should not drown
++         * the run it is trying to explain. */
++        static int complained;
++        if (complained < 8) {
++            complained++;
++            fprintf(stderr, "psprecomp: sceIoWrite to unopened fd %d, %u bytes: \"", fd, size);
++            for (uint32_t i = 0; i < size && i < 200; i++) {
++                const int c = psp_read8(src + i);
++                fputc((c >= 32 && c < 127) ? c : '.', stderr);
++            }
++            fprintf(stderr, "%s\"\n", size > 200 ? "..." : "");
++        }
++        psp_ret(0x80020323);
++        return;
++    }
+ 
+     uint8_t *tmp = (uint8_t *)malloc(size ? size : 1);
+     if (!tmp) { psp_ret(0x80020190); return; }

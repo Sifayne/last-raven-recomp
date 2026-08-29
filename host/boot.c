@@ -170,7 +170,7 @@ static int guarded_call(uint32_t addr, unsigned timeout_s, const char *what) {
  * that used priorities would need the sort; this does not, and the difference
  * would show up as constructors running out of order rather than silently. */
 
-static int run_cplinit(const psp_blob *b, const elf_info *e) {
+static int report_cplinit(const psp_blob *b, const elf_info *e) {
     psp_section s;
     if (psp_find_section(b, e, ".cplinit", &s) != 0 || s.size < 8) {
         printf("    .cplinit                     absent\n");
@@ -178,23 +178,22 @@ static int run_cplinit(const psp_blob *b, const elf_info *e) {
     }
 
     const uint32_t n = s.size / 8;
-    uint32_t ran = 0, failed = 0;
-    int mixed_priority = 0;
+    uint32_t listed = 0, undiscovered = 0;
 
     for (uint32_t i = 0; i < n; i++) {
-        const uint32_t fn   = psp_read32(s.addr + i * 8);
-        const uint32_t prio = psp_read32(s.addr + i * 8 + 4);
+        const uint32_t fn = psp_read32(s.addr + i * 8);
         if (!fn) break;                       /* null terminator */
-        if (prio) mixed_priority = 1;
-        if (guarded_call(fn, 5, "constructor") == 0) ran++;
-        else { failed++; if (failed >= 3) { printf("    (stopping after 3 failures)\n"); break; } }
+        listed++;
+        /* Every constructor must be a function the emitter generated, or the
+         * module's own initialiser will dispatch into nothing. This is the
+         * check that was failing before .cplinit fed discovery. */
+        if (!psp_lookup(fn)) undiscovered++;
     }
 
-    printf("    .cplinit at 0x%08X    %u constructors, %u ran, %u failed\n",
-           s.addr, n - 1, ran, failed);
-    if (mixed_priority)
-        printf("    note: entries carry priorities; table order may be wrong\n");
-    return failed ? -1 : 0;
+    printf("    .cplinit at 0x%08X    %u constructors, %u undiscovered\n",
+           s.addr, listed, undiscovered);
+    printf("    (run by the module's own initialiser, not from here)\n");
+    return undiscovered ? -1 : 0;
 }
 
 /* ---- entry ----------------------------------------------------------------- */
@@ -237,11 +236,26 @@ int main(int argc, char **argv) {
     psp_cpu.r[PSP_RA_INDEX] = RA_DONE;
     printf("  [3] state     sp=0x%08X  (k0/reent not yet set up)\n", psp_cpu.r[PSP_REG_SP]);
 
-    /* 4 — static constructors. BRINGUP.md's stated first blocker: skip these
-     *     and global state is silently never initialised, which surfaces much
-     *     later as data that was never written. */
+    /* 4 — static constructors.
+     *
+     * Not run here, deliberately, and the reason is worth keeping: doing so was
+     * wrong and the guest said so. Running `.cplinit` from the host and then
+     * calling module_start means the module runs the same table again through
+     * its own initialiser, every static object is registered for destruction
+     * twice, and the C++ runtime aborts with
+     *
+     *   C++ runtime abort: internal error:
+     *   static object marked for destruction more than once
+     *
+     * which is exactly the check working. The module runs its own constructors;
+     * what it needed was not a host that runs them but a *discovery* that finds
+     * them -- all 151 were missing from the function list, so the module's own
+     * initialiser was dispatching to code that had never been emitted. Seeding
+     * discovery from .cplinit fixed that, and this step became redundant.
+     *
+     * Kept as a report so the table is still visible at boot. */
     printf("  [4] ctors\n");
-    const int ctors_ok = run_cplinit(&b, &e);
+    const int ctors_ok = report_cplinit(&b, &e);
 
     /* 5 — module_start. */
     printf("  [5] entry     0x%08X\n", e.entry);
