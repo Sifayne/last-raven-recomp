@@ -194,6 +194,52 @@ already.
 build/host/oracle_diff game/extracted/ACLR_App.elf --from 0xFDE14 --verbose
 ```
 
+## After merging shared blocks
+
+Discovery used to split one function in two whenever walk order made two walks
+share a block, which turned loop back-edges into C calls (see the commit *merge
+functions that share a block instead of splitting them*). Merging them changed
+what the oracle can even see, so the corpus numbers above are not comparable
+line for line. A 5,000-entry sample of the merged build, `reports/05-oracle.txt`:
+
+| | count |
+|---|---:|
+| attempted | 5,000 |
+| **compared** | **1,481** |
+| **agree** | **1,480** |
+| **differ** | **1** |
+| unbalanced `$sp` | 10 |
+| host fault | 0 |
+
+Two things moved, and one is the point of the change:
+
+**Unbalanced `$sp` fell from 0.94% of attempts to 0.20%** (249/26,462 against
+10/5,000). That is the same root cause: a block split out of the middle of a
+function has no prologue, so calling it directly could never balance the stack.
+The samples cover different parts of the corpus, so treat the ratio as
+indicative rather than exact — but the direction is not in doubt.
+
+**Host faults went from 3 to 0.** Those were host stack exhaustion, which is
+what a loop emitted as recursion produces.
+
+### The one divergence: 0x0001093C
+
+Not a regression. It was previously reported as a spin (`SPIN 0001093C
+pc=00010954`), and 0x00010954 is the head of its first copy loop -- the loop
+whose back-edge used to be a nested call. It recursed twenty-four deep and
+exhausted the budget instead of being compared at all. Merging made it
+terminate, and only then could it disagree.
+
+The disagreement is in the composed chain, not the call site. The `jal` at
+0x000109CC emits its delay slot correctly (`$a1 = 1` before the call), and its
+callee 0x00135D1C **agrees when tested in isolation**. That is the same shape as
+the unresolved 0x000FDE14 above, and needs the same instrument:
+instruction-level trace diffing rather than another hypothesis.
+
+```bash
+build/host/oracle_diff game/extracted/ACLR_App.elf --from 0x1093C --verbose
+```
+
 ## Method notes, and why they are not incidental
 
 Four *harness* defects were found and fixed along the way, each producing
