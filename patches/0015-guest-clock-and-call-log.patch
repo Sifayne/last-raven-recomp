@@ -1,0 +1,239 @@
+diff --git a/include/psprecomp/clock.h b/include/psprecomp/clock.h
+new file mode 100644
+index 0000000..6289560
+--- /dev/null
++++ b/include/psprecomp/clock.h
+@@ -0,0 +1,49 @@
++/* psprecomp — the guest clock.
++ *
++ * A virtual microsecond clock, not the host's. Two reasons:
++ *
++ *   - Determinism. The differential oracle compares an interpreter against
++ *     recompiled C and attributes any disagreement to a codegen bug. A clock
++ *     that reported real elapsed time would make the two disagree for reasons
++ *     that are not bugs, and the oracle would have to learn to ignore it.
++ *   - Speed. Recompiled code does not run at PSP speed, so host time is not the
++ *     game's time in any case.
++ *
++ * It advances two ways. A vblank moves it a frame, which is what makes elapsed
++ * time roughly track frames the way a game expects. A *read* also moves it a
++ * little, because nothing here advances on its own, and
++ *
++ *     start = sceKernelGetSystemTimeLow();
++ *     while (sceKernelGetSystemTimeLow() - start < 1000) { }
++ *
++ * against a clock that only moved on vblank would never leave the loop. This is
++ * the same trade src/hle/display.c already makes for the scanline counters, and
++ * it is made for the same reason: unfaithful timing beats a hang.
++ */
++#ifndef PSPRECOMP_CLOCK_H
++#define PSPRECOMP_CLOCK_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++void psp_clock_reset(void);
++
++/* Microseconds since the module started. Advances the clock by a tick, so two
++ * reads never return the same value. */
++uint64_t psp_clock_read(void);
++
++/* Microseconds since the module started, without advancing it. For diagnostics
++ * that should not perturb what they measure. */
++uint64_t psp_clock_peek(void);
++
++/* Move the clock on by one frame. Called from the vblank handlers. */
++void psp_clock_frame(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PSPRECOMP_CLOCK_H */
+diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
+index 79424f8..c0b529a 100644
+--- a/include/psprecomp/hle.h
++++ b/include/psprecomp/hle.h
+@@ -63,6 +63,10 @@ const psp_hle_entry *psp_hle_entries(int *count);
+  * wild pointer shows up far from its cause. */
+ void psp_hle_dump_recent(FILE *out);
+ 
++/* The `top` most-called firmware functions, most first. Shows what a run spent
++ * its time on -- and, by what is missing, what it never reached. */
++void psp_hle_dump_calls(FILE *out, int top);
++
+ /* Register everything the toolkit implements. Call once at startup. */
+ void psp_hle_init(void);
+ 
+diff --git a/src/hle/clock.c b/src/hle/clock.c
+new file mode 100644
+index 0000000..f0006b7
+--- /dev/null
++++ b/src/hle/clock.c
+@@ -0,0 +1,27 @@
++/* psprecomp — the guest clock. See include/psprecomp/clock.h. */
++
++#include "psprecomp/clock.h"
++
++/* 59.94Hz, the PSP's refresh rate, rounded to whole microseconds. */
++#define PSP_FRAME_US 16667u
++
++/* How far a read moves the clock.
++ *
++ * Big enough that a poll loop counting microseconds finishes in a sane number
++ * of iterations, small enough that a game measuring a real interval does not
++ * see it pass instantly. At 100us a millisecond costs ten reads. */
++#define PSP_READ_TICK_US 100u
++
++static uint64_t g_us;
++
++void psp_clock_reset(void) { g_us = 0; }
++
++uint64_t psp_clock_peek(void) { return g_us; }
++
++uint64_t psp_clock_read(void) {
++    const uint64_t now = g_us;
++    g_us += PSP_READ_TICK_US;
++    return now;
++}
++
++void psp_clock_frame(void) { g_us += PSP_FRAME_US; }
+diff --git a/src/hle/display.c b/src/hle/display.c
+index 0a619bb..fa8176c 100644
+--- a/src/hle/display.c
++++ b/src/hle/display.c
+@@ -10,6 +10,8 @@
+  * front buffer, and compare it against the same frame from an emulator.
+  */
+ 
++#include "psprecomp/clock.h"
++#include "psprecomp/sched.h"
+ #include "psprecomp/hle.h"
+ 
+ #include <stdio.h>
+@@ -134,6 +136,13 @@ static void hle_SetFrameBuf(void) {
+  * stuck. */
+ static void hle_WaitVblank(void) {
+     g_vblank_count++;
++    /* A frame of guest time passes here. This is the only place time advances
++     * by a realistic amount rather than a token tick, so a game that paces
++     * itself off the clock paces itself off its own frames. */
++    psp_clock_frame();
++    /* And it is the natural point to let another thread run: a game waiting for
++     * the next frame is not using the CPU, whatever it told the kernel. */
++    psp_sched_yield();
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
+@@ -174,6 +183,7 @@ void psp_display_register(void) {
+     psp_hle_register(0x0E20F177, "sceDisplay", "sceDisplaySetMode",           hle_SetMode);
+     psp_hle_register(0x289D82FE, "sceDisplay", "sceDisplaySetFrameBuf",       hle_SetFrameBuf);
+     psp_hle_register(0x36CDFADE, "sceDisplay", "sceDisplayWaitVblank",        hle_WaitVblank);
++    psp_hle_register(0x984C27E7, "sceDisplay", "sceDisplayWaitVblankStart",   hle_WaitVblank);
+     psp_hle_register(0x46F186C3, "sceDisplay", "sceDisplayWaitVblankStartCB", hle_WaitVblank);
+     psp_hle_register(0x9C6EAAD7, "sceDisplay", "sceDisplayGetVcount",         hle_GetVcount);
+     psp_hle_register(0x210EAB3A, "sceDisplay", "sceDisplayGetAccumulatedHcount",
+diff --git a/src/hle/hle.c b/src/hle/hle.c
+index 778152a..c3e9267 100644
+--- a/src/hle/hle.c
++++ b/src/hle/hle.c
+@@ -1,6 +1,7 @@
+ /* psprecomp — HLE dispatch. See include/psprecomp/hle.h. */
+ 
+ #include "psprecomp/hle.h"
++#include "psprecomp/sched.h"
+ #include "psprecomp/dispatch.h"
+ 
+ #include <stdio.h>
+@@ -129,15 +130,80 @@ void psp_hle_dump_recent(FILE *out) {
+     }
+ }
+ 
++/* How many times each registered function was called, plus the unimplemented
++ * ones lumped together.
++ *
++ * The zero-history above answers "what handed the game a null?". This answers a
++ * different question that comes up just as often: "what is the game *doing*?"
++ * A run that stops making progress has a shape -- a hundred thousand
++ * __sceSasCore and no sceDisplayWaitVblank is an audio loop with no frame loop,
++ * and that is visible here in one line and nowhere else. */
++static uint64_t g_calls[HLE_MAX];
++static uint64_t g_calls_unimpl;
++
++/* An ordered log of every firmware call, enabled by PSPRECOMP_HLE_LOG=1.
++ *
++ * The histogram says what a run did a lot of; this says what it did, in order,
++ * with arguments and results. That is what identifies the call a game gave up
++ * after -- a question the totals cannot answer, because the interesting call
++ * happened exactly once. Off by default: it is one line per call. */
++static int g_log = -1;
++
++static int logging(void) {
++    if (g_log < 0) {
++        const char *v = getenv("PSPRECOMP_HLE_LOG");
++        g_log = (v && *v && *v != '0') ? 1 : 0;
++    }
++    return g_log;
++}
++
++void psp_hle_dump_calls(FILE *out, int top) {
++    /* Selection sort over indices: g_count is a couple of hundred and this runs
++     * once, at exit. */
++    int order[HLE_MAX];
++    int n = 0;
++    for (int i = 0; i < g_count; i++) if (g_calls[i]) order[n++] = i;
++    for (int a = 0; a < n; a++)
++        for (int b = a + 1; b < n; b++)
++            if (g_calls[order[b]] > g_calls[order[a]]) {
++                const int t = order[a]; order[a] = order[b]; order[b] = t;
++            }
++
++    if (!n) { fprintf(out, "  (no firmware calls)\n"); return; }
++    if (top > n) top = n;
++    for (int i = 0; i < top; i++) {
++        const int e = order[i];
++        fprintf(out, "  %10llu  %s\n", (unsigned long long)g_calls[e],
++                g_entry[e].name ? g_entry[e].name : "(unnamed)");
++    }
++    if (g_calls_unimpl)
++        fprintf(out, "  %10llu  (unimplemented)\n",
++                (unsigned long long)g_calls_unimpl);
++}
++
+ void psp_hle_call(uint32_t nid) {
+     for (int i = 0; i < g_count; i++) {
+         if (g_entry[i].nid == nid) {
++            g_calls[i]++;
++            /* Logged before the call, not after: sceKernelExitThread and the
++             * exit-the-game calls never return, so a line emitted afterwards
++             * would omit exactly the call that ended the run. The result comes
++             * back on its own line for the calls that do return. */
++            if (logging())
++                fprintf(stderr, "hle: %-36s(0x%08X, 0x%08X, 0x%08X, 0x%08X)\n",
++                        g_entry[i].name ? g_entry[i].name : "(unnamed)",
++                        psp_arg(0), psp_arg(1), psp_arg(2), psp_arg(3));
+             g_fn[i]();
++            if (logging())
++                fprintf(stderr, "hle: %-36s  = 0x%08X\n", "",
++                        psp_cpu.r[PSP_REG_V0]);
+             if (psp_cpu.r[PSP_REG_V0] == 0) note_zero(nid, g_entry[i].name, 1);
+             return;
+         }
+     }
+     note_zero(nid, NULL, 0);
++    g_calls_unimpl++;
++    if (logging()) fprintf(stderr, "hle: 0x%08X <unimplemented>\n", nid);
+ 
+     /* Unimplemented. Naming the function is the whole point — bringing a game
+      * up is largely the process of watching this message stop appearing, and
+@@ -170,6 +236,7 @@ void psp_hle_init(void) {
+     psp_set_miss_context(miss_context);
+     psp_sysmem_init();
+     psp_sysmem_register();
++    psp_sched_init();
+     psp_threadman_init();
+     psp_threadman_register();
+     psp_display_init();

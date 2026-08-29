@@ -28,6 +28,7 @@
 #include "psprecomp/cpu.h"
 #include "psprecomp/ctors.h"
 #include "psprecomp/dispatch.h"
+#include "psprecomp/sched.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
 
@@ -104,6 +105,14 @@ static void hle_stop_unload_self(void) {
      * abort wrapper has several callers and static analysis cannot say which
      * one ran. Without the define it compiles to nothing and says so. */
     g_reason = 5;
+
+    /* Only the main context may jump: g_abort belongs to its stack. A guest
+     * thread stops the scheduler instead, and the main context reports the exit
+     * when its drain returns. */
+    if (psp_sched_current() != 0) {
+        psp_sched_stop_all();   /* does not return */
+        return;
+    }
     siglongjmp(g_abort, 1);
 }
 
@@ -271,12 +280,26 @@ int main(int argc, char **argv) {
     printf("  [5] entry     0x%08X\n", e.entry);
     const int entry_ok = guarded_call(e.entry, 10, "module_start");
 
+    /* 6 — the threads module_start left behind.
+     *
+     * The usual shape is that module_start creates a thread, starts it, and
+     * returns immediately: the game is in the thread, not the entry point. So
+     * returning from module_start is the beginning of the run, not the end. */
+    int live = psp_sched_live();
+    printf("  [6] threads   %d spawned by module_start\n", live);
+    if (g_guest_exited) printf("      (the guest already exited during entry)\n");
+    if (live > 0) live = psp_sched_drain(60);
+
     printf("---\n");
     printf("ctors:    %s\n", ctors_ok == 0 ? "ok" : "incomplete");
     if (g_guest_exited) printf("entry:    guest exited with status %u\n", g_exit_status);
     else                printf("entry:    %s\n", entry_ok == 0 ? "returned" : "stopped");
+    printf("threads:  %s\n",
+           live == 0 ? "all finished" : "still alive (see the deadlock report above)");
     printf("bad mem:  %llu accesses\n", (unsigned long long)psp_mem_bad_access);
     printf("disc read: %llu bytes\n", (unsigned long long)psp_io_bytes_read());
+    printf("  most-called firmware functions:\n");
+    psp_hle_dump_calls(stdout, 12);
     psp_hle_dump_recent(stdout);
 
     psp_mem_free();
