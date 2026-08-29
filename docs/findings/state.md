@@ -146,6 +146,14 @@ something inexplicable, check what it was last told.
   `still running after 60s` line. Check the order before reading anything into
   it; stderr is unbuffered and stdout is not, so the two interleave misleadingly
   in a redirected log.
+- **Skipping the intro movie with `PSPRECOMP_PAD`.** The game does read the
+  pad — holding `start,cross` visibly changes which threads park where — but
+  the skip path routes back into the movie subsystem rather than around it:
+  `0x40001` stops running the frame loop and waits on `Movie Start sema`
+  instead. The output is identical, 21 GE lists and 19 prims either way. Useful
+  negative result, because it also shows the movie machinery has **two** gates,
+  `Movie Start sema` and `Movie Sync sema`. Satisfying only the one the game
+  happens to be sitting on would move it to the other.
 - **The scheduler as the reason the game does not progress.** Measured three
   ways: the current build, the scheduler with its token fix reverted, and the
   fully original semantics. All three are functionally identical — same 19
