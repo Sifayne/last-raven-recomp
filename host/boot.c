@@ -202,9 +202,15 @@ static int report_cplinit(const psp_blob *b, const elf_info *e) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "boot <module.elf>\n");
+        fprintf(stderr, "boot <module.elf> [disc.iso]\n"
+                        "\n"
+                        "The disc image backs the raw UMD device. A PSP title\n"
+                        "opens `umd1:` by bare name to read its own sectors, and\n"
+                        "without an image that open fails and the game retries\n"
+                        "forever.\n");
         return 2;
     }
+    const char *iso = (argc > 2) ? argv[2] : NULL;
 
     psp_blob b;
     if (psp_blob_read(argv[1], &b) != 0) { fprintf(stderr, "cannot read %s\n", argv[1]); return 1; }
@@ -226,9 +232,11 @@ int main(int argc, char **argv) {
     /* 2 — registration and firmware. */
     psp_recomp_register();
     psp_hle_init();
+    if (iso) psp_io_set_umd_image(iso);
     psp_hle_register(0x8F2DF740u, "ModuleMgrForUser", "StopUnloadSelfModule",
                      hle_stop_unload_self);
     printf("  [2] runtime   %u functions registered\n", psp_dispatch_count());
+    printf("      disc      %s\n", iso ? iso : "(none -- raw umd: opens will fail)");
 
     /* 3 — machine state. $k0 points at a thread control block; the allocator
      *     reaches through it for the reent structure, so it has to be real
@@ -268,6 +276,7 @@ int main(int argc, char **argv) {
     if (g_guest_exited) printf("entry:    guest exited with status %u\n", g_exit_status);
     else                printf("entry:    %s\n", entry_ok == 0 ? "returned" : "stopped");
     printf("bad mem:  %llu accesses\n", (unsigned long long)psp_mem_bad_access);
+    printf("disc read: %llu bytes\n", (unsigned long long)psp_io_bytes_read());
     psp_hle_dump_recent(stdout);
 
     psp_mem_free();

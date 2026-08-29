@@ -1,5 +1,5 @@
 diff --git a/tools/allegrexrecomp/main.c b/tools/allegrexrecomp/main.c
-index 2e9e8f2..7bbdfb7 100644
+index 2e9e8f2..165ab40 100644
 --- a/tools/allegrexrecomp/main.c
 +++ b/tools/allegrexrecomp/main.c
 @@ -14,9 +14,18 @@
@@ -62,51 +62,7 @@ index 2e9e8f2..7bbdfb7 100644
      memset(an, 0, sizeof *an);
      /* Walk the whole loaded image, not just .text: a module can place
       * executable code outside it (C++ static initialisers, notably), and
-@@ -556,6 +592,43 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
-         }
-     }
- 
-+    /* Static constructors, straight from `.cplinit`.
-+     *
-+     * The section is an array of (constructor, priority) pairs terminated by a
-+     * null constructor -- an authoritative list of function entries, not a
-+     * guess. The generic pointer harvest above misses every one of them on this
-+     * module: 151 constructors, 0 discovered, despite 17,878 pointers found
-+     * elsewhere. Undiscovered means unemitted, so the first thing a boot does
-+     * after loading is dispatch to an address that was never generated.
-+     *
-+     * Reading the table is the same move as reading the relocation sections
-+     * rather than scanning for pointer-shaped words: when the module says what
-+     * it contains, believe it. */
-+    {
-+        psp_section cpl;
-+        if (psp_find_section(b, e, ".cplinit", &cpl) == 0 && cpl.size >= 8 &&
-+            (size_t)cpl.offset + cpl.size <= b->size) {
-+            const uint32_t nents = cpl.size / 8;
-+            uint32_t *bigger = (uint32_t *)realloc(seeds,
-+                                   (size_t)(nseeds + nents) * sizeof *seeds);
-+            if (bigger) {
-+                seeds = bigger;
-+                int added = 0;
-+                for (uint32_t i = 0; i < nents; i++) {
-+                    const uint8_t *p = b->data + cpl.offset + i * 8;
-+                    const uint32_t fn = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-+                                        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-+                    if (!fn) break;                       /* terminator */
-+                    if (fn & 3) continue;                 /* not an instruction */
-+                    if (!a_in_range(an, fn)) continue;
-+                    seeds[nseeds++] = fn;
-+                    added++;
-+                }
-+                if (added) fprintf(stderr, "ctors:      %d from .cplinit\n", added);
-+            }
-+        }
-+    }
-+
-     int rc = a_discover(an, seeds, nseeds);
-     free(seeds);
-     if (rc != 0) {
-@@ -825,6 +898,156 @@ static int looks_like_cmd1_meta(const uint8_t *m, size_t avail, uint32_t file_si
+@@ -825,6 +861,156 @@ static int looks_like_cmd1_meta(const uint8_t *m, size_t avail, uint32_t file_si
      return 1;
  }
  
@@ -263,7 +219,7 @@ index 2e9e8f2..7bbdfb7 100644
  static int cmd_decrypt(const char *path, const char *keypath) {
      psp_blob b;
      if (psp_blob_read(path, &b) != 0) { fprintf(stderr, "cannot read %s\n", path); return 1; }
-@@ -988,6 +1211,25 @@ int main(int argc, char **argv) {
+@@ -988,6 +1174,25 @@ int main(int argc, char **argv) {
      for (int i = 3; i + 1 < argc; i++)
          if (!strcmp(argv[i], "--keys")) keypath = argv[i + 1];
  

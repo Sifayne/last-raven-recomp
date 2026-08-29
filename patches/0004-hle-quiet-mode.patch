@@ -1,5 +1,5 @@
 diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
-index 780f40f..35c9854 100644
+index 780f40f..79424f8 100644
 --- a/include/psprecomp/hle.h
 +++ b/include/psprecomp/hle.h
 @@ -40,6 +40,10 @@ int psp_hle_is_named(int index);
@@ -13,7 +13,21 @@ index 780f40f..35c9854 100644
  /* Look up what is registered, for reporting. Returns NULL if absent. */
  const char *psp_hle_name(uint32_t nid);
  int         psp_hle_count(void);
-@@ -145,6 +149,11 @@ uint64_t psp_io_bytes_read(void);
+@@ -140,11 +144,25 @@ void psp_io_init(void);
+ void psp_io_register(void);
+ void psp_io_reset(void);
+ void psp_io_set_root(const char *root);
++
++/* Back the raw UMD block device with a disc image.
++ *
++ * `disc0:` is the ISO9660 filesystem and maps to a directory; `umd0:` and
++ * `umd1:` are the block device underneath it, and a game opens those by bare
++ * name to read sectors -- which is how a PSP title reaches its own data when it
++ * does not want the filesystem. With no image set those opens fail, and a game
++ * that retries on failure never gets past its first read. */
++void psp_io_set_umd_image(const char *path);
+ uint64_t psp_io_bytes_read(void);
+ 
  void psp_misc_init(void);
  void psp_misc_register(void);
  void psp_misc_reset(void);
