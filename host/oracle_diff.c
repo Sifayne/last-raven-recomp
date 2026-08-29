@@ -424,6 +424,8 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     psp_interp it;
     psp_interp_init(&it, addr, RA_DONE, 200000);
     psp_interp_hle_reset();
+    psp_interp_profile_reset();
+    psp_interp_hle_reset();
 
     /* Thunk hits now go through HLE inside psp_interp_step, so the stub region
      * is no longer a stopping condition. What still is: an HLE handler calling
@@ -457,14 +459,21 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     if (it.status != I_OK_RETURN) {
         uint32_t hot_n = 0;
         const uint32_t hot = psp_interp_hot_nid(&hot_n);
-        if (verbose && it.status == I_BUDGET)
-            printf("  %08X  budget exhausted after %llu instructions "
-                   "(hottest NID 0x%08X x%u)\n",
-                   addr, (unsigned long long)it.executed, hot, hot_n);
-        if (it.status == I_BUDGET && hot_n > 64) {
-            char buf[64];
-            snprintf(buf, sizeof buf, "budget, spinning on NID 0x%08X", hot);
-            tally(buf);
+        if (it.status == I_BUDGET) {
+            /* Report the loop, not the caller. The busiest address is the
+             * innermost loop body, and the same handful of sites turn up under
+             * thousands of different entry points -- a non-terminating leaf
+             * poisons everything above it, so grouping by entry point counts
+             * the same defect over and over. */
+            uint32_t pc_n = 0;
+            const uint32_t pc = psp_interp_hot_pc(&pc_n);
+            /* One line per run, aggregated outside rather than tallied here:
+             * the in-process tally has a fixed bucket count and silently drops
+             * everything past it, which turns a long tail into a misleading
+             * list of singletons. */
+            printf("SPIN %08X pc=%08X n=%u nid=%08X nidn=%u\n",
+                   addr, pc, pc_n, hot, hot_n);
+            tally("interp: instruction budget exhausted");
             return R_SKIP_TRAP;
         }
         if (it.status == I_TRAP_VFPU || it.status == I_TRAP_INVALID) {
@@ -602,6 +611,10 @@ int main(int argc, char **argv) {
      * signal handler -- an fprintf interrupted mid-call would leave stdio's
      * lock held and deadlock the next one. See psp_hle_set_quiet in hle.c. */
     psp_hle_set_quiet(1);
+
+    /* Profile the interpreter so a run that exhausts its budget can name the
+     * address it was looping on, not just the entry point it started from. */
+    psp_interp_profile(g_module_lo, g_module_size / 4);
 
     /* Give the interpreter the same firmware boundary the recompiled stubs
      * have. Without this every function reaching an import is uncomparable. */

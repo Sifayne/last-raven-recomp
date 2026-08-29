@@ -426,10 +426,10 @@ index 481001d..00a2a70 100644
  #endif
 diff --git a/tools/allegrexrecomp/interp.c b/tools/allegrexrecomp/interp.c
 new file mode 100644
-index 0000000..97ced13
+index 0000000..fe296a1
 --- /dev/null
 +++ b/tools/allegrexrecomp/interp.c
-@@ -0,0 +1,552 @@
+@@ -0,0 +1,588 @@
 +/* allegrexrecomp — the Allegrex interpreter oracle. See interp.h.
 + *
 + * The switch below deliberately mirrors emit.c's emit_simple() case for case.
@@ -536,6 +536,41 @@ index 0000000..97ced13
 +    if (nid == g_last_nid) g_last_run++;
 +    else { g_last_nid = nid; g_last_run = 1; }
 +    if (g_last_run > g_hot_count) { g_hot_count = g_last_run; g_hot_nid = nid; }
++}
++
++/* ---- execution profile ---------------------------------------------------
++ *
++ * See interp.h. A flat count per instruction word: the module is a few million
++ * words, so this is a handful of megabytes and one increment per step. */
++
++static uint32_t *g_prof;
++static uint32_t  g_prof_base, g_prof_words;
++
++void psp_interp_profile(uint32_t base, uint32_t words) {
++    free(g_prof);
++    g_prof = NULL;
++    g_prof_base = base;
++    g_prof_words = words;
++    if (words) g_prof = (uint32_t *)calloc(words, sizeof *g_prof);
++    if (!g_prof) g_prof_words = 0;
++}
++
++void psp_interp_profile_reset(void) {
++    if (g_prof) memset(g_prof, 0, (size_t)g_prof_words * sizeof *g_prof);
++}
++
++uint32_t psp_interp_hot_pc(uint32_t *count) {
++    uint32_t best = 0, best_n = 0;
++    for (uint32_t i = 0; i < g_prof_words; i++)
++        if (g_prof[i] > best_n) { best_n = g_prof[i]; best = i; }
++    if (count) *count = best_n;
++    return g_prof_base + best * 4;
++}
++
++static void note_pc(uint32_t pc) {
++    if (!g_prof) return;
++    const uint32_t i = (pc - g_prof_base) / 4;
++    if (i < g_prof_words) g_prof[i]++;
 +}
 +
 +static uint32_t import_nid_at(uint32_t pc) {
@@ -894,6 +929,7 @@ index 0000000..97ced13
 +        return it->status = I_RUNNING;
 +    }
 +
++    note_pc(pc);
 +    a_decode(psp_read32(pc), pc, &in);
 +
 +    g_trace = it;
@@ -984,10 +1020,10 @@ index 0000000..97ced13
 +}
 diff --git a/tools/allegrexrecomp/interp.h b/tools/allegrexrecomp/interp.h
 new file mode 100644
-index 0000000..668a5be
+index 0000000..27dc1d8
 --- /dev/null
 +++ b/tools/allegrexrecomp/interp.h
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,146 @@
 +/* allegrexrecomp — the Allegrex interpreter that acts as the bring-up oracle.
 + *
 + * This exists to answer one question during bring-up: when the recompiled game
@@ -1086,6 +1122,22 @@ index 0000000..668a5be
 +
 +/* Frees the lookup index built by psp_interp_set_imports(). */
 +void psp_interp_free_imports(void);
++
++/* Where a run spent its instructions.
++ *
++ * "The budget ran out" says a run looped; it does not say where, and the
++ * address is what turns a count into something actionable. The busiest address
++ * is the innermost loop body, and the branch just past it is the exit test that
++ * never became true.
++ *
++ * Opt-in: it costs one increment per instruction, which is not worth paying on
++ * runs that terminate. The buffer is owned by the caller's arena, sized from
++ * the module extent, and cleared by psp_interp_profile_reset().
++ *
++ * Pass NULL to disable. */
++void     psp_interp_profile(uint32_t base, uint32_t words);
++void     psp_interp_profile_reset(void);
++uint32_t psp_interp_hot_pc(uint32_t *count);
 +
 +/* The firmware call a run repeated most, and how many times in a row. A run
 + * that exhausts its instruction budget is usually spinning on one unimplemented
