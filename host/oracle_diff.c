@@ -57,10 +57,16 @@ void psp_recomp_register(void);
 #define RA_DONE    0x0DEAD000u
 /* Where seeded pointer arguments point: RAM, well clear of the stack. */
 #define ARG_ARENA  (PSP_RAM_BASE + 0x00400000u)
-/* Generous, because real work happens here: one module initialiser sorts
- * 3,420 entries and legitimately runs 915,297 instructions. The old 200k
- * ceiling was reporting that as a hang. */
-#define INTERP_BUDGET  4000000u
+/* Sized from the largest genuine run observed: a module initialiser that sorts
+ * 3,420 entries and returns after 915,297 instructions. The original 200k
+ * ceiling reported that as a hang; 4M was the first guess after, and it cost
+ * more than it bought -- with relocations applied, half the corpus reaches real
+ * `memset` calls whose sizes now come from the data segment rather than reading
+ * as null, and each one burns the whole budget before being discarded anyway.
+ * 1.2M keeps the known-good case with margin and cuts a corpus run roughly
+ * fourfold. Anything above it is recorded as budget-exhausted, which is honest:
+ * the harness did not evaluate it. */
+#define INTERP_BUDGET  1200000u
 
 /* ---- trap capture ---------------------------------------------------------
  *
@@ -138,6 +144,7 @@ static uint64_t g_miss_count;
 /* Phase markers for diagnosing a hang. write(2) rather than stdio: this has to
  * work when the question is whether stdio itself is wedged. */
 static int g_phase_trace;
+static int want_profile;   /* --profile: per-instruction PC histogram */
 static void phase(const char *tag) {
     if (g_phase_trace) { write(2, "[", 1); write(2, tag, strlen(tag)); write(2, "]\n", 2); }
 }
@@ -455,7 +462,7 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     psp_interp it;
     psp_interp_init(&it, addr, RA_DONE, INTERP_BUDGET);
     psp_interp_hle_reset();
-    psp_interp_profile_reset();
+    if (want_profile) psp_interp_profile_reset();
     psp_interp_hle_reset();
 
     /* Thunk hits now go through HLE inside psp_interp_step, so the stub region
@@ -475,24 +482,32 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
     const uint64_t miss_before     = g_miss_count;
     g_trapped = 0;
     if (sigsetjmp(g_trap, 1) == 0) {
-        /* 1, not 0: psp_dispatch treats a zero budget as unlimited, so a
-         * budget of one fires on the very first re-entry. */
-        psp_dispatch_set_budget(1, on_reentry);
+        /* Service re-entry rather than bounding it. A firmware handler that
+         * calls back into guest code now runs that code *interpreted*, nested
+         * under this run and charged against its budget -- so the run stays
+         * independent of the recompiled side and stays bounded. Previously the
+         * only options were to run recompiled code inside the interpreter's
+         * run, or throw the function away; this was the largest skip category
+         * on the module by a wide margin. */
+        psp_interp_service_dispatch(1);
         watchdog_arm_us(WATCHDOG_INTERP_USEC);
         psp_interp_run(&it);
         watchdog_disarm();
-        psp_dispatch_set_budget(0, NULL);
+        psp_interp_service_dispatch(0);
     } else {
         watchdog_disarm();
-        psp_dispatch_set_budget(0, NULL);
+        psp_interp_service_dispatch(0);
     }
     phase("interp-done");
     if (g_trapped == 4) return R_SKIP_REENTRY;
     if (g_trapped == 2) return R_HANG_INTERP;
     if (g_trapped == 3) return R_FAULT;
     if (g_trapped)      return R_SKIP_TRAP;
-    if (psp_dispatch_calls() != dispatch_before || g_miss_count != miss_before)
-        return R_SKIP_REENTRY;
+    /* A dispatch during the interpreter run is no longer grounds to skip: the
+     * hook above ran it interpreted, so independence is intact. A dispatch
+     * *miss* still is -- nothing ran, and the two sides did different work. */
+    (void)dispatch_before;
+    if (g_miss_count != miss_before) return R_SKIP_REENTRY;
     if (it.status != I_OK_RETURN) {
         uint32_t hot_n = 0;
         const uint32_t hot = psp_interp_hot_nid(&hot_n);
@@ -503,7 +518,7 @@ static result check_one(uint32_t addr, snapshot *base, snapshot *si, snapshot *s
              * poisons everything above it, so grouping by entry point counts
              * the same defect over and over. */
             uint32_t pc_n = 0;
-            const uint32_t pc = psp_interp_hot_pc(&pc_n);
+            const uint32_t pc = want_profile ? psp_interp_hot_pc(&pc_n) : 0;
             /* One line per run, aggregated outside rather than tallied here:
              * the in-process tally has a fixed bucket count and silently drops
              * everything past it, which turns a long tail into a misleading
@@ -611,6 +626,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--from") && i + 1 < argc) { only = (uint32_t)strtoul(argv[++i], NULL, 0); have_only = 1; }
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
         else if (!strcmp(argv[i], "--phase")) g_phase_trace = 1;
+        else if (!strcmp(argv[i], "--profile")) want_profile = 1;
         else if (!strcmp(argv[i], "--funcs") && i + 1 < argc) funcs_path = argv[++i];
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
     }
@@ -651,9 +667,11 @@ int main(int argc, char **argv) {
      * lock held and deadlock the next one. See psp_hle_set_quiet in hle.c. */
     psp_hle_set_quiet(1);
 
-    /* Profile the interpreter so a run that exhausts its budget can name the
-     * address it was looping on, not just the entry point it started from. */
-    psp_interp_profile(g_module_lo, g_module_size / 4);
+    /* Profiling costs an increment on every interpreted instruction and a
+     * multi-megabyte clear per function. It earned that once -- it is what
+     * found the relocation bug -- but the question is answered, so it is opt-in
+     * now via --profile. */
+    if (want_profile) psp_interp_profile(g_module_lo, g_module_size / 4);
 
     /* Give the interpreter the same firmware boundary the recompiled stubs
      * have. Without this every function reaching an import is uncomparable. */
@@ -784,6 +802,9 @@ int main(int argc, char **argv) {
     printf("  unbalanced $sp:  %ld  (entry was not independently callable)\n", skip_unbal);
     printf("  host fault:      %ld  (SIGSEGV/SIGBUS, usually host stack exhaustion)\n", faults);
     printf("  import thunk:    %ld  (firmware boundary, not guest code)\n", skip_stub);
+    if (psp_interp_nest_refused())
+        printf("  re-entry refused: %llu  (nesting limit; a guest callback did not run)\n",
+               (unsigned long long)psp_interp_nest_refused());
     tally_dump();
 
     psp_mem_free();

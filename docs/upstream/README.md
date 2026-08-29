@@ -4,7 +4,7 @@ Draft text for [sp00nznet/psprecomp](https://github.com/sp00nznet/psprecomp).
 **Nothing here has been posted.** Review and send it yourself, or ask for
 changes first.
 
-Seven patches sit in `patches/`, applied by `scripts/build-tools.sh`. They apply
+Eight patches sit in `patches/`, applied by `scripts/build-tools.sh`. They apply
 to a pristine checkout in order and the suite stays green (11/11, including two
 new tests).
 
@@ -17,6 +17,7 @@ new tests).
 | `0005` | two regression tests | folds into the `0002` PR |
 | `0006` | **PRX relocations are never applied** | issue + PR — arguably the highest-impact of the lot |
 | `0007` | relocate before analysis, not after loading | folds into the `0006` PR |
+| `0008` | a dispatch hook, so a caller can service guest re-entry | small PR; needed by `0003` |
 
 The four codegen bugs and the relocation pass are the valuable parts, and they
 fail the same way: **silently**. The codegen bugs make the generated C do less
@@ -25,8 +26,8 @@ read as null. No crash, no dispatch miss, no log line in either case. Both affec
 every title, not just the one they were found on.
 
 Suggested order: send `0001` and `0004` first as trivially reviewable fixes,
-then the `0002`+`0005` bundle, then `0006`+`0007`, and open `0003` as a
-discussion rather than a drop-in PR.
+then the `0002`+`0005` bundle, then `0006`+`0007`, then `0008`, and open `0003`
+as a discussion rather than a drop-in PR.
 
 ---
 
@@ -187,6 +188,30 @@ blocks on it forever, a hang no timeout escapes because the timeout caused it.
 `psp_hle_set_quiet()` suppresses the message and keeps the history behind
 `psp_hle_dump_recent()`. The patch also drops a leftover debug line that traced
 one hardcoded NID (`0x237DBD4F`) on every call. Patch: `0004`.
+
+---
+
+## Issue 6 — `psp_dispatch` cannot be intercepted, only its misses
+
+`psp_set_miss_handler` fires when an address does *not* resolve. There is no way
+to intercept a call that *does* resolve, and that is exactly the case a caller
+may need to take over.
+
+Concretely: some firmware handlers call back into guest code — a thread entry
+point, a registered callback, a comparator handed to a sort — via
+`psp_dispatch()`. During an interpreter run that is doubly wrong. It mixes the
+recompiled and interpreted translations inside one execution, so a differential
+comparison stops comparing anything; and recompiled code carries no instruction
+budget, so a callee that does not return takes the run with it rather than
+failing it.
+
+`0008` adds `psp_set_dispatch_hook()`, consulted before the lookup, returning
+nonzero if it handled the call. `0003` uses it to run such targets interpreted,
+nested under the current run and charged against its budget so total work stays
+bounded however deep the nesting goes.
+
+The effect on this module: guest re-entry went from **6,254 discarded
+functions — the largest skip category by a wide margin — to zero.**
 
 ---
 

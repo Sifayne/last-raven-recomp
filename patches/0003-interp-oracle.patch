@@ -427,10 +427,10 @@ index 481001d..00a2a70 100644
  #endif
 diff --git a/tools/allegrexrecomp/interp.c b/tools/allegrexrecomp/interp.c
 new file mode 100644
-index 0000000..fe296a1
+index 0000000..ace058d
 --- /dev/null
 +++ b/tools/allegrexrecomp/interp.c
-@@ -0,0 +1,588 @@
+@@ -0,0 +1,682 @@
 +/* allegrexrecomp — the Allegrex interpreter oracle. See interp.h.
 + *
 + * The switch below deliberately mirrors emit.c's emit_simple() case for case.
@@ -451,6 +451,7 @@ index 0000000..fe296a1
 +#include "decode.h"
 +
 +#include "psprecomp/cpu.h"
++#include "psprecomp/dispatch.h"
 +#include "psprecomp/hle.h"
 +#include "psprecomp/mem.h"
 +#include "psprecomp/recomp_rt.h"
@@ -872,6 +873,93 @@ index 0000000..fe296a1
 +    }
 +}
 +
++/* ---- guest re-entry from HLE ----------------------------------------------
++ *
++ * Some firmware handlers call back into guest code: a thread entry point, a
++ * registered callback, a comparator handed to a sort. They do it through
++ * psp_dispatch(), which knows only about *recompiled* functions.
++ *
++ * Left alone that is doubly wrong during an interpreter run. It mixes the two
++ * translations inside a single execution, so a differential comparison is no
++ * longer comparing anything; and recompiled code carries no instruction
++ * budget, so a callee that does not return takes the whole run with it. The
++ * harness previously had to bound this externally and throw the function away
++ * -- 6,254 of them on this module, the largest skip category by far.
++ *
++ * With a hook installed, the interpreter runs the target itself. The nested run
++ * gets what is left of the outer budget and adds its cost back, so total work
++ * stays bounded however deep the nesting goes.
++ *
++ * $ra is saved across the call. psp_interp_init() plants the sentinel there so
++ * the callee has somewhere to return to, which is what a `jal` would do -- but
++ * the caller's own return address has to survive it. */
++
++#define NESTED_RA  0x0DEAD100u
++#define MAX_NEST   64
++
++static psp_interp *g_active;      /* the run currently executing, if any */
++static int         g_nest;
++static uint64_t    g_nest_refused;
++
++static int dispatch_hook(uint32_t addr) {
++    if (!g_active) return 0;              /* not inside an interpreter run */
++
++    /* At the depth limit, refuse the call rather than declining to handle it.
++     *
++     * Returning 0 here would fall through to the normal lookup and run
++     * *recompiled* code from inside an interpreter run -- unbounded, because
++     * native code has no instruction budget -- which is the exact hang this
++     * hook exists to prevent. A callback that does not happen is a wrong
++     * answer; a callback that never returns is no answer at all, and the
++     * caller can see the first one in the count below. */
++    if (g_nest >= MAX_NEST) { g_nest_refused++; return 1; }
++
++    psp_interp *outer = g_active;
++    const uint32_t saved_ra = R(PSP_RA_INDEX);
++
++    uint64_t left = 0;
++    if (outer->budget) {
++        left = outer->budget > outer->executed ? outer->budget - outer->executed : 1;
++    }
++
++    psp_interp sub;
++    psp_interp_init(&sub, addr, NESTED_RA, left);
++    sub.trace      = outer->trace;
++    sub.trace_regs = outer->trace_regs;
++
++    g_nest++;
++    g_active = &sub;
++    psp_interp_run(&sub);
++    g_active = outer;
++    g_nest--;
++
++    outer->executed += sub.executed;
++    psp_cpu.r[PSP_RA_INDEX] = saved_ra;
++    return 1;
++}
++
++void psp_interp_service_dispatch(int enable) {
++    /* Clear the nesting state, not just the hook.
++     *
++     * g_nest is incremented around a nested run and decremented after it, but
++     * a caller that abandons a run mid-flight -- a wall-clock watchdog, a trap
++     * handler -- leaves via longjmp and never reaches the decrement. The
++     * counter then leaks upward across runs, and after MAX_NEST such
++     * abandonments the hook stops accepting work forever. Every subsequent
++     * re-entry falls through to recompiled code and the next one that does not
++     * return hangs the process.
++     *
++     * That failure is invisible until it happens and then total, and it looks
++     * like the harness getting slower: the corpus ran 2,000 functions normally
++     * and then stopped dead. Resetting here, where a caller announces the start
++     * of a fresh top-level run, is what makes an abandoned run survivable. */
++    g_nest = 0;
++    g_active = NULL;
++    psp_set_dispatch_hook(enable ? dispatch_hook : NULL);
++}
++
++uint64_t psp_interp_nest_refused(void) { return g_nest_refused; }
++
 +/* ---- stepping -------------------------------------------------------------
 + *
 + * A branch and its delay slot are one step. The hardware never exposes a point
@@ -997,7 +1085,13 @@ index 0000000..fe296a1
 +}
 +
 +psp_interp_status psp_interp_run(psp_interp *it) {
++    /* Publish the active run so the dispatch hook can nest under it. Saved and
++     * restored rather than assigned, because a nested run calls straight back
++     * in here. */
++    psp_interp *prev = g_active;
++    g_active = it;
 +    while (psp_interp_step(it) == I_RUNNING) { }
++    g_active = prev;
 +    return it->status;
 +}
 +
@@ -1021,10 +1115,10 @@ index 0000000..fe296a1
 +}
 diff --git a/tools/allegrexrecomp/interp.h b/tools/allegrexrecomp/interp.h
 new file mode 100644
-index 0000000..27dc1d8
+index 0000000..834d7b1
 --- /dev/null
 +++ b/tools/allegrexrecomp/interp.h
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,164 @@
 +/* allegrexrecomp — the Allegrex interpreter that acts as the bring-up oracle.
 + *
 + * This exists to answer one question during bring-up: when the recompiled game
@@ -1153,6 +1247,24 @@ index 0000000..27dc1d8
 +
 +/* Step until the run stops. Returns the terminating status. */
 +psp_interp_status psp_interp_run(psp_interp *it);
++
++/* Service guest re-entry from HLE handlers inside the interpreter.
++ *
++ * With this enabled, a psp_dispatch() call made from a firmware handler while
++ * an interpreter run is in progress executes the target *interpreted*, nested
++ * under the current run and charged against its budget, instead of jumping into
++ * recompiled code. Outside an interpreter run the hook does nothing, so the
++ * recompiled path is unaffected and this can be left on.
++ *
++ * Without it a differential run has to discard every function that reaches such
++ * a callback -- and recompiled code has no instruction budget, so one that does
++ * not return hangs the run rather than failing it. */
++void psp_interp_service_dispatch(int enable);
++
++/* How many re-entries were refused for exceeding the nesting limit. Nonzero
++ * means some guest callback did not run; the result is still bounded, but it is
++ * not a faithful execution. */
++uint64_t psp_interp_nest_refused(void);
 +
 +/* Human-readable status, for error messages. Never NULL. */
 +const char *psp_interp_status_str(psp_interp_status s);
