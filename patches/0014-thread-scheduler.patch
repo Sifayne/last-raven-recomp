@@ -26,10 +26,10 @@ index e6a88df..1d8c0bb 100644
      if(PSPRECOMP_LIBM)
 diff --git a/include/psprecomp/sched.h b/include/psprecomp/sched.h
 new file mode 100644
-index 0000000..eb0dd24
+index 0000000..9160316
 --- /dev/null
 +++ b/include/psprecomp/sched.h
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,146 @@
 +/* psprecomp — thread scheduling.
 + *
 + * Why host threads and not saved registers
@@ -63,6 +63,7 @@ index 0000000..eb0dd24
 +#define PSPRECOMP_SCHED_H
 +
 +#include <stdint.h>
++#include <stdio.h>
 +
 +#ifdef __cplusplus
 +extern "C" {
@@ -163,6 +164,9 @@ index 0000000..eb0dd24
 + * or a runaway thread, and either is reported. */
 +int psp_sched_drain(int timeout_s);
 +
++/* Every live thread and what it waits on. */
++void psp_sched_dump_threads(FILE *out);
++
 +/* Introspection, for the boot report. */
 +int      psp_sched_live(void);
 +uint32_t psp_sched_current(void);
@@ -174,10 +178,10 @@ index 0000000..eb0dd24
 +#endif /* PSPRECOMP_SCHED_H */
 diff --git a/src/hle/sched.c b/src/hle/sched.c
 new file mode 100644
-index 0000000..ede1704
+index 0000000..0fb8bb1
 --- /dev/null
 +++ b/src/hle/sched.c
-@@ -0,0 +1,430 @@
+@@ -0,0 +1,449 @@
 +/* psprecomp — thread scheduling. See include/psprecomp/sched.h. */
 +
 +#include "psprecomp/sched.h"
@@ -595,6 +599,25 @@ index 0000000..ede1704
 +    return live;
 +}
 +
++/* Every live thread and what it is parked on. The drain prints this when it
++ * gives up; a wait that cannot be satisfied needs exactly the same list, and
++ * printing it there is the difference between "deadlock" and knowing which
++ * semaphore nobody is going to signal. */
++void psp_sched_dump_threads(FILE *out) {
++    pthread_mutex_lock(&g_lock);
++    for (int i = 0; i < MAX_SCHED_THREADS; i++) {
++        if (!g_slot[i].used || g_slot[i].state == PSP_SCHED_DEAD) continue;
++        static const char *const ST[] = {
++            "ready", "running", "blocked", "sleeping", "dead" };
++        fprintf(out, "    uid 0x%08X  entry 0x%08X  prio %d  %s%s%s\n",
++                g_slot[i].uid, g_slot[i].entry, g_slot[i].priority,
++                ST[g_slot[i].state],
++                g_slot[i].waiting_on ? " on " : "",
++                g_slot[i].waiting_on ? g_slot[i].waiting_on : "");
++    }
++    pthread_mutex_unlock(&g_lock);
++}
++
 +int psp_sched_live(void) {
 +    pthread_mutex_lock(&g_lock);
 +    const int live = live_locked();
@@ -609,7 +632,7 @@ index 0000000..ede1704
 +    return uid;
 +}
 diff --git a/src/hle/threadman.c b/src/hle/threadman.c
-index bba5683..d8de46d 100644
+index bba5683..751531e 100644
 --- a/src/hle/threadman.c
 +++ b/src/hle/threadman.c
 @@ -5,35 +5,29 @@
@@ -741,7 +764,7 @@ index bba5683..d8de46d 100644
  static psp_sema *find_sema(uint32_t id) {
      for (int i = 0; i < MAX_SEMAS; i++)
          if (g_sema[i].used && g_sema[i].uid == id) return &g_sema[i];
-@@ -125,15 +145,33 @@ static psp_evflag *find_flag(uint32_t id) {
+@@ -125,15 +145,34 @@ static psp_evflag *find_flag(uint32_t id) {
      return NULL;
  }
  
@@ -763,7 +786,8 @@ index bba5683..d8de46d 100644
 +        "psprecomp: %s cannot be satisfied -- no thread is runnable, so nothing\n"
 +        "  can ever signal it, and the caller passed no timeout. Reporting a\n"
 +        "  timeout would make the guest act on a falsehood, so the run stops\n"
-+        "  here instead.\n", what);
++        "  here instead. Live threads:\n", what);
++    psp_sched_dump_threads(stderr);
 +    psp_sched_stop_all();
 +}
 +
@@ -780,7 +804,7 @@ index bba5683..d8de46d 100644
          what);
  }
  
-@@ -169,47 +207,55 @@ static void hle_StartThread(void) {
+@@ -169,47 +208,55 @@ static void hle_StartThread(void) {
      psp_thread *t = find_thread(psp_arg(0));
      if (!t) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_THID); return; }
  
@@ -869,7 +893,7 @@ index bba5683..d8de46d 100644
      psp_ret(SCE_KERNEL_ERROR_OK);
  }
  
-@@ -224,19 +270,85 @@ static void hle_DeleteThread(void) {
+@@ -224,19 +271,85 @@ static void hle_DeleteThread(void) {
  /* With one thread running to completion there is nothing to schedule during a
   * delay, so it returns immediately. Time still advances for anything reading
   * the clock. */
@@ -963,7 +987,7 @@ index bba5683..d8de46d 100644
  
  static void hle_SuspendThread(void) {
      psp_thread *t = find_thread(psp_arg(0));
-@@ -260,11 +372,13 @@ static void hle_ChangeThreadPriority(void) {
+@@ -260,11 +373,13 @@ static void hle_ChangeThreadPriority(void) {
  }
  
  static void hle_GetThreadCurrentPriority(void) {
@@ -979,7 +1003,7 @@ index bba5683..d8de46d 100644
      psp_ret(SCE_KERNEL_ERROR_OK);
  }
  
-@@ -273,7 +387,8 @@ static void hle_GetThreadStackFreeSize(void) {
+@@ -273,7 +388,8 @@ static void hle_GetThreadStackFreeSize(void) {
       * paint one, so report the whole stack: it is used for "am I close to
       * overflowing", and claiming plenty of room is the safe direction. */
      psp_thread *t = find_thread(psp_arg(0));
@@ -989,7 +1013,7 @@ index bba5683..d8de46d 100644
  }
  
  /* ---- semaphores ---------------------------------------------------------- */
-@@ -305,20 +420,75 @@ static void hle_SignalSema(void) {
+@@ -305,20 +421,75 @@ static void hle_SignalSema(void) {
      if (!s) { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_UID); return; }
      s->count += (int32_t)psp_arg(1);
      if (s->max_count > 0 && s->count > s->max_count) s->count = s->max_count;
@@ -1072,7 +1096,7 @@ index bba5683..d8de46d 100644
  }
  
  /* ---- event flags --------------------------------------------------------- */
-@@ -380,6 +550,13 @@ static void hle_WaitEventFlag(void) {
+@@ -380,6 +551,13 @@ static void hle_WaitEventFlag(void) {
      if (out) psp_write32(out, f->pattern);
  
      if (!satisfied) {
@@ -1086,7 +1110,7 @@ index bba5683..d8de46d 100644
          warn_block("sceKernelWaitEventFlag");
          psp_ret(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
          return;
-@@ -431,6 +608,9 @@ void psp_threadman_register(void) {
+@@ -431,6 +609,9 @@ void psp_threadman_register(void) {
      psp_hle_register(0xCEADEB47, "ThreadManForUser", "sceKernelDelayThread",             hle_DelayThread);
      psp_hle_register(0x68DA9E36, "ThreadManForUser", "sceKernelDelayThreadCB",           hle_DelayThread);
      psp_hle_register(0x278C0DF5, "ThreadManForUser", "sceKernelWaitThreadEnd",           hle_WaitThreadEnd);
@@ -1096,7 +1120,7 @@ index bba5683..d8de46d 100644
      psp_hle_register(0x293B45B8, "ThreadManForUser", "sceKernelGetThreadId",             hle_GetThreadId);
      psp_hle_register(0x9944F31F, "ThreadManForUser", "sceKernelSuspendThread",           hle_SuspendThread);
      psp_hle_register(0x75156E8F, "ThreadManForUser", "sceKernelResumeThread",            hle_ResumeThread);
-@@ -443,6 +623,15 @@ void psp_threadman_register(void) {
+@@ -443,6 +624,15 @@ void psp_threadman_register(void) {
      psp_hle_register(0x28B6489C, "ThreadManForUser", "sceKernelDeleteSema",              hle_DeleteSema);
      psp_hle_register(0x3F53E640, "ThreadManForUser", "sceKernelSignalSema",              hle_SignalSema);
      psp_hle_register(0x4E3A1105, "ThreadManForUser", "sceKernelWaitSema",                hle_WaitSema);
