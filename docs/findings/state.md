@@ -250,11 +250,20 @@ on without the conversation that produced it.
    The decoder is not starved and the semaphores are not stuck. The consumer
    simply never runs, so the queue reaches capacity and stays there.
 
-   The consumer's callers are ordinary. `psp_body_002729C0` is called by
-   `0x00272264` and `0x00272280`, inside `psp_body_00272224` and
-   `psp_body_00272278`, and those two are called by plain `jal` from
-   `0x0013B040` (in `psp_body_0013B02C`) and `0x0018BE48` (in
-   `psp_body_0018BDB0`). Nothing here is a virtual call.
+   The consumer's callers are ordinary `jal` sites, and **none of them ever
+   runs**. Breakpoints on `psp_func_0018BDB0`, `psp_func_00272278` and
+   `psp_func_00273E30` — the drain itself — are hit zero times in a full run.
+
+   The chain above the drain is `psp_body_002729C0` ← `0x00272264` / `0x00272280`
+   in `psp_body_00272224` / `psp_body_00272278` ← `0x0013B040` / `0x0018BE48`.
+   `0x0013B02C` is the target of no transfer at all and is probably a
+   pointer-scan artifact rather than live code; `0x0018BDB0` is called from
+   `0x001B1770` and `0x001B8BA4`, and both guard on a null field before
+   reaching the drain.
+
+   So the queue is drained from the game's own update code, far outside the
+   movie — which is not running, because the game has not left the movie. The
+   movie waits on the game and the game waits on the movie.
 
    The display side never gets far enough to dispatch it. SoundThread wakes on
    Movie Sync and then guards on two fields before doing anything:
