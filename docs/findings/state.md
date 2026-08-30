@@ -466,11 +466,51 @@ that produced it.
    the GU library is not where this goes wrong. Whatever builds the matrix from
    the object's `(68, 117)` is upstream of all of it and has not been found.
 
-   **The instrument this needs does not exist yet: a watch on *writes* to an
-   address.** `PSPRECOMP_PEEK` reads memory once the run has stopped and
-   `PSPRECOMP_WATCH` fires on function entry; neither answers "who wrote this
-   word". The matrix buffer is `0x00424820`, the wrong value lands at
-   `+36`, and one write-watch on that address names the culprit in a single run.
+   ### The chain, walked
+
+   `PSPRECOMP_WATCHMEM=<addr>[,<value>]` now answers "who wrote this word" --
+   another instrument that was written, declared and never called. Following it
+   upward:
+
+   ```
+   GE upload            psp_func_002B752C   packs 24-bit floats with lwr
+     <- sceGumLoadMatrix  psp_func_002B99C8   16-word copy
+       <- stack buffer
+         <- psp_func_002AFEB4                 16-word copy
+           <- immediately precedes a VFPU matrix routine at 0x002AFEF8
+              (lv.q / vtfm4 / sv.q)
+   ```
+
+   **Every function on that chain matches under the differential oracle.** That
+   is not the reassurance it looks like: `psp_vtfm` and `psp_vmmul` are called
+   by *both* the interpreter and the emitted code, so a bug in them is
+   identical on both sides and the oracle agrees perfectly while both are
+   wrong. It is the same structural blindness this file records for the
+   execution environment, one layer down -- shared *semantics* rather than
+   shared environment.
+
+   And `vfpu.c` says so itself, in a note above `psp_vmmul` written long before
+   any of this:
+
+   > the operand ORIENTATION here is not independently verified... the
+   > identity/composition tests hold, but those hold for the transposed
+   > convention too -- they cannot tell the two apart. **If recompiled geometry
+   > comes out scrambled rather than absent, this is the first thing to check
+   > against an oracle.**
+
+   Geometry coming out scrambled rather than absent is exactly the symptom. So
+   the prime suspect is the VFPU matrix orientation, and the instrument that can
+   settle it is the **behavioural oracle** -- `scripts/07-autotests.sh`, from the
+   merge -- precisely because the differential one cannot. That is the next
+   step, and it is the first time the autotests have had a specific question to
+   answer rather than being a good idea in general.
+
+   Not yet proven: that the orientation is wrong. A transpose alone does not map
+   index 12 to index 9, so if it is `vmmul` it is not a plain transpose. The
+   value lands one slot short of a stride-4 translation and exactly where a
+   stride-3 one would go, while `ty` lands correctly at stride 4 -- which no
+   single uniform error explains, and which is worth holding onto rather than
+   assuming away.
 
    **Also left:** perspective-correct interpolation is absent (affine only,
    exact on a fullscreen quad), and there is no clipper.
