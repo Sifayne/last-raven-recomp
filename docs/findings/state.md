@@ -368,10 +368,49 @@ that produced it.
    wrapper runs**, so the byte-flag gate at `0x00275140` passes. And
    `0x0013B02C`, previously written off as a pointer-scan artifact, is live.
 
-   The live question is now much narrower: **`0x00275864` runs but the producer
-   at `0x00275770` does not**, so something inside the wrapper guards the call.
-   Disassemble `0x00275864` and find the guard. That is one function, not a
-   call graph.
+   **The guard has been found, and it is not a mystery.** `0x00275864` is the
+   *audio* pump, and the two calls it makes are identified by the strings its
+   error path prints — `0x002E4928` is `sceMpegGetAtracAu` and `0x002E48E0` is
+   `sceMpegAtracDecode`:
+
+   ```c
+   if (this[92] - this[88] <= 0)                                  return 0;   // queue full
+   if (sceMpegGetAtracAu(this[124], this[128], &this[4], &attr))  return 0;   // <- here
+   buf = f_00275714(this);
+   r = sceMpegAtracDecode(this[124], &this[4], buf, this[104]);
+   if (r) { printf("Fatal Error!!! : sceMpegAtracDecode() is failed...ret=%08X", r);
+            return -1; }
+   if (this[104] == 0) f_00275744(this);      // the producer; this[104] is the init flag
+   this[104] = 0;  return 1;
+   ```
+
+   In the **default** configuration `sceMpegGetAtracAu` returns
+   `0x806101FE` — the deliberate refusal — on its first and only call, so the
+   function returns at the second guard. Confirmed by watching the blocks
+   directly: `0x00275934` (the early return) is reached and `0x00275904` is not.
+
+   **In the decoder configuration every block is reached, including the producer
+   `0x00275744`.** So `struct[88]` is incremented after all, and the producer is
+   not blocked by anything.
+
+   ### The mistake that produced the question
+
+   The table above was measured in the **default** configuration, and the
+   question it was used to ask — "why does the producer not run" — only means
+   anything in the **decoder** configuration. In the default one the producer is
+   *supposed* not to run: sceMpeg refuses playback, and everything downstream
+   correctly declines to proceed.
+
+   The table is labelled correctly. The conclusion drawn from it was not, and it
+   is the same error this document exists to prevent, made while writing the
+   document that prevents it. **Ask which configuration makes the question
+   meaningful before choosing the one to measure in.**
+
+   What is left is not this chain at all. In the decoder configuration
+   SoundThread never reaches its `struct[88]` guard, because it is parked on
+   `Movie Sync sema` — which nothing in the module signals, in either
+   configuration. That is the standing blocker, and it is already in the
+   ruled-out list above with two independent lines of evidence.
 
 3. **The two composed-chain oracle divergences.** Each callee agrees in
    isolation; the disagreement only appears in the chain. Needs instruction-level
