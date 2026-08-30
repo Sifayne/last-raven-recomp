@@ -1,0 +1,143 @@
+diff --git a/include/psprecomp/vfpu.h b/include/psprecomp/vfpu.h
+index 5a5293e..d92d745 100644
+--- a/include/psprecomp/vfpu.h
++++ b/include/psprecomp/vfpu.h
+@@ -107,6 +107,19 @@ void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+ void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size, int homogeneous);
+ void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+ 
++/* Integer/vector moves: mfv and mtv.
++ *
++ * The value crosses as a *bit pattern*, not a number -- these are how a game
++ * gets a float into the vector file without a round trip through memory, and
++ * how it reads one back out. No conversion, and no prefix: the prefix
++ * registers rewrite the operands of arithmetic, and a move is not arithmetic.
++ *
++ * `vd` is the single-register form of the 7-bit field, so it addresses one
++ * lane. The control-register variants (mfvc/mtvc, bit 7 of the field set) are
++ * a different instruction and are not these. */
++uint32_t psp_mfv(uint32_t vd);
++void     psp_mtv(uint32_t vd, uint32_t bits);
++
+ /* Prefix state. Set by vpfxs/vpfxt/vpfxd; consumed (and cleared) by the next
+  * arithmetic instruction. While any is pending, arithmetic traps. */
+ void psp_vfpu_set_prefix(int which, uint32_t value);
+diff --git a/src/vfpu.c b/src/vfpu.c
+index 8801d25..5e6d541 100644
+--- a/src/vfpu.c
++++ b/src/vfpu.c
+@@ -76,6 +76,20 @@ int psp_vfpu_regs(uint32_t vreg, int size, int out[4]) {
+     return len;
+ }
+ 
++/* ---- integer/vector moves ------------------------------------------------ */
++
++uint32_t psp_mfv(uint32_t vd) {
++    int r[4];
++    psp_vfpu_regs(vd, 1, r);
++    return psp_f32_to_bits(psp_cpu.v[r[0]]);
++}
++
++void psp_mtv(uint32_t vd, uint32_t bits) {
++    int r[4];
++    psp_vfpu_regs(vd, 1, r);
++    psp_cpu.v[r[0]] = psp_bits_to_f32(bits);
++}
++
+ /* ---- load / store -------------------------------------------------------- */
+ 
+ void psp_lv_s(uint32_t vt, uint32_t addr) {
+@@ -381,7 +395,23 @@ void psp_vmmov(uint32_t vd, uint32_t vs, int size) {
+  * overlapping pair still produces a defined result here rather than depending
+  * on lane order. */
+ void psp_vrot(uint32_t vd, uint32_t vs, uint32_t imm, int size) {
+-    const float arg = psp_cpu.v[vs & 127];
++    if (!take_prefixes(psp_cpu.pc, "vrot")) return;
++
++    /* Through psp_vfpu_regs, like every other op in this file.
++     *
++     * This used to index psp_cpu.v[] directly -- `v[vs & 127]` for the angle
++     * and `v[(vd + i) & 127]` for each lane -- which is wrong twice. Lanes of a
++     * vector are 32 apart in the register file, not adjacent, so stepping by
++     * one walks across four different matrices; and the row offset in bit 6 is
++     * never applied, so a register naming row 2 writes row 0.
++     *
++     * pspgl's glRotatef is one vrot, and it showed both at once: the rotation
++     * landed in registers nobody read, leaving the identity behind, and what
++     * did get read came out two rows over. */
++    int s_reg[4], d[4];
++    psp_vfpu_regs(vs, 1, s_reg);
++    const float arg = psp_cpu.v[s_reg[0]];
++
+     const unsigned cl = imm & 3;
+     const unsigned sl = (imm >> 2) & 3;
+ 
+@@ -389,12 +419,13 @@ void psp_vrot(uint32_t vd, uint32_t vs, uint32_t imm, int size) {
+     const float c = cosf(arg * 1.5707963267948966f);
+     if (imm & 0x10) s = -s;
+ 
+-    for (int i = 0; i < size; i++) {
++    const int n = psp_vfpu_regs(vd, size, d);
++    for (int i = 0; i < n; i++) {
+         float r;
+         if (cl == sl) r = ((unsigned)i == cl) ? c : s;
+         else          r = ((unsigned)i == cl) ? c
+                         : ((unsigned)i == sl) ? s : 0.0f;
+-        psp_cpu.v[(vd + i) & 127] = r;
++        psp_cpu.v[d[i]] = r;
+     }
+ }
+ 
+diff --git a/tools/allegrexrecomp/decode.c b/tools/allegrexrecomp/decode.c
+index 12ba9dd..14802af 100644
+--- a/tools/allegrexrecomp/decode.c
++++ b/tools/allegrexrecomp/decode.c
+@@ -449,10 +449,15 @@ static a_op decode_cop2(uint32_t w, uint32_t addr, a_insn *in) {
+     switch (RS_F(w)) {
+     case 0x00: return A_MFC1;    /* mfc2: integer move, no vector register */
+     case 0x02: return A_CFC1;    /* cfc2 */
+-    case 0x03: return A_MFV;
++    /* Bit 7 of the register field selects the VFPU *control* registers, which
++     * are a different instruction with a different register file. Folding them
++     * in with the vector moves would silently read or write lane (imm & 0x7F)
++     * instead -- plausible numbers from the wrong place. Named separately so
++     * they trap until something needs them. */
++    case 0x03: return (w & 0x80) ? A_MFVC : A_MFV;
+     case 0x04: return A_MTC1;    /* mtc2 */
+     case 0x06: return A_CTC1;    /* ctc2 */
+-    case 0x07: return A_MTV;
++    case 0x07: return (w & 0x80) ? A_MTVC : A_MTV;
+     case 0x08:
+         switch (RT_F(w) & 3) {
+         case 0: set_branch(in, addr, 0); return A_BVF;
+diff --git a/tools/allegrexrecomp/emit.c b/tools/allegrexrecomp/emit.c
+index cf04c23..c14a84b 100644
+--- a/tools/allegrexrecomp/emit.c
++++ b/tools/allegrexrecomp/emit.c
+@@ -361,6 +361,12 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
+     /* --- VFPU: the subset with a real implementation. Everything else in the
+        vector unit still falls through to a trap below, which is deliberate --
+        see include/psprecomp/vfpu.h. --- */
++    case A_MFV:
++        if (DEST_ZERO(in->rt)) break;
++        fprintf(f, "%s%s = psp_mfv(%u);\n", ind, rt, in->vd); return;
++    case A_MTV:
++        fprintf(f, "%spsp_mtv(%u, %s);\n", ind, in->vd, rt); return;
++
+     case A_LV_S:
+         fprintf(f, "%spsp_lv_s(%u, %s + %d);\n", ind, in->vt, rs, in->imm & ~3); return;
+     case A_LV_Q:
+diff --git a/tools/allegrexrecomp/interp.c b/tools/allegrexrecomp/interp.c
+index 0d25880..1fc6152 100644
+--- a/tools/allegrexrecomp/interp.c
++++ b/tools/allegrexrecomp/interp.c
+@@ -330,6 +330,9 @@ static psp_interp_status exec_simple(const a_insn *in) {
+     case A_MTC0: case A_CTC0: case A_MTIC:                  return I_RUNNING;
+ 
+     /* --- VFPU: the subset with a real implementation behind it. --- */
++    case A_MFV: setr(in->rt, psp_mfv(in->vd));  return I_RUNNING;
++    case A_MTV: psp_mtv(in->vd, R(in->rt));     return I_RUNNING;
++
+     case A_LV_S: psp_lv_s(in->vt, R(in->rs) + (in->imm & ~3)); return I_RUNNING;
+     case A_LV_Q: psp_lv_q(in->vt, R(in->rs) + (in->imm & ~3)); return I_RUNNING;
+     case A_SV_S: psp_sv_s(in->vt, R(in->rs) + (in->imm & ~3)); return I_RUNNING;

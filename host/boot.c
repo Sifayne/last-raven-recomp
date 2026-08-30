@@ -619,6 +619,8 @@ int main(int argc, char **argv) {
     /* 2 — registration and firmware. */
     psp_recomp_register();
     psp_hle_init();
+    /* After psp_hle_init, which resets the allocator. */
+    psp_sysmem_reserve_module(li.lo, li.hi);
     if (iso) psp_io_set_umd_image(iso);
     psp_hle_register(0x8F2DF740u, "ModuleMgrForUser", "StopUnloadSelfModule",
                      hle_stop_unload_self);
