@@ -5,39 +5,85 @@ changes; this is the part that lives between them — what the game currently
 does, which instrument answers which question, and what has already been ruled
 out so it is not investigated twice.
 
+## Every measurement here names its configuration
+
+There are two, and they are not variants of one run — they terminate
+differently, read different amounts of disc, and leave different threads alive.
+An unlabelled number in this file was a bug, and it is what made the previous
+version of this document contradict itself:
+
+- **default** — `PSPRECOMP_MPEG_DECODE` unset. sceMpeg refuses playback.
+- **decoder** — `PSPRECOMP_MPEG_DECODE=1`. Demuxer and openh264 video path on.
+
+The switch landed in `4462226`. Every doc commit after it recorded numbers
+without saying which side of it they came from, so by the time anyone read them
+there was no way to tell. **Label the configuration or do not write the
+number.**
+
 ## What the game does today
 
 It boots. Constructors run, `module_start` returns, the disc is read through
-async I/O, and a frame loop runs to a steady state. Since the scheduler stopped
-starving the game's lower-priority workers the run now **finishes** rather than
-hitting the drain deadline: `threads: all finished`.
+async I/O, and the frame loop runs.
 
-The intro movie still does not produce a picture on screen, but its machinery
-runs — with the decoder enabled, the two semaphores that were never signalled
-all session now are.
+**default:**
 
 ```
 entry:     returned
 threads:   all finished
 bad mem:   0 accesses
 disc read: 1,912,832 bytes
-pixels:    2,350,081 drawn by the rasterizer
+pixels:    33,423,361 drawn by the rasterizer
+GE: 633 lists, 106,108 commands, 212 finishes
+    texture 512x64 stride 352, clut8, modulate, swizzled  (153 clut loads)
+    drawn   257 prims, 2,958 vertices, 611 triangle-strips, 257 sprites
+    2,444 vertices in an unsupported format (transformed, or no position)
 ```
 
-The frame is a single flat colour, and that is correct: the only geometry
-reaching the rasterizer is nineteen untextured full-screen quads — screen
-clears — drawn with no vertex colour, which defaults to white. There is nothing
-else to draw yet.
+`sceDisplaySetFrameBuf` is called **422** times and the run ends in seconds.
 
-**It does not stop. It repeats.** Over a 60-second run the game issues
-2,309,200 `sceDisplaySetFrameBuf` and 2,309,199 `sceGeListUpdateStallAddr`
-calls — and 21 GE lists, 19 prims, 2,350,081 pixels *in total*. It presents the
-same nineteen clears about 2.3 million times. Whatever would produce geometry
-never runs.
+**decoder:** the same 19-clear baseline for pixels, but the run does *not* end —
+it reaches the 60-second drain deadline with `threads: still alive`, having read
+3,289,088 bytes of disc and issued **517,655,943** `sceMpegRingbufferAvailableSize`
+and **258,832,036** `sceKernelSignalSema` calls. The movie threads are still
+alive; in the default configuration they have exited.
 
-**The renderer is not the blocker**, and neither is the scheduler. Work on
-textures, sampling or the block transfer will not change the picture while
-nothing is submitted to draw.
+### The picture is still one flat colour, and that is now a different problem
+
+The frame dumps as a single `rgb(0, 32, 32)` across all 130,560 pixels. It used
+to be a single white, from nineteen untextured full-screen clears. It is no
+longer that: real geometry with a real swizzled CLUT8 texture and 153 palette
+loads now reaches the rasterizer. Something between "the GE executes the list"
+and "the framebuffer holds a picture" is still wrong, and the **2,444 vertices
+in an unsupported format** are the first place to look.
+
+### The renderer *was* the blocker, and this document said it was not
+
+Until `31473af` the GE accepted **eight display lists for the life of the
+process** and refused every one after that. `enqueue` took a slot from a pool of
+eight and set `used = 1`; that was the only write to `used` in the file, and
+neither `ListSync` nor `DrawSync` released anything.
+
+Measured on the intro, default: 212 enqueues attempted, 8 accepted, **204
+refused** with `SCE_KERNEL_ERROR_NO_MEMORY`. Fixing it moved the numbers a long
+way:
+
+```
+                 before      after
+GE lists             21        633
+commands          1,900    106,108
+prims                19        257
+vertices             62      2,958
+pixels        2,350,081 33,423,361
+```
+
+The previous version of this file concluded from the same evidence that "the
+renderer is not the blocker" and that "whatever would produce geometry never
+runs". The geometry-producing code ran the whole time and was turned away at the
+door. **Nothing pointed at it could see the refusal**: the GE summary counts
+lists that *ran*, the firmware histogram is a top-12, and a non-zero error
+escapes the zero-return ring. It was found by grepping an `HLE_LOG` capture for
+every return of the form `= 0x8…`, which is now the thing to do when something
+inexplicable is happening.
 
 ### A yield cannot give way to a lower priority
 
@@ -61,26 +107,44 @@ hanging. The duration is honoured; only its relation to wall time is not.
 what it waits for; a starved one names nothing, which reads like an idle thread
 rather than a stuck one.
 
-### The run ends on a deadline, not on a deadlock
+### How each configuration ends
 
-The boot host's `psp_sched_drain` gives up after 60 seconds and prints the live
-thread list. That report is easy to misread as a deadlock — it is not one, and
-mistaking it for one cost a session:
+**default — on an unsatisfiable wait, in seconds.** Not on a deadline:
+
+```
+psprecomp: sceKernelWaitSema cannot be satisfied -- no thread is runnable, so nothing
+  can ever signal it, and the caller passed no timeout. [...] Live threads:
+    uid 0x00000000  prio 32  blocked
+    uid 0x00040000  prio 32  blocked on sceKernelWaitThreadEnd   <- user_main
+    uid 0x00040001  prio 16  running                             <- movie controller
+    uid 0x00040021  prio 16  blocked on sceKernelWaitSema(Movie Sync sema)
+```
+
+The sequence into it: MovieDecodeThread signals `Movie Start` once on its way
+out, `0x40001` takes it, runs a frame, and **parks on `Movie Start` a second
+time** — by which point both movie threads have exited, so nothing can ever
+signal it again. The proximate blocker in this configuration is `Movie Start
+sema`, not `Movie Sync sema`.
+
+**`threads: all finished` does not mean the game finished.** The scheduler stops
+every thread on that unsatisfiable wait, so the drain then finds zero live and
+`boot.c` prints `all finished`. The summary cannot presently tell "the guest
+completed" from "the guest was stopped"; read the stderr tail before believing
+the stdout line.
+
+**decoder — on the 60-second drain deadline.** That report is easy to misread as
+a deadlock. It is not one:
 
 ```
 psprecomp: guest threads still running after 60s; 5 alive, not waiting further
-    uid 0x00000000  prio 32  running
-    uid 0x00040000  prio 32  blocked on sceKernelWaitThreadEnd
-    uid 0x00040001  prio 16  running
-    uid 0x00040021  prio 16  blocked on sceKernelWaitSema(Movie Sync sema)
 ```
 
 Two slots say `running` because that is what the timeout path does: a guest
 thread cannot be unwound from outside, so the main context stops waiting for it
-and takes the token back, leaving the runaway thread genuinely still running.
-`sched.h` documents it. **A real deadlock prints `deadlock -- N thread(s)
-alive, none runnable`, and this game has never printed it.** Check for that
-string before concluding anything about the scheduler.
+and takes the token back. `sched.h` documents it. **A real deadlock prints
+`deadlock -- N thread(s) alive, none runnable`, and this game has never printed
+it, in either configuration.** Check for that string before concluding anything
+about the scheduler.
 
 ## The instruments, and what each can and cannot tell you
 
@@ -88,46 +152,87 @@ All are off by default and cost nothing when off.
 
 | | |
 |---|---|
-| `PSPRECOMP_HLE_LOG=1` | Every firmware call, tagged with the calling thread, with arguments and result. The first thing to reach for. |
-| `PSPRECOMP_HLE_TRACE=<name>` | Dumps the guest function trace at every call to that firmware function. Answers "which of the game's loaders called this". |
-| `PSPRECOMP_WATCH=<hex addr>` | Prints the argument registers on entry to one guest function, and dereferences the pointer-looking ones. Needs a `TRACE=1` build. |
-| `PSPRECOMP_SEMA=<substring>` | Narrates every wait, take and signal on the semaphores whose name contains it, tagged with the calling thread. A signal also dumps the guest trace. Answers "is nobody signalling this, or is it signalled too early" — which the thread dump cannot. |
+| `PSPRECOMP_HLE_LOG=1` | Every firmware call, tagged with the calling thread, with arguments and result. The first thing to reach for. Unfilterable — see the volume note. |
+| `PSPRECOMP_HLE_TRACE=<name>` | Dumps the guest function trace at every call to that firmware function. Exact name match, not substring. Up to 512 lines per hit, so aim it at a call the histogram has already shown to be cold. Needs `TRACE=1`. |
+| `PSPRECOMP_WATCH=<hex addr>` | Argument registers on entry to one guest function, dereferencing the pointer-looking ones. Hooks `PSP_ENTER`, so it only ever fires on a **function entry**. Needs `TRACE=1`. |
+| `PSPRECOMP_REACHED=<hex>[,...]` | Whether control ever arrived at each address. Covers every **label**, not just entries — see below. Needs `TRACE=1`. |
+| `PSPRECOMP_SEMA=<substring>` | Narrates every wait, take and signal on matching semaphores, and unlocks the thread and signalled-uid censuses in the summary. Answers "is nobody signalling this, or is it signalled too early". See the volume note. |
+| `PSPRECOMP_FINDPTR=<hex>` | Every address in the loaded module holding that value as a word. For pointers that only exist once the PRX is relocated. |
 | `PSPRECOMP_PAD=start,cross` | Holds pad buttons for the run. There is no window and no gamepad. |
 | `PSPRECOMP_FRAME=<path>` | Where to write the frame. Defaults to `frame.ppm`, and dumps the GE's render target rather than the scanned-out buffer. |
-| `TRACE=1 ./scripts/04-emit-build.sh` | Rebuilds the generated C with function-entry tracing. Slow to build; needed by the watch and by any trace dump. |
+| `PSPRECOMP_MPEG_DECODE=1` | Turns on the demuxer and openh264 video path. Refused, loudly, in a build without openh264. |
+| `PSPRECOMP_MPEG=1` | Narrates the movie path. Everything it prints is throttled except `RingbufferPut`, which is bounded by the disc read — safe in either configuration. |
+| `PSPRECOMP_MPEG_DUMP=<path>` | The demuxed elementary stream, once it exceeds 1 MB. For checking against a decoder that is not ours. |
+| `PSPRECOMP_MPEG_FRAME=<path>`, `PSPRECOMP_MPEG_FRAME_NO=<n>` | One decoded frame as a PPM. |
+| `TRACE=1 ./scripts/04-emit-build.sh` | Rebuilds the generated C with tracing. Builds into `build/host-trace`, so it no longer destroys the plain build; `TRACE=1 ./scripts/06-boot.sh` runs it. |
 
 The boot summary also reports, without any flag: the firmware-call histogram,
-the GE state (framebuffer, texture, vertex type of geometry that actually
-*draws*), a VRAM survey of which 64K blocks hold data, and the live thread list
-with what each is parked on.
+the GE state, a VRAM survey, and the live thread list with what each is parked
+on.
 
-### Three ways to measure nothing
+### `PSPRECOMP_REACHED` is label-level, and the difference matters
 
-Each of these produced a confident number that meant nothing. All three were
-believed before they were checked.
+`PSP_MARK` is emitted only at **labels** — branch and jump targets, function
+entries, split entries, fall-through targets. A `jal` site or a store in the
+middle of a block is not a label and can never be marked, and
+`psp_trace_was_marked` only distinguishes the outside-the-module case (`-1`). An
+unlabelled in-module address returns 0, which reads as *not reached*.
+
+So map an address to its covering label before asking:
+
+```bash
+grep -o 'L_[0-9A-F]\{8\}: PSP_MARK' game/generated/aclr_funcs.c | sort -u
+```
+
+and take the greatest label ≤ it within the same function. Control reaching that
+label is control reaching the block the instruction sits in, which is the
+question worth asking anyway.
+
+### Output volume — two instruments can fill a disk
+
+`PSPRECOMP_SEMA=Movie` **with the decoder on** produced **2.5 GB of stderr in
+sixty seconds**: `Movie Start` is signalled ~258M times in that configuration
+and each one prints a line plus a trace dump. In the default configuration the
+same flag produces 115 lines. `PSPRECOMP_HLE_LOG` is unfilterable at two lines
+per call — 3.2 MB in the default configuration, and not usable at all with the
+decoder on.
+
+Both write to stderr, so they land wherever it is redirected. Send them to
+`reports/` and not to a scratch directory on tmpfs.
+
+### Four ways to measure nothing
+
+Each of these produced a confident number that meant nothing.
 
 - **A capped oracle run used to be positional.** `--limit` bounds *attempts*,
   and the old work-list walked `.text` from the bottom testing whatever the
-  dispatch table resolved — mostly interior labels. 5,000 attempts reached the
-  first ~256KB of 3.03MB, so two runs across an emitter change that reclaimed
-  171 functions produced **byte-identical output files**. Fixed since: the
-  work-list is the entry list and a capped run strides the whole module.
-- **Counting `UNBALANCED` log lines counts the print cap.** `psp_trace_sp`
-  stops at 24 sites, `psp_trace_sp_call` at 16, and both saturate here. The
-  boot summary reports the real totals now.
+  dispatch table resolved. 5,000 attempts reached the first ~256KB of 3.03MB, so
+  two runs across an emitter change that reclaimed 171 functions produced
+  **byte-identical output files**. Fixed since.
+- **Counting `UNBALANCED` log lines counts the print cap.** `psp_trace_sp` stops
+  at 24 sites, `psp_trace_sp_call` at 16, and both saturate here. The boot
+  summary reports the real totals now.
 - **The unbalanced-return total is not a before/after metric.** It counts
-  returns, so it tracks how many frame-loop iterations fit in the drain window.
-  Two runs of the *same* build differed by 5,688. Use distinct sites and leaks.
+  returns, so it tracks how many frame-loop iterations fit in the window. Two
+  runs of the *same* build differed by 5,688. Use distinct sites and leaks.
+- **Absence from a top-N list is not absence.** The firmware histogram prints
+  twelve entries. `47807ad` concluded "the decode loop never reaches the fetch"
+  because `sceMpegGetAvcAu` was not in it. It is called — twice in the default
+  configuration, and repeatedly with the decoder on. `sceKernelWaitEventFlag`
+  was declared never to appear at all, on the same evidence; it is called once.
+  The GE queue exhaustion hid in the same blind spot for the same reason. Grep
+  an `HLE_LOG` capture; do not read the histogram as a census.
 
 ### The trace ring is not a call stack
 
-It records function *entries in order*. A loop calling a four-function chain
-116 times looks identical in that output to 116-deep recursion. Counting
-entries says nothing about depth, and reading it as a stack cost three turns of
-wrong diagnoses on one fault.
+It records function *entries in order*. A loop calling a four-function chain 116
+times looks identical in that output to 116-deep recursion. Counting entries
+says nothing about depth, and reading it as a stack cost three turns of wrong
+diagnoses on one fault.
 
-**When the question is structural — how deep, who called whom — use gdb.** One
-backtrace settled what the ring could not:
+**When the question is structural — how deep, who called whom — use gdb.** For
+"did this ever run", use `PSPRECOMP_REACHED`, which is what replaced the
+breakpoint workflow.
 
 ```bash
 gdb -batch -ex "handle SIGSEGV stop nopass" -ex run -ex "bt 45" \
@@ -145,254 +250,139 @@ blockers were this exact shape: `sceIoGetstat`, `sceKernelVolatileMemLock`,
 `sceKernelWaitSemaCB`, and every one of sceMpeg's twenty-three.
 
 The corollary is that a call reporting success while writing nothing to its
-out-parameters is worse than one that fails honestly. When a game does
-something inexplicable, check what it was last told.
+out-parameters is worse than one that fails honestly. When a game does something
+inexplicable, check what it was last told.
+
+**The GE queue was the mirror image** and is worth holding alongside it: a call
+that fails *honestly*, every time, and is never looked at because no instrument
+reports failures it does not already expect.
 
 ## Ruled out — do not re-investigate
 
 - **`sceKernelDelayThread` causing the deadlock.** It yields, which leaves the
-  thread READY and always runnable. It cannot contribute to an all-blocked
-  state.
-- **Stack exhaustion in the MovieReadThread fault.** 64MB did not help; the
-  gdb backtrace showed a stack depth of three.
-- **The `$k0`/reent gap as the cause of an allocator failure.** Only twelve
-  sites in the whole 2.1M-line module read `r_k0`, and none are on that path.
+  thread READY and always runnable. It cannot contribute to an all-blocked state.
+- **Stack exhaustion in the MovieReadThread fault.** 64MB did not help; the gdb
+  backtrace showed a stack depth of three.
+- **The `$k0`/reent gap as the cause of an allocator failure.** Only twelve sites
+  in the whole 2.1M-line module read `r_k0`, and none are on that path.
 - **`psp_mem_ptr`'s bounds logic.** It was never wrong. The memory was being
   freed underneath it by the boot host's teardown.
-- **The GE block transfer as how textures arrive.** Implemented, and never
-  used — the command does not appear in the stream, and the game imports no
-  `sceDmac` either. How textures reach memory here is still unknown.
-- **`sceDisplayGetFramePerSec` as the reason the game draws nothing.** It was
-  28,470 of the 28,482 unimplemented calls in a run and returns a float on the
-  frame path, so a zero looked certain to poison the frame timing. Implemented:
+- **The GE block transfer as how textures arrive.** Implemented, and never used.
+  How textures reach memory here is still unknown — though the game now loads
+  153 CLUTs, so this is worth re-asking.
+- **`sceDisplayGetFramePerSec` as the reason the game draws nothing.** Implemented:
   the picture did not change by a single pixel.
-- **The `sceKernelWaitSema cannot be satisfied` report as a blocker.** It is
-  teardown noise *after* the 60s drain deadline — drain gives up, the main
-  context takes the token back, and the still-running thread's next wait then
-  finds main `RUNNING` rather than `READY`. It fires once, after the
-  `still running after 60s` line. Check the order before reading anything into
-  it; stderr is unbuffered and stdout is not, so the two interleave misleadingly
-  in a redirected log.
 - **Returning a clean end-of-stream from sceMpeg to end the movie.** The game
   already ends it. `SCE_MPEG_ERROR_INVALID_VALUE` makes the AU-fetch wrapper at
   `0x002750C0` print its own `Fatal Error!!!` and return 0; the caller's
-  `beql $v0, $zero` is then taken, sets the "movie done" flag at offset 746,
-  and proceeds into the teardown chain at `0x00273804` / `0x00273838` /
-  `0x0027394C`. `NO_DATA` would restore the fifteen-million-query spin — see
-  the header comment in `mpeg.c`, which has the guest disassembly. **The stall
-  is downstream, in the teardown, which never signals `Movie Sync`.**
-- **A deep or surprising call chain into the decode step.** gdb says it is flat:
-  `psp_func_002750C0` is called directly from `psp_body_00274398`
-  (MovieDecodeThread) and nothing else, every time. It runs **exactly 60 times**
-  in a 60-second run and then stops being called, while the thread stays alive
-  in the census — so it blocks rather than exits, and the loop terminating is
-  the thing to explain.
-- **A `SignalSema` on the semaphore SoundThread waits for.** Two independent
-  lines of evidence say the movie's sync semaphore is never signalled by
-  anything, anywhere. At run time the uid census records every uid ever passed
-  to `sceKernelSignalSema` and `Movie Sync` (`0x0004001C`) is not among them.
-  Statically, no instruction in the module loads offset 100 — where SoundThread
-  reads it — and reaches `SignalSema`; the offsets that do feed its `$a0` are
-  {0, 4, 8, 20, 40, 52, 128, 132, 140, 176, 396, 668}, and 100 is absent.
-
-  What the surrounding structure does say: `struct[88]` is a queue depth,
-  incremented by the producer at `0x00275770` and decremented by the consumer at
-  `0x00275844`, and **both of those signal `struct[96]`, not `struct[100]`**. So
-  the producer half of that queue is a path the game never reaches, rather than
-  a signal we are dropping.
+  `beql $v0, $zero` is then taken, sets the "movie done" flag at offset 746, and
+  proceeds into the teardown chain. `NO_DATA` would restore the spin — see the
+  header comment in `mpeg.c`.
+- **A `SignalSema` on the semaphore SoundThread waits for.** `Movie Sync sema`
+  (`0x0004001C`) is **NEVER SIGNALLED in either configuration** — confirmed
+  against the signalled-uid census, which records every uid ever passed to
+  `sceKernelSignalSema`. Statically, no instruction in the module loads offset
+  100 — where SoundThread reads it — and reaches `SignalSema`.
 - **A colour-conversion or decode-mode stage as the missing display step.** The
   game imports **none** of `sceMpegAvcDecodeMode`, `sceMpegAvcCsc`,
   `sceMpegAvcDecodeYCbCr`, `sceMpegAvcCopyYCbCr` or `sceMpegAvcQueryYCbCrSize`.
-  All 23 of its sceMpeg imports were identified by SHA-1 and they are the plain
-  path only — init, create, ring buffer, regist, the queries, `InitAu`,
-  `GetAvcAu`, `GetAtracAu`, `AvcDecode`, `AtracDecode`, `AvcDecodeStop`, delete,
-  finish. So `sceMpegAvcDecode` writing into the buffer the game passes **is**
-  the whole display mechanism, and registering `sceMpegAvcDecodeMode` would be
-  dead code.
-- **Skipping the intro movie with `PSPRECOMP_PAD`.** The game does read the
-  pad — holding `start,cross` visibly changes which threads park where — but
-  the skip path routes back into the movie subsystem rather than around it:
-  `0x40001` stops running the frame loop and waits on `Movie Start sema`
-  instead. The output is identical, 21 GE lists and 19 prims either way. Useful
-  negative result, because it also shows the movie machinery has **two** gates,
-  `Movie Start sema` and `Movie Sync sema`. Satisfying only the one the game
-  happens to be sitting on would move it to the other.
+  All 23 sceMpeg imports were identified by SHA-1 and they are the plain path
+  only. So `sceMpegAvcDecode` writing into the buffer the game passes **is** the
+  whole display mechanism.
+- **Skipping the intro movie with `PSPRECOMP_PAD`.** The game does read the pad,
+  but the skip path routes back into the movie subsystem rather than around it.
+  Useful negative result, because it shows the movie machinery has **two** gates,
+  `Movie Start sema` and `Movie Sync sema`. Satisfying only one moves it to the
+  other.
 - **The scheduler as the reason the game does not progress.** Measured three
-  ways: the current build, the scheduler with its token fix reverted, and the
-  fully original semantics. All three are functionally identical — same 19
-  prims, same 2,350,081 pixels, same five live threads, and `deadlock -- `
-  printed zero times in all three. The scheduler had a real bug (see the patch
-  series note below) and fixing it changed nothing the game does.
+  ways — current build, token fix reverted, fully original semantics — all
+  functionally identical, `deadlock --` printed zero times in all three.
+- **An HLE answer in the movie init chain being wrong.** Every firmware call
+  from `sceMpegInit` through `sceMpegQueryStreamSize` is answered correctly and
+  with real data. The one unimplemented call in the chain is
+  `sceUtilityLoadModule(PSP_MODULE_AV_MPEGBASE)` — NID `0x2A2B3DE0`, argument
+  `0x0303`, immediately before `sceMpegInit` — and it returns 0, which is what
+  hardware returns on success. The hypothesis that the circular wait is broken
+  on hardware by a differing firmware answer *in this chain* is not supported.
+
+### Retracted
+
+- **"The `sceKernelWaitSema cannot be satisfied` report is teardown noise."** It
+  was, once, when the run reached the 60-second drain first. Since `cb06a25` the
+  default configuration never reaches the drain, and this report is **the thing
+  that ends the run** — the last line printed, with no `still running after 60s`
+  anywhere before it. The old entry told the next reader to check the order and
+  then ignore it; the order check now returns the opposite answer.
+- **"The renderer is not the blocker."** See above. It was, and it was refusing
+  204 of 212 submissions.
+- **"Nothing in this chain is a psprecomp bug: every call behaves correctly."**
+  `sceGeListEnQueue` did not.
+- **"`0x0013B02C` is the target of no transfer at all and is probably a
+  pointer-scan artifact rather than live code."** It is live and it runs.
 
 ## Open work, in the order it is worth doing
 
-**This list is the source of truth.** It used to live only in an agent's task
-tracker, which does not survive a session — one session opened by reconstructing
-it from transcripts, and inherited a stale premise doing so. Anything worth
-picking up next session goes here, in the repository, with enough context to act
-on without the conversation that produced it.
+**This list is the source of truth.** Anything worth picking up next session goes
+here, in the repository, with enough context to act on without the conversation
+that produced it.
 
-1. **The movie decoder fills its frame queue and nothing drains it.** The decode
-   loop spins half a billion times a run without ever fetching an access unit,
-   and the branch that turns it back is two instructions before the fetch:
+1. **The picture does not reach the framebuffer.** *(default)* The GE now
+   executes 633 lists, 257 prims and a real swizzled CLUT8 texture, and the frame
+   is still a single flat `rgb(0, 32, 32)`. The strongest lead is in the summary:
+   **2,444 vertices in an unsupported format (transformed, or no position)**, up
+   from 24 before the queue fix. `read_vertex`/`vertex_layout` in `ge.c` decide
+   that. Second lead: the dump takes the GE's last render target, which may not
+   be the buffer the game intends to show — `frame:` reports which address it
+   used, and the VRAM survey shows which blocks hold data.
+
+2. **The movie's frame queue fills and its drain is never reached.** *(decoder)*
+   The decode loop does fetch — `GetAvcAu -> frame 1, 2, 3` with `AvcDecode …
+   ready=1` — and then stops, because the game's own frame counter `struct[168]`
+   reaches capacity `struct[172]` and the guard two instructions before the fetch
+   turns it back:
 
    ```
    0027516C  lw   $a0, 172($s0)      queue capacity
    00275170  lw   $a1, 168($s0)      frames outstanding
    00275174  subu $a0, $a0, $a1
    00275178  blez $a0, 0x00275268    full -> return 1, go round again
-   00275198  jal  sceMpegGetAvcAu    never reached
    ```
 
-   `struct[168]` is incremented on every successful decode at `0x00275250` and
-   decremented in exactly one place, `0x00273E7C` inside `psp_func_00273E30`,
-   which then signals Movie Lock. That function is reached from MovieDecodeThread's
-   *teardown* loop at `0x00274410` — not its playback loop — and from a wrapper
-   at `0x00273A50` whose single caller is `psp_body_002729C0`, on the display
-   side. So during playback the counter only ever climbs.
+   `struct[168]` is decremented in exactly one place, `0x00273E7C` inside
+   `psp_func_00273E30` — the drain. **Measured with `PSPRECOMP_REACHED`,
+   default configuration:**
 
-   The decoder is not starved and the semaphores are not stuck. The consumer
-   simply never runs, so the queue reaches capacity and stays there.
+   | address | what it is | result |
+   |---|---|---|
+   | `0x00272578` | block holding the `jal` at `0x00272608` | **reached** |
+   | `0x00273334` | the `flag741` initialiser, and the store at `0x002733A4` | **reached** |
+   | `0x00275864` | the enqueue wrapper | **reached** |
+   | `0x00275744` | block covering the producer at `0x00275770` | not reached |
+   | `0x00273E30` | the drain | not reached |
+   | `0x0018BDB0` | the drain's caller, and the call site `0x0018BE48` | not reached |
+   | `0x0013B02C` | block covering the call site `0x0013B040` | **reached** |
+   | `0x00272278` | `psp_body_00272278` | not reached |
 
-   The consumer's callers are ordinary `jal` sites, and **none of them ever
-   runs**. Breakpoints on `psp_func_0018BDB0`, `psp_func_00272278` and
-   `psp_func_00273E30` — the drain itself — are hit zero times in a full run.
+   This corrects the previous account in three places. **`flag741` is set** — the
+   initialiser runs, and the store is inside its entry block. **The enqueue
+   wrapper runs**, so the byte-flag gate at `0x00275140` passes. And
+   `0x0013B02C`, previously written off as a pointer-scan artifact, is live.
 
-   The chain above the drain is `psp_body_002729C0` ← `0x00272264` / `0x00272280`
-   in `psp_body_00272224` / `psp_body_00272278` ← `0x0013B040` / `0x0018BE48`.
-   `0x0013B02C` is the target of no transfer at all and is probably a
-   pointer-scan artifact rather than live code; `0x0018BDB0` is called from
-   `0x001B1770` and `0x001B8BA4`, and both guard on a null field before
-   reaching the drain.
+   The live question is now much narrower: **`0x00275864` runs but the producer
+   at `0x00275770` does not**, so something inside the wrapper guards the call.
+   Disassemble `0x00275864` and find the guard. That is one function, not a
+   call graph.
 
-   The drain methods themselves live in the movie's own range, but the calls
-   that reach them come from `0x0013B040` and `0x0018BE48`, in the game's update
-   code — and that code never runs. Breakpoints confirm it: `psp_func_001B134C`
-   and `psp_func_0027ECD4` are hit zero times, while `user_main`
-   (`0x00253324`) is entered exactly once and then blocks in
-   `sceKernelWaitThreadEnd` for thread `0x40001`, the movie controller.
+3. **The two composed-chain oracle divergences.** Each callee agrees in
+   isolation; the disagreement only appears in the chain. Needs instruction-level
+   trace diffing, not another hypothesis — which means giving the recompiled side
+   a per-instruction register dump to match `allegrexrecomp interp --regs`.
 
-   So the game cannot proceed until the movie thread ends; the movie cannot end
-   until its frame queue drains; and the drain is only called from code that
-   runs once the game has proceeded. Whatever breaks that on hardware, we are
-   not providing it — and it is not reachable from inside sceMpeg.
-
-   The display side never gets far enough to dispatch it. SoundThread wakes on
-   Movie Sync and then guards on two fields before doing anything:
-
-   ```
-   0027597C  lw    $a1, 72($s1)
-   00275984  sltiu $a1, $a1, 1        struct[72] == 1 ?
-   0027598C  bne   $a1, $zero, ...    yes -> away
-   00275990  lw    $a0, 88($s1)
-   00275994  blez  $a0, 0x00275A24    depth <= 0 -> straight back to the wait
-   0027599C  jal   0x002732C8         sceKernelWaitEventFlag -- never reached
-   ```
-
-   `sceKernelWaitEventFlag` does not appear in the firmware histogram at all, so
-   that guard is what turns it back: `struct[88]`, the display queue depth, is
-   zero. **Two different counters are involved and only one of them moves.** The
-   decode loop is held up by `struct[168]` reaching `struct[172]`, while the
-   depth the display waits on is never incremented — the producer that would do
-   it, at `0x00275770`, is not being reached either.
-
-   That producer has exactly one caller, `0x00275864`, which the decode step
-   calls only when a byte flag is set:
-
-   ```
-   00275140  lbu $a0, 741($s0)
-   00275144  beq $a0, $zero, 0x00275164   flag clear -> skip the enqueue
-   0027514C  jal 0x00275864               only reached when it is set
-   ```
-
-   `flag741` is set to 1 by an initialiser at `0x002733A4`, inside
-   `psp_body_00273334`, which is called by `jal` from `0x00272608`.
-
-   So the whole chain is ordinary calls, and the live question is which of these
-   callers runs and which does not — not how they are reached.
-
-1. **The game never leaves its intro-movie state.** It is not stuck; it
-   repeats — ~2.3M frame presents against 21 GE lists for the whole run. The
-   blocked-thread dump now names the object, and that settles it:
-
-   ```
-   uid 0x00040021  entry 0x0027594C  prio 16  blocked on sceKernelWaitSema(Movie Sync sema)
-   ```
-
-   Nothing signals it. The movie *teardown* has been walked and it runs to
-   completion — `0x00273804` signals `Movie Start`, `0x00273838` reaches
-   `sceMpegAvcDecodeStop` (implemented, returns OK), and `0x00274420` marks the
-   movie stopped with `struct[140] = 2`. Confirmed against the trace ring, not
-   inferred. Nothing in that chain touches `Movie Sync`, and the one teardown
-   step that would wait on a semaphore, `0x0027394C`, is skipped.
-
-   So the game's *failure* path stops the movie cleanly by its own lights and
-   leaves the frame consumer parked forever. That thread is woken by the frame
-   producer, and at shutdown by whatever sets its quit flag — neither happens
-   here. Nothing in this chain is a psprecomp bug: every call behaves correctly.
-   We are driving the game down an error path its authors never expected to be
-   taken, because on hardware `sceMpegGetAvcAu` does not fail.
-
-   Which makes the choice explicit, and it is a real fork: make the game take
-   its *normal* completion path (sceMpeg succeeding and reporting the stream
-   ending), decode for real, or find another way past. The pad is already ruled
-   out.
-
-   `sceDisplayGetFramePerSec` was the obvious suspect and is **not** the cause:
-   28,470 of the run's 28,482 unimplemented calls, returning zero on the frame
-   path, and implementing it changed nothing at all. It is implemented anyway;
-   unimplemented calls are down to 12, all cold.
-2. **Shared epilogues split into pseudo-functions.** Partly fixed; the
-   remainder is below. What the `$sp` reports are really about, now that the
-   instrument can say so:
-
-   There are **zero** stack leaks. Every imbalance is a *positive* delta, which
+4. **Shared epilogues split into pseudo-functions — the remainder.** There are
+   **zero** stack leaks; every imbalance is a *positive* delta, which
    `psp_trace_sp` identifies as a continuation holding an epilogue without its
-   matching prologue — an artifact of discovery, not corruption. The reported
-   address is the **return instruction**, not the function, so the list is of
-   return sites and one function with two returns appears twice.
-
-   Two of the six hot sites were a single shared epilogue at
-   `0x002B5884`–`0x002B5898` cut into pieces. Neither merge site could see it:
-   both fire on a *transfer* into a claimed block, and this arrives by
-   **fall-through**, which broke the walk silently. Merging on fall-through —
-   both into an unwalked soft entry and into an already-claimed block — took it
-   from 52 sites / 7.0M returns to **50 sites / 4.5M returns**.
-
-   Seed provenance (soft/hard) landed with it and is correct — a pointer guess
-   should not veto a merge — but be clear that on its own it changed **nothing**
-   measurable: same 52 sites, same addresses, same deltas.
-
-   **The rest was an emitter bug, now fixed.** A gdb backtrace found it:
-
-   ```
-   #0  psp_at_002B57E4      <- label thunk
-   #1  psp_body_002B5784    <- called from itself
-   #2  psp_func_002B5784
-   ```
-
-   The body contains `psp_dispatch(r_a2)`, the lowering of a guest `jr $a2`,
-   and at run time `r_a2` is `0x002B57E4` — a label *inside that same
-   function*, already in its own entry switch. Dispatch resolves it to a thunk
-   that calls the body afresh, so a computed jump within a function re-enters
-   it as a call instead of jumping to its label. The re-entry runs
-   `PSP_SP_ENTER()` with the frame already allocated, then hits the shared
-   epilogue and releases 16 — which is every `+16` in the report, and why the
-   leak count is zero.
-
-   A computed jump now re-enters the body's own `switch (_entry)` when the
-   target is one of this function's labels, and only falls back to
-   `psp_dispatch` for a genuine cross-function transfer.
-
-   The last of it was the same thing one level up: **a switch case belongs to
-   the function whose `jr` selects it**, and nothing could establish that. The
-   walk stops dead at a computed jump, so the owning function never reaches its
-   own cases; the cases surface later when the table is resolved, are walked as
-   functions, and no branch, jump or fall-through ever connects them back.
-   Every other merge is the walk noticing a collision — this one has to be
-   stated outright, against final ownership. Only soft targets are folded, so a
-   table of genuine handlers (whose entries are `jal` targets, hence hard) is
-   untouched.
+   matching prologue. The reported address is the **return instruction**, not the
+   function.
 
    ```
    session start                    52 sites   7,067,959 returns
@@ -401,58 +391,60 @@ on without the conversation that produced it.
    switch cases join their function 36             1,159
    ```
 
-   Zero leaks at every step — that was never the problem. `entry`, `bad mem`,
-   `disc read` and `pixels` are unchanged throughout, and the oracle holds at
-   2 divergences with **dispatch miss 0**, which is the number that would report
-   a `jr` whose target stopped resolving.
+   Confirmed on a fresh `TRACE` build: **36 sites, 1,159 unbalanced returns, 0
+   leaks**, the hottest at 85 hits. Worth restating that the previous
+   `build/host-trace` was two days stale when these were last quoted, so this is
+   the first genuine re-verification. Nothing in it is hot and none of it is a
+   leak.
 
-   What is left is 36 sites of 85 hits or fewer, ~1,200 in total. Nothing in it
-   is hot, and none of it is a leak.
-3. **The two composed-chain oracle divergences.** Each callee agrees in
-   isolation; the disagreement only appears in the chain. Needs
-   instruction-level trace diffing, not another hypothesis — which means giving
-   the recompiled side a per-instruction register dump to match
-   `allegrexrecomp interp --regs`.
-4. **The guest's panic message.** The abort chain is `sceKernelStdout` ->
-   `sceIoWrite` -> `abort()`, but no text reaches stderr. Worth having before
-   the HLE push, for the same reason as the 0-is-OK pattern above.
-5. **`$k0` thread control block and reent.** Bring-up completeness, not a live
+5. **The guest's panic message.** The abort chain is `sceKernelStdout` ->
+   `sceIoWrite` -> `abort()`. Partly solved — the `Fatal Error!!!` text does reach
+   stderr now — but it interleaves badly with stdout.
+
+6. **`$k0` thread control block and reent.** Bring-up completeness, not a live
    blocker — only twelve sites in the whole module read `r_k0`.
 
 ### Two measurements worth taking before building further
 
-Neither is on the critical path today, and both could redirect months of work:
-
-- **What the rasterizer costs on a real scene.** Everything from here — texturing,
-  blending, lighting — is built on the software rasterizer. If a mid-poly frame
-  costs tens of milliseconds, the GE needs GPU-backed display-list translation
-  instead, and that is a rewrite of whatever is stacked on top by then. Capture
-  one real display list and time it.
+- **What the rasterizer costs on a real scene.** Now urgent rather than
+  hypothetical: the GE went from 1,900 commands to 106,108 in one fix, and
+  everything from here — texturing, blending, lighting — is built on the software
+  rasterizer. If a real frame costs tens of milliseconds, the GE needs GPU-backed
+  display-list translation instead, and that is a rewrite of whatever is stacked
+  on top by then.
 - **A behavioural oracle.** The differential oracle validates *translation*, and
   everything left is *environment* — the HLE, the scheduler, save data. Anything
   missing from the execution environment is missing from both sides and agrees
   perfectly, so the current instrument is structurally blind to exactly the work
-  that remains. `pspautotests` are small PSP programs with real-hardware expected
-  output; run through both the interpreter and the recompiled module they give
-  ground truth where the oracle cannot.
+  that remains. The GE queue bug is the proof: the oracle held at 3110/3108/2
+  throughout, because both sides called the same broken runtime. `pspautotests`
+  are small PSP programs with real-hardware expected output.
 
 ## The patch series
 
 Everything upstream-able lives in `patches/`, applied to the `tools/psprecomp`
 submodule by `scripts/build-tools.sh`. After changing anything under
-`tools/psprecomp`, regenerate the affected patch and check the whole series
-still applies to a pristine checkout **and builds green there** — a stale build
+`tools/psprecomp`, regenerate the affected patch and check the whole series still
+applies to a pristine checkout **and builds green there** — a stale build
 directory will happily report 12/12 for code you did not build.
 
-Regenerating a patch in the middle of the series has two traps. Files a patch
-*creates* are untracked in the submodule, so a plain `git diff` cannot see them
-and silently produces a patch with the file missing — `git add -N` first. And a
-patch must be diffed against the state *after* its predecessors, not against
-pristine HEAD, or it will clobber their hunks in a shared file. The recipe:
-clone the submodule, apply `0001`..`N-1`, commit that as a baseline, apply the
-old `N`, fold the new change in, and diff.
+Regenerating a patch in the middle of the series has two traps, and the first one
+is not hypothetical — it fired again this session:
 
-The check that actually proves it is not `ctest` but a tree diff: apply the
-whole series to a pristine checkout and compare every file the series owns
-against the working tree. Byte-identical is the bar. Green tests only
+- **Files a patch *creates* are untracked in the submodule**, so a plain
+  `git diff` cannot see them and silently produces a patch with the file missing.
+  Regenerating `0018` this way produced a **zero-line patch** and reported
+  success. `git add -N` the file first.
+- **A patch must be diffed against the state *after* its predecessors**, not
+  against pristine HEAD, or it will clobber their hunks in a shared file. The
+  recipe: clone the submodule, apply `0001`..`N-1`, commit that as a baseline,
+  apply the old `N`, fold the new change in, and diff.
+
+**Prefer appending a new patch to regenerating a middle one.** A change to a
+region no existing patch owns — as the GE queue fix was — costs nothing to add at
+the end and avoids both traps entirely.
+
+The check that actually proves it is not `ctest` but a tree diff: apply the whole
+series to a pristine checkout and compare every file the series owns against the
+working tree. **Byte-identical across all 40 files is the bar.** Green tests only
 approximate it.
