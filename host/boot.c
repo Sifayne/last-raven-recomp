@@ -157,6 +157,29 @@ static void watch_hit(uint32_t addr) {
  * not there, or it is somewhere else -- and guessing between them has already
  * cost more than measuring would have. This walks VRAM in 64K blocks and says
  * which ones are non-zero, so the answer is visible rather than inferred. */
+/* PSPRECOMP_FINDPTR=<hex> reports every address in the loaded module holding
+ * that value as a 32-bit word.
+ *
+ * A relocatable PRX writes its function-pointer tables at load time, so a
+ * vtable entry does not exist in the file on disk -- searching the ELF for it
+ * finds nothing, which reads as "nothing references this" when the truth is the
+ * opposite. This searches the image the loader actually produced.
+ *
+ * The question it answers keeps coming up: a function that no `jal` targets is
+ * reached through a pointer, and the only way to find out which object owns it
+ * is to find where the pointer is stored. */
+static void find_pointer(uint32_t lo, uint32_t size) {
+    const char *v = getenv("PSPRECOMP_FINDPTR");
+    if (!v || !*v) return;
+    const uint32_t want = (uint32_t)strtoul(v, NULL, 0);
+    printf("findptr:  0x%08X stored at:", want);
+    int n = 0;
+    for (uint32_t a = lo; a + 4 <= lo + size; a += 4)
+        if (psp_read32(a) == want && n < 24) { printf(" 0x%08X", a); n++; }
+    if (!n) printf(" nowhere");
+    printf("\n");
+}
+
 static void survey_vram(void) {
     enum { BLOCK = 0x10000 };
     printf("vram:     ");
@@ -496,6 +519,7 @@ int main(int argc, char **argv) {
         }
     }
     psp_ge_dump_stats(stdout);
+    find_pointer(li.lo, li.hi - li.lo);
     survey_vram();
     dump_framebuffer();
     if (getenv("PSPRECOMP_SEMA")) {
