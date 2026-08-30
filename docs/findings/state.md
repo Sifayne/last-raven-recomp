@@ -176,7 +176,8 @@ All are off by default and cost nothing when off.
 | `PSPRECOMP_REACHED=<hex>[,...]` | Whether control ever arrived at each address. Covers every **label**, not just entries — see below. Needs `TRACE=1`. |
 | `PSPRECOMP_SEMA=<substring>` | Narrates every wait, take and signal on matching semaphores, and unlocks the thread and signalled-uid censuses in the summary. See the volume note. |
 | `PSPRECOMP_TEXDUMP=<path>` | Every distinct texture the game binds, decoded through the renderer's own sampler, as `<path>-NN.ppm`. Separates "the sampler reads wrong texels" from "the texture is not what we think", which look identical on screen. |
-| `PSPRECOMP_FINDPTR=<hex>` | Every address in the loaded module holding that value as a word. For pointers that only exist once the PRX is relocated. |
+| `PSPRECOMP_FINDPTR=<hex>` | Every address in the module, RAM and VRAM holding that value as a word, tagged by region. For pointers that only exist once the PRX is relocated — and for tracking a value's *identity* rather than one of its addresses. |
+| `PSPRECOMP_PEEK=<hex>[,...]` | The word and the byte at each address when the run stops. Answers "what is this field", where FINDPTR answers "where is this value". |
 | `PSPRECOMP_PAD=start,cross` | Holds pad buttons for the run. There is no window and no gamepad. |
 | `PSPRECOMP_FRAME=<path>` | Where to write the frame. Defaults to `frame.ppm`, and dumps the GE's render target rather than the scanned-out buffer. |
 | `PSPRECOMP_MPEG_DECODE=1` | Demuxer and openh264 video path. Refused, loudly, in a build without openh264. |
@@ -488,10 +489,55 @@ that produced it.
    | `0x00273A50`, the drain's wrapper | no |
    | `0x00273E30`, the drain | no |
 
-   `0x00272DA0` is the **only** `jal` to the wrapper in the whole module. So the
-   question is now one guard inside one function that is known to run: what in
-   `psp_body_002729C0` decides not to reach `0x00272D8C`. That is a much smaller
-   question than "who signals this semaphore", which is where this item started.
+   `0x00272DA0` is the **only** `jal` to the wrapper in the whole module.
+
+   ### The guard, and why it is a race rather than a condition
+
+   `psp_body_002729C0` is the movie's display update. Its second instruction
+   loads the object and its body is gated on one call:
+
+   ```
+   00272A2C  lw   $a0, 0($s5)
+   00272A30  jal  0x0027399C
+   00272A44  or   $s0, $v0, $zero
+   00272A58  beq  $s0, $zero, 0x00272DB0   ; 0 -> skip the body, drain included
+   ```
+
+   `psp_func_0027399C` returns 0 on either of two fields being zero:
+
+   ```
+   0027399C  lbu $a1, 740($a0)      ; flag740
+   002739A0  beq $a1, $zero, ...    -> return 0
+   002739A8  lw  $a1, 156($a0)
+   002739AC  beq $a1, $zero, ...    -> return 0
+   ```
+
+   Both branches share an exit, so reachability cannot say which fired — it
+   only says the function **always** leaves by `0x002739C8`, the `return 0`
+   path, and never reaches the checks beyond. `PSPRECOMP_PEEK` answers it
+   directly, and the answer is that **neither field is zero**:
+
+   ```
+   peek: 0x08D3EC64  byte 0x01     context + 740 (flag740)
+   peek: 0x08D3EA1C  word 0x01     context + 156
+   ```
+
+   `PSPRECOMP_WATCH` on `0x0027399C` fires **once**, with
+   `a0 = 0x08D3E980` — the MPEG context itself.
+
+   **So this is not a condition that is false, it is a poll that happens too
+   early.** The display update is called once, before the movie has set
+   `flag740` (the only write of 1 is at `0x00274FF4`, in a block that *is*
+   reached), sees a zero, skips its body, and is never called again. The drain
+   inside it therefore never runs, `Movie Sync` is never signalled, SoundThread
+   never wakes, the movie never ends, and `user_main` — which is parked in
+   `sceKernelWaitThreadEnd` on the movie controller — never runs the update
+   loop that would poll it a second time.
+
+   That is the deadlock, stated precisely: **the game polls the movie once from
+   an update loop that only runs again after the movie finishes.** On hardware
+   that update loop keeps running, which is the environment difference to hunt
+   next — not a missing signal, and not a wrong HLE return.
 
    The chain below it is now measured rather than inferred. `0x00275864` is the
    *audio* pump; the strings its error path prints identify `0x002E4928` as
