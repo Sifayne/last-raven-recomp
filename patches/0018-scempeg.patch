@@ -1,9 +1,9 @@
 diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
 new file mode 100644
-index 0000000..cf134b8
+index 0000000..748fafd
 --- /dev/null
 +++ b/src/hle/mpeg.c
-@@ -0,0 +1,971 @@
+@@ -0,0 +1,979 @@
 +/* psprecomp — sceMpeg.
 + *
 + * ## What this is, and what it is not
@@ -266,6 +266,7 @@ index 0000000..cf134b8
 +}
 +
 +static int mpeg_decoding(void);
++static int mpeg_logging(void);
 +static mpeg_ctx *ctx_for_ringbuffer(uint32_t rb);
 +
 +/* Free packets.
@@ -291,6 +292,13 @@ index 0000000..cf134b8
 +            const size_t pending = c->es_len > c->es_pos ? c->es_len - c->es_pos : 0;
 +            uint32_t held = (uint32_t)(pending / pkt_size);
 +            if (held > packets) held = packets;
++            if (mpeg_logging()) {
++                static int said;
++                if (held == 0 && said++ < 5)
++                    fprintf(stderr, "mpeg: AvailableSize reports ALL %u free "
++                            "(es_len=%zu es_pos=%zu pending=%zu pkt=%u)\n",
++                            packets, c->es_len, c->es_pos, pending, pkt_size);
++            }
 +            psp_ret(packets - held);
 +            return;
 +        }
