@@ -278,6 +278,23 @@ on without the conversation that produced it.
    depth the display waits on is never incremented — the producer that would do
    it, at `0x00275770`, is not being reached either.
 
+   That producer has exactly one caller, `0x00275864`, which the decode step
+   calls only when a byte flag is set:
+
+   ```
+   00275140  lbu $a0, 741($s0)
+   00275144  beq $a0, $zero, 0x00275164   flag clear -> skip the enqueue
+   0027514C  jal 0x00275864               only reached when it is set
+   ```
+
+   `flag741` is set to 1 by an initialiser at `0x002733A4`, inside
+   `psp_body_00273334` — **which no `jal` in the module targets**. Like the drain
+   path, it is reached only through a function pointer.
+
+   So the same answer arrives from both ends: the movie's display object has its
+   initialiser, its enqueue gate and its drain all behind virtual dispatch, and
+   nothing is driving that object. That is one question, not three.
+
 1. **The game never leaves its intro-movie state.** It is not stuck; it
    repeats — ~2.3M frame presents against 21 GE lists for the whole run. The
    blocked-thread dump now names the object, and that settles it:
