@@ -38,12 +38,19 @@ entry:     returned
 threads:   stopped by the host (sceKernelWaitSema)
 bad mem:   0 accesses
 disc read: 1,912,832 bytes
-pixels:    33,423,361 drawn by the rasterizer
+pixels:    73,854,102 drawn by the rasterizer (2,086,960 textured, rest flat)
 GE: 633 lists, 106,108 commands, 212 finishes
-    texture 512x64 stride 352, clut8, modulate, swizzled  (153 clut loads)
-    drawn   257 prims, 2,958 vertices, 611 triangle-strips, 257 sprites
-    2,444 vertices in an unsupported format (transformed, or no position)
+    texture 0x09170080 512x64 stride 352, clut8, modulate, swizzled (153 clut loads)
+    drawn   868 prims, 2,958 vertices, 611 triangle-strips, 257 sprites
+    depth: test on func 7, write on          clear-mode draws: 211 (211 clearing depth)
+    blend on (src 2 dst 3 eq 0), alpha test on func 7 ref 1:
+        44,737,298 blended, 826,728 alpha-killed
+    transformed 2,444 vertices; viewport scale 240,-136 centre 2048,2048 offset 1808,1912
+    draws: 2d 0 textured / 257 flat, 3d 152 textured / 459 flat
 ```
+
+The 2D sprites drawing untextured is correct: their vertex type carries no
+texture coordinates at all.
 
 `sceDisplaySetFrameBuf` is called **422** times and the run ends in seconds. The
 sequence into the stop, from the HLE log:
@@ -81,14 +88,10 @@ reports nothing free.
 **`Movie Sync` receives zero signals in this configuration too.** An earlier
 summary claimed both never-signalled semaphores now fire; only Movie Start does.
 
-### The picture is still one flat colour, and that is now a different problem
+### The picture
 
-The frame dumps as a single `rgb(0, 32, 32)` across all 130,560 pixels. It used
-to be a single white, from nineteen untextured full-screen clears. It is no
-longer that: real geometry with a real swizzled CLUT8 texture and 153 palette
-loads now reaches the rasterizer. Something between "the GE executes the list"
-and "the framebuffer holds a picture" is still wrong, and the **2,444 vertices
-in an unsupported format** are the first place to look.
+The FromSoftware logo renders, cleanly. See open item 0 for how, and for the
+three instruments that had to be corrected before it could be seen at all.
 
 ### The renderer *was* the blocker, and this document said it was not
 
