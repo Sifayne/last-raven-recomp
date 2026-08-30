@@ -1,9 +1,9 @@
 diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
 new file mode 100644
-index 0000000..7fd20ef
+index 0000000..cf134b8
 --- /dev/null
 +++ b/src/hle/mpeg.c
-@@ -0,0 +1,956 @@
+@@ -0,0 +1,971 @@
 +/* psprecomp — sceMpeg.
 + *
 + * ## What this is, and what it is not
@@ -68,6 +68,8 @@ index 0000000..7fd20ef
 +#define MPEG_AVC_ES_SIZE        2048
 +#define MPEG_ATRAC_ES_SIZE      2112
 +#define MPEG_ATRAC_ES_OUT_SIZE  8192
++/* 90000 * 2048 / 44100: one ATRAC3+ frame, in PSP's 90kHz timestamp units. */
++#define MPEG_ATRAC_PTS_STEP     4180u
 +#define MPEG_RINGBUFFER_PACKET  (104 + 2048)  /* __MpegRingbufferQueryMemSize */
 +
 +#define PSMF_MAGIC              0x464D5350u  /* "PSMF" */
@@ -134,6 +136,7 @@ index 0000000..7fd20ef
 +    int      pic_w, pic_h;
 +    int      pic_ready;
 +    uint32_t pts;          /* 90kHz, derived from the frame number */
++    uint32_t atrac_pts;    /* 90kHz, advancing at the audio rate -- see below */
 +} mpeg_ctx;
 +
 +static mpeg_ctx g_mpeg[MAX_MPEG];
@@ -817,14 +820,26 @@ index 0000000..7fd20ef
 +        psp_ret(SCE_MPEG_ERROR_INVALID_VALUE);
 +        return;
 +    }
++    /* The audio timestamp has to move on its own.
++     *
++     * It was pinned to the video frame, which makes it stand still whenever no
++     * picture was produced -- and a player that syncs video to an audio clock
++     * then has a clock that does not run. The thread parked on Movie Sync is
++     * called SoundThread, so this is the clock it is waiting on.
++     *
++     * One ATRAC3+ frame is 2048 samples at 44.1kHz and PSP timestamps are
++     * 90kHz, so each access unit is worth 90000 * 2048 / 44100 ticks. Advancing
++     * by that is what the audio would do if it were really being decoded, which
++     * is the part that has to be true even though the samples are silence. */
 +    const uint32_t au = psp_arg(2);
 +    if (au) {
-+        psp_write32(au + AU_PTS,     c->pts);
++        psp_write32(au + AU_PTS,     c->atrac_pts);
 +        psp_write32(au + AU_PTS + 4, 0);
-+        psp_write32(au + AU_DTS,     c->pts);
++        psp_write32(au + AU_DTS,     c->atrac_pts);
 +        psp_write32(au + AU_DTS + 4, 0);
 +        psp_write32(au + AU_ES_SIZE, MPEG_ATRAC_ES_SIZE);
 +    }
++    c->atrac_pts += MPEG_ATRAC_PTS_STEP;
 +    psp_ret(SCE_KERNEL_ERROR_OK);
 +}
 +/* sceMpegAvcDecode(mpeg, au, frameWidth, bufferAddr, initAddr)
