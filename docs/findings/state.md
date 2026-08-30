@@ -18,7 +18,7 @@ all session now are.
 
 ```
 entry:     returned
-threads:   still alive
+threads:   all finished
 bad mem:   0 accesses
 disc read: 1,912,832 bytes
 pixels:    2,350,081 drawn by the rasterizer
@@ -48,10 +48,14 @@ priority 16 therefore starves its own priority-17 and -18 workers forever, and
 they show up in the thread list as **ready, not blocked**: not waiting for
 anything, simply never chosen.
 
-That is what `sceKernelDelayThread` had been doing. It uses `psp_sched_delay`
-now, which makes the caller ineligible for one round so anything runnable can
-win, then becomes ready again. The duration still cannot be honoured — there is
-no clock — but the ineligibility is the half that matters.
+That is what `sceKernelDelayThread` had been doing. Standing aside for a single
+round was not enough either: this game runs *two* threads at priority 16, so
+when one gave way the handoff picked the other and they passed the CPU back and
+forth while 17 and 18 still starved. `psp_sched_delay` therefore sleeps until a
+deadline — the slot is marked `SLEEPING` with `now + usec`, `handoff_locked`
+wakes expired sleepers before choosing, and when nothing is runnable but
+something sleeps it advances the clock to the earliest deadline rather than
+hanging. The duration is honoured; only its relation to wall time is not.
 
 **Ready-but-never-running is the signature.** A thread parked on something names
 what it waits for; a starved one names nothing, which reads like an idle thread
