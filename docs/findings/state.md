@@ -390,6 +390,20 @@ that produced it.
    is an **alpha mask**: white throughout, letterforms in the alpha channel, cut
    out by the blend. Its RGB dump being uniformly white is correct.
 
+   **The intro movie plays.** With `PSPRECOMP_MPEG_DECODE=1` and patch `0030`'s
+   clock fix, the decoder run reaches 13,064 GE lists and 1.7 billion pixels,
+   and the frames are the real intro — ruined cityscapes, mechs, a lit sensor
+   eye, weapon fire.
+
+   A single frame looked washed out, which reads as a colour-range or blend
+   fault. **It is not one.** `PSPRECOMP_FRAMES=<prefix>` dumps every Nth
+   presented frame; across 215 of them the mean brightness sits between 49 and
+   101 of 255 and touches 218 exactly once, at the shot that had been picked.
+   The best-frame heuristic ranks by variation, which is right for "is there a
+   picture" and biased towards precisely the bright high-contrast frame a
+   wash-out would also produce — **one sample cannot separate those**, and
+   reaching for the sequence is what settled it in one run.
+
    **What is left:** perspective-correct interpolation is absent (affine only,
    exact on a fullscreen quad), and there is no clipper.
 
