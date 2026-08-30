@@ -407,7 +407,137 @@ that produced it.
    wash-out would also produce — **one sample cannot separate those**, and
    reaching for the sequence is what settled it in one run.
 
-   **What is left:** perspective-correct interpolation is absent (affine only,
+   **The logo is 68px left of where it belongs, and the cause is upstream of
+   the GE.** A reference render (PPSSPP) puts the glyphs at x 69..420, y
+   119..147. Ours land at x 1..349, y 118..148 — **the y position and the width
+   match**, and only x is short, by exactly 68.
+
+   Everything the GE is given has been verified byte-for-byte:
+
+   - the vertex layout — raw bytes `00000000 00000000 808080FF 00000000...`,
+     stride 24, UV at 0, colour at 8, position at 12, model v0 = (0,0,0);
+   - the viewport and offset — scale 240,-136, centre 2048,2048, offset
+     1808,1912, **identical** to the fullscreen quads that land correctly;
+   - the view matrix (identity) and the projection (plain ortho, 0..480 → screen
+     1:1, so screen x equals model x).
+
+   The world matrix arrives as `1,0,0 | 0,1,0 | 0,68,1 | 0,117,0`. Under the
+   layout `sceGuSetMatrix` uses — a column-major 4x4 with the last row dropped —
+   translation is the last group, `(0,117,0)`. The y is right and there is no x.
+   **No reading of that matrix can put 68 into x**: with the vertices' z at 0 it
+   can only ever affect y.
+
+   And the game's own data says x should be 68. At `0x09ACE27C`:
+
+   ```
+   0.0   352.0   38.0   68.0   117.0   1.0   1.0
+         width   height  x      y      scale
+   ```
+
+   The uploader is `psp_func_002B752C`, which packs 24-bit floats with `lwr` at
+   offsets 4k+1 — `lui $t, 0x3B00` then `lwr $t, 1($a2)` — reading elements
+   0,1,2, 4,5,6, 8,9,10, 12,13,14. So DATA word 7 is element **m[9]** and word 9
+   is **m[12]**. Word 7 carried `0x428800` (68.0) and word 9 carried zero, which
+   says directly that the source matrix has the x translation in `m[9]` —
+   col2's y — instead of `m[12]`.
+
+   `lwr` itself is fine: it yields exact floats (1.0 -> `0x3F8000`, 68.0 ->
+   `0x428800`). And the source matrix has now been read directly at upload time:
+
+   ```
+   | 1  0  0  0 | 0  1  0  0 | 0  68  1  0 | 0  117  0  1 |
+   ```
+
+   `m[9] = 68`, `m[13] = 117`. So the **matrix is already wrong in the game's own
+   memory** — the upload is faithful to it, and the transform is faithful to the
+   upload. PPSSPP's `Vec3ByMatrix43` reads the world translation from the
+   streamed array's `[9],[10],[11]`, which is exactly what this does, so the
+   reading is not in question either.
+
+   ### It is not proven to be codegen
+
+   The obvious next move was the differential oracle, and it does **not** support
+   the hypothesis. Every function around the upload matches:
+
+   ```
+   002B9548  002B938C  002B85A0  002B989C
+   002B99C8  002B63C0  002B899C  002B752C     all: match 1, differ 0
+   ```
+
+   That is weak evidence — `--from` seeds its own inputs, so a divergence that
+   only appears on real data would not show — but it is evidence, and it means
+   the GU library is not where this goes wrong. Whatever builds the matrix from
+   the object's `(68, 117)` is upstream of all of it and has not been found.
+
+   ### The chain, walked -- and where it runs out
+
+   `PSPRECOMP_WATCHMEM=<addr>[,<value>]` now answers "who wrote this word" --
+   another instrument that was written, declared and never called. Following it
+   upward:
+
+   ```
+   GE upload            psp_func_002B752C   packs 24-bit floats with lwr
+     <- sceGumLoadMatrix  psp_func_002B99C8   16-word copy from a stack buffer
+       <- psp_func_002AFEB4                   16-word copy
+         <- ambiguous from here
+   ```
+
+   **It runs out at overlapping stack buffers.** LoadMatrix is fed from
+   `0x09FBBCE0` and `0x09FBBD00`, which are **8 words apart**, so the address
+   carrying the 68 is word 9 of one matrix and word 1 of the other. Attribution
+   by address alone cannot separate them, and the static source both copies
+   from holds zero at both of those words. Distinguishing them needs the watch
+   to record the *base* a copy was made from, not just the address written.
+
+   ### Retracted: the VFPU lead
+
+   The previous version of this entry said the chain reached a VFPU matrix
+   routine at `0x002AFEF8` that the differential oracle is structurally blind
+   to, and named the behavioural oracle as the way to settle it. **`0x002AFEF8`
+   is never called** -- `PSPRECOMP_WATCH` on it fires zero times. It was
+   inferred from `psp_func_002AFEB4` sitting immediately before it in the
+   disassembly, which is the same mistake as reading `psp_body_002741C4` as
+   part of MovieReadThread: **adjacency in an address range is not
+   involvement**, and this is the second time in one session it produced a
+   confident wrong answer.
+
+   The structural point in that entry still holds and is worth keeping on its
+   own merits: `psp_vtfm` and `psp_vmmul` are shared by the interpreter and the
+   emitted code, so the differential oracle can never see a bug in them, and
+   `vfpu.c`'s own note says the matrix operand orientation is unverified. That
+   remains a real gap and a real candidate for *some* future geometry fault. It
+   is not evidence about this one.
+
+   ### The autotests can answer it, and now do *(corrected)*
+
+   This section previously said the behavioural oracle "cannot be run at all
+   yet" because pspautotests needs a PSP toolchain and none is installed. Both
+   halves were wrong. The tests ship as committed `.prx` binaries with
+   `.expected` files holding real-hardware output, so no toolchain is
+   involved; and they now run, emit, and are compared. Seven of the eight
+   `cpu/vfpu` tests produce output, three run to their own
+   `sceKernelExitGame`. See [autotests.md](autotests.md) for what it took --
+   the load-bearing one being that **`$gp` was never loaded from the module
+   info**, which no Armored Core run could have exposed (`-G0`) and the
+   differential oracle excludes from comparison by construction.
+
+   **It settled the orientation question, and the answer closed the logo
+   offset.** `matrix.prx` now matches real hardware on all 50 lines. Three bugs
+   stood between: `lv`/`sv` decoded the wrong `vt` field (the arithmetic ops'
+   contiguous 22..16, where load/store puts the low five at 20..16 and the top
+   two at 1..0, because 22..21 are the base register); a matrix register names
+   a *sub-matrix* and both base offsets were being forced to zero; and `vmmul`
+   and `vtfm` indexed their matrix operand transposed. `vfpu.c`'s note that the
+   orientation was unverified is resolved -- it was wrong.
+
+   The first of those **is** the 68-pixel logo offset. Fixing it moves the
+   logo to x 69..417, midpoint 243 on a 480-wide screen -- centred. The `m[9]`
+   versus `m[12]` observation was four lanes rotated by two, seen from the far
+   end of the chain; that is why chasing the write that produced the 68 never
+   reached a cause. The retraction above about `psp_func_002AFEF8` still
+   stands -- that function is still never called, and was never the route.
+
+   **Also left:** perspective-correct interpolation is absent (affine only,
    exact on a fullscreen quad), and there is no clipper.
 
 1. **How the renderer got there.** *(Closed — kept for the measurements, which

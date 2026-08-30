@@ -158,6 +158,22 @@ static void watch_hit(uint32_t addr) {
             fprintf(stderr, "\n");
         }
     }
+    /* Argument 2 as a matrix, when it points at RAM. The uploader takes the
+     * source matrix there, and "what did the game actually build" is the only
+     * way to tell a bad matrix from a bad upload of a good one. */
+    {
+        const uint32_t m = psp_arg(2);
+        /* Module data as well as the heap: a static matrix buffer lives in the
+         * loaded image, and excluding it printed nothing at all. */
+        if (m > 0x1000u && m + 64 < PSP_RAM_BASE + PSP_RAM_SIZE) {
+            fprintf(stderr, "         [a2 as 4x4]");
+            for (int i = 0; i < 16; i++) {
+                union { uint32_t u; float f; } c; c.u = psp_read32(m + (uint32_t)i * 4);
+                fprintf(stderr, "%s%.2f", (i % 4) ? " " : " | ", (double)c.f);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
     /* And how it got here. A watched function reached through a vtable has no
      * `jal` naming its caller, so the arguments alone say what was asked and
      * not who asked. The ring is entries-in-order rather than a call stack --
@@ -266,6 +282,33 @@ static void peek(void) {
         printf("peek:     0x%08X  word 0x%08X  byte 0x%02X\n",
                a, psp_read32(a), psp_read8(a));
         p = (*end == ',') ? end + 1 : end;
+    }
+}
+
+/* PSPRECOMP_WATCHMEM=<hex> names the code that writes one word.
+ *
+ * PEEK reads memory once the run has stopped and WATCH fires on function entry;
+ * neither answers "who wrote this". The write path can, and mem.c has been able
+ * to since it was written -- psp_mem_watch_write was declared, implemented and
+ * never called, which is the third instrument in this runtime to have been
+ * finished and left unreachable.
+ *
+ * Reports the writing function from the trace ring, so it wants a
+ * PSPRECOMP_TRACE build; without one the address is right and the attribution
+ * is zero. */
+static void watch_memory(void) {
+    const char *v = getenv("PSPRECOMP_WATCHMEM");
+    if (!v || !*v) return;
+    char *end;
+    const uint32_t a = (uint32_t)strtoul(v, &end, 0);
+    if (*end == ',') {
+        const uint32_t want = (uint32_t)strtoul(end + 1, NULL, 0);
+        psp_mem_watch_write_value(a, want);
+        printf("      watchmem  0x%08X = 0x%08X only "
+               "(needs a PSPRECOMP_TRACE build to name the writer)\n", a, want);
+    } else {
+        psp_mem_watch_write(a);
+        printf("      watchmem  0x%08X (needs a PSPRECOMP_TRACE build to name the writer)\n", a);
     }
 }
 
@@ -571,6 +614,7 @@ int main(int argc, char **argv) {
     printf("  [1] load      0x%08X + %u bytes, %d relocations\n",
            li.lo, li.hi - li.lo, li.nrelocs);
     reached_init(li.lo, li.hi);
+    watch_memory();
 
     /* 2 — registration and firmware. */
     psp_recomp_register();
