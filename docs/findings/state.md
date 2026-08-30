@@ -505,12 +505,25 @@ that produced it.
    remains a real gap and a real candidate for *some* future geometry fault. It
    is not evidence about this one.
 
-   ### Why the autotests could not answer it
+   ### The autotests can answer it, and now do *(corrected)*
 
-   `scripts/07-autotests.sh` needs pspautotests ELFs built with a PSP
-   toolchain, and deliberately downloads nothing -- same policy as game data.
-   No toolchain is installed here, so the behavioural oracle cannot be run at
-   all yet. That is a prerequisite, not a finding.
+   This section previously said the behavioural oracle "cannot be run at all
+   yet" because pspautotests needs a PSP toolchain and none is installed. Both
+   halves were wrong. The tests ship as committed `.prx` binaries with
+   `.expected` files holding real-hardware output, so no toolchain is
+   involved; and they now run, emit, and are compared. Seven of the eight
+   `cpu/vfpu` tests produce output, three run to their own
+   `sceKernelExitGame`. See [autotests.md](autotests.md) for what it took --
+   the load-bearing one being that **`$gp` was never loaded from the module
+   info**, which no Armored Core run could have exposed (`-G0`) and the
+   differential oracle excludes from comparison by construction.
+
+   **It settles the orientation question.** `matrix.expected` prints the same
+   four rows we do, rotated by two: hardware `1,5,9,13` where we print
+   `3,7,11,15`, and every `vmmul.q` case differs. `vfpu.c`'s note that the
+   matrix operand orientation is unverified is now resolved -- it is wrong,
+   not merely unchecked. Whether it is *this* geometry fault remains open;
+   the retraction above still stands.
 
    **Also left:** perspective-correct interpolation is absent (affine only,
    exact on a fullscreen quad), and there is no clipper.

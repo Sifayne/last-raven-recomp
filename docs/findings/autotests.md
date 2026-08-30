@@ -57,30 +57,69 @@ it runs is the whole class of bug this project keeps writing down:
    mains run their checks and return, which is exactly the shape this
    serves. Tests that depend on real concurrency are out of reach until the
    interpreter runs on the boot host's scheduler.
-2. **The tests run and print nothing.** This is now the blocker, and it is
-   specific rather than general. All eight `cpu/vfpu` tests load, execute and
-   return cleanly — `matrix.prx` runs 574,221 instructions — but not one emits
-   a line. From an HLE log of `matrix.prx`, in order: `sceKernelStdin/Stdout/
-   Stderr` answer 0/1/2, an **unimplemented `IoFileMgrForUser` NID
-   `0x54F5FB11`** is called twice, the display is set up, three bad accesses
-   happen (`read32 at 0xFFFF800C`, `read16`/`write16 at 0xAFB40070` — the
-   latter is the encoding of `sw $s4, 0x70($sp)`, so a code word is being used
-   as an address), the test opens its output file (`sceIoOpen` flags 0x602 →
-   fd 3), and returns without a single `sceIoWrite`.
+2. **The tests emit now.** Seven of the eight `cpu/vfpu` tests produce output
+   and are compared against real hardware. Three run to their own
+   `sceKernelExitGame`. This took four fixes, and the shape of the first is
+   worth keeping, because the earlier diagnosis in this file was wrong in a
+   way that reads as right:
 
-   The uncached mirror is *not* the cause: `psp_mem_ptr` already collapses
-   mirrors with `addr & PSP_ADDR_MASK`, so `sceDisplaySetFrameBuf(0x44000000)`
-   resolves correctly.
-3. **Output comparison exists now.** The script diffs the guest's prints
-   against the test's `.expected` and reports `MATCHES hardware`, `differs: N
-   line(s)`, or `NO OUTPUT (test ran but printed nothing)`. Today every VFPU
-   test reports the last of those, which is an honest reading of a harness that
-   is complete except for the tests being able to speak.
-4. **The expected-output database is no longer missing.** It ships with the
-   tests. `cpu/vfpu/matrix.expected` covers exactly the open question — it has
-   explicit `non transpose:` and `transpose:` sections and four `vmmul.q`
-   cases — so the moment output flows, the VFPU matrix orientation that
-   `vfpu.c` flags as unverified is answerable against hardware.
+   - **`$gp` was never loaded.** A module with a small-data area addresses it
+     as an offset from `$gp`, and nothing in the instruction stream says what
+     `$gp` is — the value lives only in the module info header, which the
+     loader did not read. Every such access went to around address 0. The
+     `read32 at 0xFFFF800C` this file previously listed as a mysterious bad
+     access is exactly `lw -0x7FF4($gp)` with `$gp` zero, and the "code word
+     used as an address" at `0xAFB40070` was the same cause downstream, not a
+     separate bug. Armored Core is built `-G0` and never names `$gp`, so this
+     was invisible for the whole project; the differential oracle could not
+     have caught it either, because `oracle_diff.c` excludes `$gp` from
+     comparison. The 15 relocations the loader reported as skipped were
+     `R_MIPS_GPREL16`, which correctly need no patching — but reading
+     "skipped" as "mis-loaded" is what led to the register that was never set.
+   - **Opcode `0x1C` was decoded as an unknown VFPU op.** It is SPECIAL2, and
+     it is where Allegrex puts `mfic`/`mtic`. The interpreter and emitter
+     already implemented both; only the decoder disagreed. A test calling
+     `mfic` from newlib's lock path reported `unimplemented VFPU instruction`,
+     which sends the search to the vector unit for an interrupt-controller op.
+   - **`IoFileMgrForUser 0x54F5FB11` is `sceIoDevctl`.** The two calls are the
+     harness probing for an emulator with `devctl("kemulator:", …)`. Answering
+     "no such device" is the answer, not a stub: it is what a real PSP does,
+     and it is how the test learns to take the hardware path.
+   - **Nothing read `psp_exit_requested()`.** A test that called
+     `sceKernelExitGame` ran on until the instruction budget stopped it, which
+     reports as a hang rather than as a program that finished.
+
+   Where the output goes matters: the harness redirects its own stdout to
+   `host0:/__testoutput.txt` — usbhostfs, how a test talks to the PC it is
+   tethered to — and `iofilemgr` resolves a device to `<cwd>/<device>/<path>`.
+   The file *is* the output; reading the console instead is what made every
+   test look silent. The script runs each test from `reports/hostfs/`, because
+   the default working directory would put `host0:` on top of `host/` — the
+   boot host's own source directory.
+3. **Output comparison is against the file, not the console.** The script
+   diffs `reports/hostfs/host/__testoutput.txt` against `.expected` and reports
+   `MATCHES hardware`, `differs: N line(s)`, or `NO OUTPUT`. It removes the
+   file before each run, so a test that emits nothing cannot inherit its
+   predecessor's verdict.
+4. **Nothing matches hardware yet, and the differences are the point.**
+
+   | test | stopped | ours / expected |
+   |---|---|---|
+   | `matrix` | ExitGame | 50 / 50 lines, 58 differ |
+   | `prefixes` | ExitGame | 26 / 26 lines, 40 differ |
+   | `vregs` | ExitGame | 30 / 48 lines, 58 differ |
+   | `gum` | `mtv $a1, v52` | 2 / 45 lines |
+   | `colors` | `.word 0xD480000C` | 1 / 5 lines |
+   | `vavg` | `.word 0xD0470480` | no output |
+   | `convert` | budget | 1 / 108 lines, 99.3M bad accesses |
+   | `vector` | budget | 1045 / 5329 lines |
+
+   `matrix` answers the open question this file was waiting on. Its
+   `transpose:` block is our four rows rotated by two — we print `3,7,11,15`
+   where hardware prints `1,5,9,13` — and every `vmmul.q` case differs. That
+   is a matrix row-indexing bug in the VFPU, the same shape as the logo's
+   68-pixel offset landing in `m[9]` instead of `m[12]`. `vfpu.c` flagged the
+   orientation as unverified; it is now verified wrong.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a
