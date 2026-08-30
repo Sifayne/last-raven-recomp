@@ -39,7 +39,7 @@ cc -c -O1 -I "$ROOT/tools/psprecomp/include" \
 cc -o "$BIN" "$GEN_OBJ/oracle_diff.o" \
        "$GEN_OBJ/aclr_funcs.o" "$GEN_OBJ/aclr_imports.o" \
        "$ROOT/build/psprecomp/tools/allegrexrecomp/liballegrex_core.a" \
-       "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread
+       "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread $HOST_LIBS
 
 # The work-list is the discovered function *entries*, not every address the
 # dispatch table happens to resolve. The table also holds interior labels —

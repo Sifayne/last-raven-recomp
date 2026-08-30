@@ -34,7 +34,7 @@ done
 info "linking"
 cc "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" \
    "$OUT/aclr_funcs.o" "$OUT/aclr_imports.o" "$LIB" \
-   -o "$OUT/boot" -lm -lpthread
+   -o "$OUT/boot" -lm -lpthread $HOST_LIBS
 
 info "booting"
 # The ISO is optional: without it the raw UMD device has nothing behind it and

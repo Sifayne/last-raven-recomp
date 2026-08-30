@@ -1,9 +1,9 @@
 diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
 new file mode 100644
-index 0000000..d54de7e
+index 0000000..e3a2b8a
 --- /dev/null
 +++ b/src/hle/mpeg.c
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,754 @@
 +/* psprecomp — sceMpeg.
 + *
 + * ## What this is, and what it is not
@@ -53,8 +53,12 @@ index 0000000..d54de7e
 + */
 +
 +#include "psprecomp/hle.h"
++#include "psprecomp/cpu.h"
++#include "psprecomp/dispatch.h"
++#include "psprecomp/mem.h"
 +
 +#include <stdio.h>
++#include <stdlib.h>
 +#include <string.h>
 +
 +/* ---- constants ------------------------------------------------------------
@@ -109,6 +113,18 @@ index 0000000..d54de7e
 +    uint32_t stream_size;
 +    uint32_t stream_offset;
 +    int      es_used[MAX_ES_BUF];
++
++    /* The demuxed AVC elementary stream, accumulated across ring buffer puts.
++     * The game hands us an MPEG program stream a few packets at a time; the
++     * video is one substream inside it, and a decoder wants it contiguous. */
++    uint8_t *es;
++    size_t   es_len, es_cap;
++    int      es_eof;
++    size_t   es_pos;       /* how far the decoder has consumed */
++
++    void    *dec;          /* ISVCDecoder*, opaque here so the header stays out */
++    int      dec_failed;
++    int      frames;       /* decoded so far */
 +} mpeg_ctx;
 +
 +static mpeg_ctx g_mpeg[MAX_MPEG];
@@ -249,13 +265,320 @@ index 0000000..d54de7e
 + * immediately treated as consumed: the buffer never fills, and a feeder loop
 + * that waits for space always gets it. Claiming zero were taken would stall
 + * that loop forever, which is the failure this is avoiding. */
++/* Run a guest function from inside a firmware call and come back with $v0.
++ *
++ * The ring buffer is filled by a callback the *game* supplies, so there is no
++ * way to get its data without re-entering guest code from here. The register
++ * file is saved and restored around it because we are already standing in the
++ * middle of somebody else's call: the caller's arguments are still live in
++ * a0-a3 and its return address in $ra, and the callee will use all of them.
++ *
++ * $ra is zeroed rather than left alone so that returning from the callback ends
++ * the dispatch instead of running off into whatever the interrupted caller was
++ * going to do next. */
++/* PSPRECOMP_MPEG_DECODE=1 turns on the video path: the ring buffer is filled
++ * from the game's callback, demuxed, and decoded.
++ *
++ * Opt-in because it is not finished. The frames are real -- byte-identical to
++ * an independent decoder -- but they are not yet handed back to the game, so
++ * the player asks for an access unit that never comes and spins. Default is the
++ * refusal that at least lets the game give up cleanly. Remove this switch when
++ * sceMpegGetAvcAu can return an AU. */
++static int mpeg_decoding(void) {
++    static int done, on;
++    if (!done) { const char *v = getenv("PSPRECOMP_MPEG_DECODE"); on = v && *v && *v != '0'; done = 1; }
++    return on;
++}
++
++/* PSPRECOMP_MPEG=1 narrates the movie path. Off by default. */
++static int mpeg_logging(void) {
++    static int done, on;
++    if (!done) { const char *v = getenv("PSPRECOMP_MPEG"); on = v && *v && *v != '0'; done = 1; }
++    return on;
++}
++
++/* ---- MPEG program stream demux ---------------------------------------------
++ *
++ * A PSMF is an MPEG-2 program stream: pack headers, an optional system header,
++ * and PES packets carrying one substream each. Only the video matters here --
++ * stream id 0xE0 -- and its payload concatenated in order is the AVC elementary
++ * stream, which is what a decoder takes.
++ *
++ * Deliberately not a general demuxer. It skips what it does not need and keeps
++ * only the video payload, because the alternative is carrying a container
++ * library for one file format in one game. */
++#define PS_PACK_START   0xBAu
++#define PS_SYSTEM_HDR   0xBBu
++#define PS_PROGRAM_END  0xB9u
++#define PS_VIDEO_STREAM 0xE0u
++
++static mpeg_ctx *ctx_for_ringbuffer(uint32_t rb) {
++    for (int i = 0; i < MAX_MPEG; i++)
++        if (g_mpeg[i].used && g_mpeg[i].ringbuffer == rb) return &g_mpeg[i];
++    /* Construct records the ring buffer against the context only once the game
++     * has associated them; before that, one context is unambiguous. */
++    for (int i = 0; i < MAX_MPEG; i++)
++        if (g_mpeg[i].used) return &g_mpeg[i];
++    return NULL;
++}
++
++static int es_append(mpeg_ctx *c, const uint8_t *p, size_t n) {
++    if (c->es_len + n > c->es_cap) {
++        size_t cap = c->es_cap ? c->es_cap : 65536;
++        while (cap < c->es_len + n) cap *= 2;
++        uint8_t *ne = (uint8_t *)realloc(c->es, cap);
++        if (!ne) return -1;
++        c->es = ne;
++        c->es_cap = cap;
++    }
++    memcpy(c->es + c->es_len, p, n);
++    c->es_len += n;
++    return 0;
++}
++
++/* Pull the video payload out of one contiguous run of program stream bytes.
++ * Anything not understood is skipped rather than guessed at. */
++static void ps_demux(mpeg_ctx *c, const uint8_t *buf, size_t len) {
++    size_t i = 0;
++    while (i + 4 <= len) {
++        if (!(buf[i] == 0 && buf[i+1] == 0 && buf[i+2] == 1)) { i++; continue; }
++        const uint8_t id = buf[i+3];
++
++        if (id == PS_PACK_START) {
++            /* 14 fixed bytes, then however many stuffing bytes the low three
++             * bits of the last one claim. */
++            if (i + 14 > len) break;
++            i += 14 + (size_t)(buf[i+13] & 7);
++            continue;
++        }
++        if (id == PS_PROGRAM_END) { i += 4; continue; }
++        if (i + 6 > len) break;
++
++        const size_t plen = ((size_t)buf[i+4] << 8) | buf[i+5];
++        if (id == PS_SYSTEM_HDR) { i += 6 + plen; continue; }
++
++        if (id == PS_VIDEO_STREAM) {
++            if (i + 9 > len) break;
++            const size_t hdrlen = buf[i+8];
++            const size_t off    = i + 9 + hdrlen;
++            /* plen counts from just after itself, so the payload is what is
++             * left of it once the PES header is taken off. */
++            if (plen >= 3 + hdrlen && off <= len) {
++                size_t n = plen - 3 - hdrlen;
++                if (off + n > len) n = len - off;
++                es_append(c, buf + off, n);
++            }
++        }
++        i += 6 + plen;
++    }
++}
++
++/* ---- H.264 decode ----------------------------------------------------------
++ *
++ * openh264, chosen because it is BSD and can therefore be linked into an MIT
++ * library without changing what anyone downstream may do with the result. Its
++ * C++ interface has a C vtable binding, which is what is used here so the
++ * runtime stays C.
++ *
++ * Fed one NAL at a time. The decoder buffers until it has a whole picture and
++ * then reports one ready, which saves this code from having to work out where
++ * access units begin -- a job that needs more of the bitstream syntax than is
++ * worth parsing twice. */
++#if PSPRECOMP_HAVE_OPENH264
++#include <wels/codec_api.h>
++
++/* Find the next start code at or after `from`. Returns the offset of the 0x01,
++ * or len if there is none. */
++static size_t nal_next(const uint8_t *p, size_t len, size_t from) {
++    for (size_t i = from; i + 3 <= len; i++)
++        if (p[i] == 0 && p[i+1] == 0 && p[i+2] == 1) return i + 3;
++    return len;
++}
++
++/* Write one decoded I420 picture as a PPM. Bring-up only: it proves the whole
++ * chain -- the game's own callback, our demux, and the decoder -- produced a
++ * real picture, before any of it is wired to the guest's frame buffer. */
++static void dump_ppm(const char *path, unsigned char *pl[3], const SSysMEMBuffer *b) {
++    FILE *f = fopen(path, "wb");
++    if (!f) return;
++    const int w = b->iWidth, h = b->iHeight;
++    fprintf(f, "P6\n%d %d\n255\n", w, h);
++    for (int y = 0; y < h; y++)
++        for (int x = 0; x < w; x++) {
++            /* BT.601, and *limited* range: this stream declares tv range, so Y
++             * runs 16..235 and passing it through unscaled lifts the blacks --
++             * a first frame that should read 16 came out 30 against ffmpeg's
++             * decode of the same bytes. */
++            const int Y = pl[0][y * b->iStride[0] + x] - 16;
++            const int U = pl[1][(y / 2) * b->iStride[1] + x / 2] - 128;
++            const int V = pl[2][(y / 2) * b->iStride[1] + x / 2] - 128;
++            const int Yr = 76309 * Y;
++            int r  = (Yr + 104597 * V) >> 16;
++            int g  = (Yr -  53279 * V - 25674 * U) >> 16;
++            int bl = (Yr + 132201 * U) >> 16;
++            unsigned char px[3] = {
++                (unsigned char)(r < 0 ? 0 : r > 255 ? 255 : r),
++                (unsigned char)(g < 0 ? 0 : g > 255 ? 255 : g),
++                (unsigned char)(bl < 0 ? 0 : bl > 255 ? 255 : bl) };
++            fwrite(px, 1, 3, f);
++        }
++    fclose(f);
++}
++
++/* Decode whatever new elementary stream has arrived. Returns frames produced. */
++static int avc_pump(mpeg_ctx *c) {
++    if (c->dec_failed) return 0;
++    if (!c->dec) {
++        ISVCDecoder *d = NULL;
++        if (WelsCreateDecoder(&d) != 0 || !d) { c->dec_failed = 1; return 0; }
++        SDecodingParam prm;
++        memset(&prm, 0, sizeof prm);
++        prm.eEcActiveIdc = ERROR_CON_SLICE_COPY;
++        prm.sVideoProperty.eVideoBsType = VIDEO_BITSTREAM_DEFAULT;
++        if ((*d)->Initialize(d, &prm) != 0) {
++            WelsDestroyDecoder(d); c->dec_failed = 1; return 0;
++        }
++        c->dec = d;
++    }
++    ISVCDecoder *d = (ISVCDecoder *)c->dec;
++
++    int produced = 0;
++    size_t pos = c->es_pos;
++    while (pos < c->es_len) {
++        const size_t start = nal_next(c->es, c->es_len, pos);
++        if (start >= c->es_len) break;
++        size_t end = nal_next(c->es, c->es_len, start);
++        if (end >= c->es_len) break;          /* incomplete: wait for more */
++        /* end points past the next start code's 0x01; back up over it and any
++         * trailing zero of a four-byte start code. */
++        size_t nal_end = end - 3;
++        while (nal_end > start && c->es[nal_end - 1] == 0) nal_end--;
++
++        unsigned char *planes[3] = { 0, 0, 0 };
++        SBufferInfo info;
++        memset(&info, 0, sizeof info);
++        (*d)->DecodeFrameNoDelay(d, c->es + start - 3, (int)(nal_end - (start - 3)),
++                                 planes, &info);
++        if (info.iBufferStatus == 1 && planes[0]) {
++            c->frames++;
++            produced++;
++            if (mpeg_logging() && (c->frames == 1 || c->frames % 50 == 0))
++                fprintf(stderr, "mpeg: %d frames decoded\n", c->frames);
++            const char *fp = getenv("PSPRECOMP_MPEG_FRAME");
++            const char *fn = getenv("PSPRECOMP_MPEG_FRAME_NO");
++            const int want = fn ? atoi(fn) : 1;
++            if (fp && c->frames == want) {
++                dump_ppm(fp, planes, &info.UsrData.sSystemBuffer);
++                fprintf(stderr, "mpeg: decoded frame %d, %dx%d -> %s\n", c->frames,
++                        info.UsrData.sSystemBuffer.iWidth,
++                        info.UsrData.sSystemBuffer.iHeight, fp);
++            }
++        }
++        pos = start;
++        c->es_pos = pos;
++    }
++    return produced;
++}
++#else
++static int avc_pump(mpeg_ctx *c) { (void)c; return 0; }
++#endif
++
++static uint32_t call_guest(uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2) {
++    const psp_cpu_state save = psp_cpu;
++    psp_cpu.r[PSP_REG_A0] = a0;
++    psp_cpu.r[PSP_REG_A1] = a1;
++    psp_cpu.r[PSP_REG_A2] = a2;
++    psp_cpu.r[PSP_REG_RA] = 0;
++    psp_dispatch(fn);
++    const uint32_t v0 = psp_cpu.r[PSP_REG_V0];
++    psp_cpu = save;
++    return v0;
++}
++
++/* sceMpegRingbufferPut(rb, numPackets, available)
++ *
++ * The count was being bumped without ever asking the game for the bytes, so the
++ * ring buffer stayed empty and every packet the demuxer would have read was a
++ * packet that was never written. The data comes from the callback the game
++ * registered in Construct; calling it is the only way to get the movie.
++ *
++ * The callback takes (data, numPackets, arg) and answers how many packets it
++ * actually supplied, which is not always what was asked for -- at the end of
++ * the file it is fewer, and that is how the stream ends. */
 +static void hle_RingbufferPut(void) {
-+    const uint32_t rb = psp_arg(0);
-+    const int32_t  n  = (int32_t)psp_arg(1);
-+    if (rb && n > 0) {
++    const uint32_t rb    = psp_arg(0);
++    const int32_t  want  = (int32_t)psp_arg(1);
++    const int32_t  avail = (int32_t)psp_arg(2);
++
++    if (mpeg_logging())
++        fprintf(stderr, "mpeg: RingbufferPut(rb=0x%08X want=%d avail=%d)\n", rb, want, avail);
++    if (!rb || want <= 0) { psp_ret(0); return; }
++    if (!mpeg_decoding()) { psp_ret((uint32_t)want); return; }  /* pre-decoder behaviour */
++
++    int32_t n = want < avail ? want : avail;
++    const uint32_t cb = psp_read32(rb + RB_CALLBACK);
++    if (cb) {
++        const uint32_t pkt_size = psp_read32(rb + RB_PACKET_SIZE);
++        const uint32_t written  = psp_read32(rb + RB_PACKETS_WRITTEN);
++        const uint32_t packets  = psp_read32(rb + RB_PACKETS);
++        const uint32_t base     = psp_read32(rb + RB_DATA);
++        /* Write at the tail, and stop at the end of the buffer rather than
++         * wrapping mid-call: the callback fills one contiguous run. */
++        const uint32_t slot = packets ? (written % packets) : 0;
++        if (packets && slot + (uint32_t)n > packets) n = (int32_t)(packets - slot);
++        if (n > 0)
++            n = (int32_t)call_guest(cb, base + slot * pkt_size, (uint32_t)n,
++                                    psp_read32(rb + RB_CALLBACK_ARG));
++    }
++
++    /* One-shot look at what the callback actually delivered. An MPEG program
++     * stream starts 00 00 01 BA; a PSMF header starts with "PSMF". Anything
++     * else means the ring buffer is not carrying the movie and nothing
++     * downstream can work. */
++    if (n > 0 && mpeg_logging()) {
++        static int shown;
++        if (!shown++) {
++            const uint32_t base = psp_read32(rb + RB_DATA);
++            fprintf(stderr, "mpeg: first put -> %d packets at 0x%08X:", n, base);
++            for (int i = 0; i < 16; i++) fprintf(stderr, " %02X", psp_read8(base + (uint32_t)i));
++            fprintf(stderr, "\n");
++        }
++    }
++
++    /* Demux what just arrived. The bytes are in guest memory where the callback
++     * put them, so this is the one place they are known to be both present and
++     * not yet overwritten by the next put. */
++    if (n > 0) {
++        mpeg_ctx *c = ctx_for_ringbuffer(rb);
++        if (c) {
++            const uint32_t pkt_size = psp_read32(rb + RB_PACKET_SIZE);
++            const uint32_t base     = psp_read32(rb + RB_DATA);
++            const uint32_t packets  = psp_read32(rb + RB_PACKETS);
++            const uint32_t written  = psp_read32(rb + RB_PACKETS_WRITTEN);
++            const uint32_t slot     = packets ? (written % packets) : 0;
++            const uint32_t bytes    = (uint32_t)n * pkt_size;
++            const uint8_t *host = (const uint8_t *)psp_mem_ptr(base + slot * pkt_size, bytes);
++            if (host) { ps_demux(c, host, bytes); avc_pump(c); }
++            /* PSPRECOMP_MPEG_DUMP=<path> writes the demuxed elementary stream
++             * once it is big enough to be worth looking at, so it can be
++             * checked against a decoder that is not ours. */
++            {
++                const char *dp = getenv("PSPRECOMP_MPEG_DUMP");
++                static int dumped;
++                if (dp && !dumped && c->es_len > 1000000) {
++                    FILE *f = fopen(dp, "wb");
++                    if (f) { fwrite(c->es, 1, c->es_len, f); fclose(f); dumped = 1;
++                             fprintf(stderr, "mpeg: wrote %zu bytes of ES to %s\n", c->es_len, dp); }
++                }
++            }
++        }
++    }
++
++    if (n > 0) {
 +        psp_write32(rb + RB_PACKETS_WRITTEN, psp_read32(rb + RB_PACKETS_WRITTEN) + (uint32_t)n);
-+        psp_write32(rb + RB_PACKETS_READ,    psp_read32(rb + RB_PACKETS_READ) + (uint32_t)n);
-+        psp_write32(rb + RB_PACKETS_FREE,    psp_read32(rb + RB_PACKETS));
++        const uint32_t free_now = psp_read32(rb + RB_PACKETS_FREE);
++        psp_write32(rb + RB_PACKETS_FREE,
++                    free_now > (uint32_t)n ? free_now - (uint32_t)n : 0);
 +    }
 +    psp_ret((uint32_t)n);
 +}
@@ -361,8 +684,33 @@ index 0000000..d54de7e
 +            "  audio will not play; everything else continues.\n", what);
 +}
 +
-+static void hle_GetAvcAu(void)      { no_decoder("sceMpegGetAvcAu");
-+                                      psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); }
++/* Two answers, and which one is right depends on whether a frame can ever
++ * arrive -- see the header comment for the disassembly behind this.
++ *
++ * NO_DATA means "not yet", so the game feeds the ring buffer and asks again.
++ * That is the only way to get the movie out of it, and it is what the decode
++ * path needs. But a NO_DATA that never becomes an answer is an instruction to
++ * spin forever: 206 million calls in a minute, measured.
++ *
++ * So it is only given when decoding is actually running. Otherwise the refusal
++ * stands, and the game reports the failure and tears the movie down -- worse
++ * picture, honest behaviour, and no hang. */
++static void hle_GetAvcAu(void) {
++    mpeg_ctx *c = ctx_of(psp_arg(0));
++    if (!mpeg_decoding()) {
++        no_decoder("sceMpegGetAvcAu");
++        psp_ret(SCE_MPEG_ERROR_INVALID_VALUE);
++        return;
++    }
++    if (mpeg_logging()) {
++        static size_t last;
++        if (c && c->es_len != last) {
++            last = c->es_len;
++            fprintf(stderr, "mpeg: GetAvcAu -- %zu bytes of AVC ES demuxed\n", c->es_len);
++        }
++    }
++    psp_ret(SCE_MPEG_ERROR_NO_DATA);
++}
 +static void hle_GetAtracAu(void)    { no_decoder("sceMpegGetAtracAu");
 +                                      psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); }
 +static void hle_AvcDecode(void)     { no_decoder("sceMpegAvcDecode");

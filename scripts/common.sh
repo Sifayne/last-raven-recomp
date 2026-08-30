@@ -10,6 +10,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 AR="$ROOT/build/psprecomp/tools/allegrexrecomp/allegrexrecomp"
+
+# libpsprecomp links openh264 when sceMpeg was built with it. CMake records that
+# for CMake consumers; these scripts link by hand, so they have to ask too.
+# Empty when the library is absent, which is the supported configuration -- the
+# runtime then keeps its bookkeeping-only sceMpeg.
+HOST_LIBS=""
+if pkg-config --exists openh264 2>/dev/null; then
+    HOST_LIBS="$(pkg-config --libs openh264)"
+fi
 PSPDECRYPT="$ROOT/tools/pspdecrypt/pspdecrypt"
 
 GAME_DIR="$ROOT/game"
