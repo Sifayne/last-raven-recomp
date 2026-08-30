@@ -1,9 +1,9 @@
 diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
 new file mode 100644
-index 0000000..748fafd
+index 0000000..6a78060
 --- /dev/null
 +++ b/src/hle/mpeg.c
-@@ -0,0 +1,979 @@
+@@ -0,0 +1,991 @@
 +/* psprecomp — sceMpeg.
 + *
 + * ## What this is, and what it is not
@@ -474,7 +474,18 @@ index 0000000..748fafd
 +    fclose(f);
 +}
 +
-+/* Decode whatever new elementary stream has arrived. Returns frames produced. */
++/* Decode up to ONE picture and stop. Returns 1 if it produced one.
++ *
++ * Decoding everything available in a single call looks like the efficient
++ * choice and is wrong twice over. Only the most recent picture is kept, so all
++ * the others are decoded and thrown away -- and the caller asks for one access
++ * unit at a time, so the frames it never sees are frames the game never gets.
++ * The first call swallowed the whole elementary stream and produced one usable
++ * frame; every call after it found nothing left and answered NO_DATA.
++ *
++ * It also breaks the ring buffer accounting, which reports how much has been
++ * demuxed but not yet decoded. Consuming the stream as fast as it arrives makes
++ * that difference zero, so the buffer always looks empty. */
 +static int avc_pump(mpeg_ctx *c) {
 +    if (c->dec_failed) return 0;
 +    if (!c->dec) {
@@ -546,6 +557,7 @@ index 0000000..748fafd
 +        }
 +        pos = start;
 +        c->es_pos = pos;
++        if (produced) break;          /* one picture per call */
 +    }
 +    return produced;
 +}
