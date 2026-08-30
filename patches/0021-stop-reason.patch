@@ -1,0 +1,79 @@
+diff --git a/include/psprecomp/sched.h b/include/psprecomp/sched.h
+index 4d8aed5..6e8f8fa 100644
+--- a/include/psprecomp/sched.h
++++ b/include/psprecomp/sched.h
+@@ -135,7 +135,15 @@ void psp_sched_set_end_hook(void (*fn)(uint32_t uid, uint32_t status));
+  * discover it, rather than by jumping.
+  *
+  * Does not return when called from a guest thread. */
+-void psp_sched_stop_all(void);
++void psp_sched_stop_all(const char *why);
++
++/* Why the run was force-stopped, or NULL if every thread ended on its own.
++ *
++ * drain answers "how many threads are still alive", and a stopped run answers
++ * zero -- indistinguishable from a run that finished. The boot summary used to
++ * print "all finished" for a run the host had just killed, which read as
++ * success. This is the difference. */
++const char *psp_sched_stop_reason(void);
+ 
+ /* Run until every guest thread is dead, nothing can make progress, or
+  * `timeout_s` elapses. Called from the main context once module_start has
+diff --git a/src/hle/sched.c b/src/hle/sched.c
+index 60b2c0e..f21b160 100644
+--- a/src/hle/sched.c
++++ b/src/hle/sched.c
+@@ -35,6 +35,7 @@ static int             g_running = MAIN_SLOT;
+ static void          (*g_end_hook)(uint32_t uid, uint32_t status);
+ static void          (*g_thread_hook)(void);
+ static int             g_threading = 1;
++static const char     *g_stop_reason;
+ 
+ /* Which slot this host thread *is*, as opposed to which slot holds the token.
+  *
+@@ -73,6 +74,7 @@ void psp_sched_reset(void) {
+      * to. Reset is a bring-up convenience between runs in one process, not a
+      * teardown. */
+     memset(g_slot, 0, sizeof g_slot);
++    g_stop_reason = NULL;
+     g_slot[MAIN_SLOT].used     = 1;
+     g_slot[MAIN_SLOT].uid      = 0;
+     g_slot[MAIN_SLOT].state    = PSP_SCHED_RUNNING;
+@@ -524,7 +526,10 @@ static int live_locked(void) {
+     return live;
+ }
+ 
+-void psp_sched_stop_all(void) {
++void psp_sched_stop_all(const char *why) {
++    /* Recorded before anything is killed: the caller is a guest thread that
++     * will not exist past the pthread_exit below. */
++    g_stop_reason = why;
+     pthread_mutex_lock(&g_lock);
+     const int me = g_running;
+     for (int i = 1; i < MAX_SCHED_THREADS; i++)
+@@ -536,6 +541,10 @@ void psp_sched_stop_all(void) {
+     if (me != MAIN_SLOT) pthread_exit(NULL);
+ }
+ 
++const char *psp_sched_stop_reason(void) {
++    return g_stop_reason;
++}
++
+ int psp_sched_drain(int timeout_s) {
+     if (!g_threading) return 0;
+ 
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index d11b2b6..9547c4e 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -172,7 +172,9 @@ static void wait_deadlock(const char *what) {
+         "  timeout would make the guest act on a falsehood, so the run stops\n"
+         "  here instead. Live threads:\n", what);
+     psp_sched_dump_threads(stderr);
+-    psp_sched_stop_all();
++    /* The reason rides along so the boot summary can tell a stopped run from
++     * one that finished -- both leave zero threads alive. */
++    psp_sched_stop_all(what);
+ }
+ 
+ static void warn_block(const char *what) {

@@ -113,7 +113,7 @@ static void hle_stop_unload_self(void) {
      * thread stops the scheduler instead, and the main context reports the exit
      * when its drain returns. */
     if (psp_sched_current() != 0) {
-        psp_sched_stop_all();   /* does not return */
+        psp_sched_stop_all("sceKernelExitGame");   /* does not return */
         return;
     }
     siglongjmp(g_abort, 1);
@@ -486,8 +486,16 @@ int main(int argc, char **argv) {
     printf("ctors:    %s\n", ctors_ok == 0 ? "ok" : "incomplete");
     if (g_guest_exited) printf("entry:    guest exited with status %u\n", g_exit_status);
     else                printf("entry:    %s\n", entry_ok == 0 ? "returned" : "stopped");
-    printf("threads:  %s\n",
-           live == 0 ? "all finished" : "still alive (see the deadlock report above)");
+    /* A force-stopped run also leaves zero threads alive -- stop_all marks them
+     * dead -- so "all finished" would be printed for a run the host just
+     * killed. The stop reason is the difference between a run that ended and
+     * one that was ended. */
+    const char *stopped = live == 0 ? psp_sched_stop_reason() : NULL;
+    if (stopped)
+        printf("threads:  stopped by the host (%s)\n", stopped);
+    else
+        printf("threads:  %s\n",
+               live == 0 ? "all finished" : "still alive (see the deadlock report above)");
     printf("bad mem:  %llu accesses\n", (unsigned long long)psp_mem_bad_access);
     printf("disc read: %llu bytes\n", (unsigned long long)psp_io_bytes_read());
     printf("pixels:   %llu drawn by the rasterizer\n",
