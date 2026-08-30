@@ -172,6 +172,7 @@ All are off by default and cost nothing when off.
 | `PSPRECOMP_WATCH=<hex addr>` | Argument registers on entry to one guest function, dereferencing the pointer-looking ones. Hooks `PSP_ENTER`, so it only ever fires on a **function entry**. Needs `TRACE=1`. |
 | `PSPRECOMP_REACHED=<hex>[,...]` | Whether control ever arrived at each address. Covers every **label**, not just entries — see below. Needs `TRACE=1`. |
 | `PSPRECOMP_SEMA=<substring>` | Narrates every wait, take and signal on matching semaphores, and unlocks the thread and signalled-uid censuses in the summary. See the volume note. |
+| `PSPRECOMP_TEXDUMP=<path>` | Every distinct texture the game binds, decoded through the renderer's own sampler, as `<path>-NN.ppm`. Separates "the sampler reads wrong texels" from "the texture is not what we think", which look identical on screen. |
 | `PSPRECOMP_FINDPTR=<hex>` | Every address in the loaded module holding that value as a word. For pointers that only exist once the PRX is relocated. |
 | `PSPRECOMP_PAD=start,cross` | Holds pad buttons for the run. There is no window and no gamepad. |
 | `PSPRECOMP_FRAME=<path>` | Where to write the frame. Defaults to `frame.ppm`, and dumps the GE's render target rather than the scanned-out buffer. |
@@ -362,10 +363,30 @@ that produced it.
    channel value 68 of 255 — because it is caught mid fade-in, so brighten it
    before judging.
 
-   **What is left on it:** the lettering is legible but speckled, so texel
-   sampling is not exactly right yet — a swizzle or palette-indexing detail.
-   Perspective-correct interpolation is absent (affine only, exact on a
-   fullscreen quad), and there is no clipper.
+   **The speckling is fixed** (patch 0029) and the logo is clean — 17 colours,
+   no noise. It was the palette address. Both the texture and CLUT bases arrive
+   in two registers, and the second carries address bits 24..27 in its own bits
+   **16..19**, not in its low byte:
+
+   ```
+   getClutAddress()    = (clutaddr & 0x00FFFFF0) | ((clutaddrupper << 8) & 0x0F000000)
+   getTextureAddress() = (texaddr  & 0x00FFFFF0) | ((texbufwidth  << 8) & 0x0F000000)
+   ```
+
+   Taking the low byte put the palette at `0x0016FC00`, inside the loaded
+   module, instead of `0x0916FC00` — in RAM immediately below the texture it
+   belongs to. **Indices were right the whole time, which is exactly why the
+   shape was legible and only the colours were wrong.** That signature is worth
+   remembering: legible-but-speckled means the palette, not the sampler.
+
+   `PSPRECOMP_TEXDUMP=<path>` is what found it — it writes each distinct
+   texture through the same sampler, so "the sampler reads wrong texels" and
+   "the texture is not what we think" stop looking identical. The logo texture
+   is an **alpha mask**: white throughout, letterforms in the alpha channel, cut
+   out by the blend. Its RGB dump being uniformly white is correct.
+
+   **What is left:** perspective-correct interpolation is absent (affine only,
+   exact on a fullscreen quad), and there is no clipper.
 
 1. **T&L exists; the picture still does not.** *(superseded by item 0 — kept for
    the measurements.)* Patch 0026 added the transform
