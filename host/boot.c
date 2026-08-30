@@ -156,6 +156,22 @@ static void watch_hit(uint32_t addr) {
             fprintf(stderr, "\n");
         }
     }
+    /* Argument 2 as a matrix, when it points at RAM. The uploader takes the
+     * source matrix there, and "what did the game actually build" is the only
+     * way to tell a bad matrix from a bad upload of a good one. */
+    {
+        const uint32_t m = psp_arg(2);
+        /* Module data as well as the heap: a static matrix buffer lives in the
+         * loaded image, and excluding it printed nothing at all. */
+        if (m > 0x1000u && m + 64 < PSP_RAM_BASE + PSP_RAM_SIZE) {
+            fprintf(stderr, "         [a2 as 4x4]");
+            for (int i = 0; i < 16; i++) {
+                union { uint32_t u; float f; } c; c.u = psp_read32(m + (uint32_t)i * 4);
+                fprintf(stderr, "%s%.2f", (i % 4) ? " " : " | ", (double)c.f);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
     /* And how it got here. A watched function reached through a vtable has no
      * `jal` naming its caller, so the arguments alone say what was asked and
      * not who asked. The ring is entries-in-order rather than a call stack --
