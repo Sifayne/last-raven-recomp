@@ -39,6 +39,7 @@
 #include "psprecomp/mem.h"
 #include "psprecomp/dispatch.h"
 #include "psprecomp/hle.h"
+#include "psprecomp/clock.h"
 #include "psprecomp/sched.h"
 
 #include <setjmp.h>
@@ -317,6 +318,13 @@ static void reset_hle(void) {
     psp_sas_reset();
     psp_io_reset();
     psp_misc_reset();
+    /* The clock is firmware state too, and it was the one piece not reset here.
+     * It advances on every read -- and now on every firmware call -- so without
+     * this the second side of a comparison starts at whatever time the first
+     * side ran up to, and any guest code that branches on elapsed time diverges
+     * for a reason that is not codegen. Exactly the failure the comment above
+     * describes for allocator addresses, in a different currency. */
+    psp_clock_reset();
 }
 
 /* ---- deterministic starting state -----------------------------------------
