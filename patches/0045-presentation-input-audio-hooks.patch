@@ -211,8 +211,8 @@
 + * token, so they must convert and hand off, never block. Passing NULL
 + * unregisters. */
 +/* Each presented frame: the buffer the game last set, as the game supplied
-+ * it. Called from the vblank handler -- the frame boundary the game paces
-+ * itself on. */
++ * it. Called from sceDisplaySetFrameBuf -- the frame flip, and the only
++ * cadence this game keeps; it never asks for a vblank. */
 +void psp_display_set_present(void (*fn)(uint32_t addr, uint32_t stride,
 +                                        uint32_t fmt));
 +/* Each output buffer: the channel, its reserved shape, and where the PCM

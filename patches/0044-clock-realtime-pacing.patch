@@ -151,8 +151,8 @@
   * so a thread spinning on calls that neither read the clock nor wait for a
   * vblank still lets time pass -- otherwise it starves every sleeping thread by
 - * staying runnable forever. */
-+ * staying runnable forever. A no-op in real-time mode, where wall time does
-+ * this job and a tick would break the mapping. */
++ * staying runnable forever. Real-time mode adopts wall time here rather than
++ * going no-op: wall time reaches only threads that sleep or ask. */
  void psp_clock_tick(void);
  
  /* Microseconds since the module started, without advancing it. For diagnostics
