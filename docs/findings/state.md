@@ -8,36 +8,85 @@ out so it is not investigated twice.
 ## What the game does today
 
 It boots. Constructors run, `module_start` returns, the disc is read through
-async I/O, and a frame loop runs to a steady state. Since the scheduler stopped
-starving the game's lower-priority workers the run now **finishes** rather than
-hitting the drain deadline: `threads: all finished`.
+async I/O, and a frame loop runs. **The decoder is opt-in
+(`PSPRECOMP_MPEG_DECODE=1`), and every number below is labelled with its
+configuration** — the two runs stall at the same gate by different routes, and
+an unlabelled number already rewrote this summary wrongly once.
 
-The intro movie still does not produce a picture on screen, but its machinery
-runs — with the decoder enabled, the two semaphores that were never signalled
-all session now are.
+### Default — decoder off: the failure path, force-stopped
+
+`sceMpegGetAvcAu` refuses, and the game prints its own diagnosis:
+
+    Fatal Error!!! : sceMpegGetAvcAu() is failed...ret=806101FE
+
+The teardown chain runs, but the run does **not** end cleanly, which corrects
+an earlier reading of it. Measured from the HLE log of a full default run:
+
+- thread `0x40024` (entry `0x00274090`, prio 18) signals **Movie Start**
+  (`0x0004001E`) exactly once;
+- the movie controller (`0x40001`) consumes it, loops, and waits on Movie
+  Start a **second** time — `sceKernelWaitSemaCB`, no timeout;
+- nothing can ever signal it: the frame consumer (`0x40021`) is still parked
+  on `Movie Sync`, which receives **zero** signals in the whole run;
+- `wait_deadlock` stops the run and names the call. Since patch 0021 the
+  summary says so instead of reading as success:
 
 ```
 entry:     returned
-threads:   all finished
+threads:   stopped by the host (sceKernelWaitSema)
 bad mem:   0 accesses
 disc read: 1,912,832 bytes
 pixels:    2,350,081 drawn by the rasterizer
 ```
 
-The frame is a single flat colour, and that is correct: the only geometry
-reaching the rasterizer is nineteen untextured full-screen quads — screen
-clears — drawn with no vertex colour, which defaults to white. There is nothing
-else to draw yet.
+**`threads: all finished` used to be printed here, and it was wrong** — a
+force-stopped run also leaves zero live threads, because `psp_sched_stop_all`
+marks them dead. That is the fourth entry in *Three ways to measure nothing*.
 
-**It does not stop. It repeats.** Over a 60-second run the game issues
-2,309,200 `sceDisplaySetFrameBuf` and 2,309,199 `sceGeListUpdateStallAddr`
-calls — and 21 GE lists, 19 prims, 2,350,081 pixels *in total*. It presents the
-same nineteen clears about 2.3 million times. Whatever would produce geometry
-never runs.
+The frame loop meanwhile presents the nineteen-clear frame 422 times
+(`sceDisplaySetFrameBuf` 422, `sceGeListUpdateStallAddr` 421, 21 GE lists, 19
+prims, 2,350,081 pixels in total). An earlier note said the game "does not
+stop; it repeats" and reported 2,309,200 presents: that was measured on the
+build pinned to the 60-second drain deadline by the starvation bug. The delay
+fix (cb06a25) let the run end early, and the repeating behaviour went with the
+deadline it lived on.
 
 **The renderer is not the blocker**, and neither is the scheduler. Work on
 textures, sampling or the block transfer will not change the picture while
 nothing is submitted to draw.
+
+### Decoder on — real frames, same gate
+
+The movie machinery runs for real: the ring buffer fills through the game's
+own callback (the first put carries `00 00 01 BA`, a program-stream start
+code), the demuxer and openh264 produce real pictures, and `sceMpegAvcDecode`
+writes them into the buffer the game passes — checked against ffmpeg at the
+byte level; the header comment in `mpeg.c` has the details. Then it stalls:
+
+- `sceMpegGetAvcAu` is called 5 times and `sceMpegAvcDecode` 4 in a 60-second
+  run, then never again — the decode loop's frame queue has reached capacity
+  (open item 1);
+- thread `0x40024` signals Movie Start **~7.4M times** in that run while
+  `AvailableSize` reports 0 free — the whole stream demuxed, almost none of it
+  decoded;
+- **Movie Sync receives zero signals in this configuration too.** An earlier
+  summary claimed both never-signalled semaphores now fire; only Movie Start
+  does. The claim was wrong and this line replaces it;
+- the run reaches the 60-second drain deadline rather than a force-stop:
+
+```
+psprecomp: guest threads still running after 60s; 5 alive, not waiting further:
+    uid 0x00000000  entry 0x00000000  prio 32  blocked
+    uid 0x00040000  entry 0x00253324  prio 32  blocked on sceKernelWaitThreadEnd
+    uid 0x00040001  entry 0x002615B0  prio 16  sleeping
+    uid 0x00040021  entry 0x0027594C  prio 16  blocked on sceKernelWaitSema(Movie Sync sema)
+    uid 0x00040022  entry 0x00274090  prio 18  ready
+    uid 0x00040024  entry 0x00274398  prio 17  running
+```
+
+Both configurations therefore stall at the same gate: **Movie Sync has no
+signaller anywhere**, in either run. The frame consumer parked on it is what
+keeps the movie from advancing, and the movie from ending, in both.
 
 ### A yield cannot give way to a lower priority
 
@@ -61,26 +110,27 @@ hanging. The duration is honoured; only its relation to wall time is not.
 what it waits for; a starved one names nothing, which reads like an idle thread
 rather than a stuck one.
 
-### The run ends on a deadline, not on a deadlock
+### How a run ends, and how to tell the endings apart
 
-The boot host's `psp_sched_drain` gives up after 60 seconds and prints the live
-thread list. That report is easy to misread as a deadlock — it is not one, and
-mistaking it for one cost a session:
+Three endings, three signatures. Reading one as another has cost sessions.
 
-```
-psprecomp: guest threads still running after 60s; 5 alive, not waiting further
-    uid 0x00000000  prio 32  running
-    uid 0x00040000  prio 32  blocked on sceKernelWaitThreadEnd
-    uid 0x00040001  prio 16  running
-    uid 0x00040021  prio 16  blocked on sceKernelWaitSema(Movie Sync sema)
-```
+- **Deadline.** `psp_sched_drain` gives up after 60 seconds and prints
+  `still running after 60s` with the live list. Not a deadlock — a run still
+  going round. The decoder run ends here. Slots saying `running` are what the
+  timeout path does: a guest thread cannot be unwound from outside, so the
+  main context stops waiting for it and takes the token back, leaving the
+  runaway genuinely still running. `sched.h` documents it.
+- **Force-stop.** `wait_deadlock` finds a no-timeout wait that nothing can
+  ever satisfy, prints the live list itself, and marks every thread dead. The
+  default run ends here. The summary names the call since patch 0021:
+  `stopped by the host (sceKernelWaitSema)`.
+- **Deadlock.** `deadlock -- N thread(s) alive, none runnable`. This game has
+  never printed it. Check for that string before concluding anything about
+  the scheduler.
 
-Two slots say `running` because that is what the timeout path does: a guest
-thread cannot be unwound from outside, so the main context stops waiting for it
-and takes the token back, leaving the runaway thread genuinely still running.
-`sched.h` documents it. **A real deadlock prints `deadlock -- N thread(s)
-alive, none runnable`, and this game has never printed it.** Check for that
-string before concluding anything about the scheduler.
+`threads: all finished` is reserved for a run where every thread ended on its
+own. Before patch 0021 it was printed for force-stops too — see *Three ways
+to measure nothing*.
 
 ## The instruments, and what each can and cannot tell you
 
@@ -94,6 +144,8 @@ All are off by default and cost nothing when off.
 | `PSPRECOMP_SEMA=<substring>` | Narrates every wait, take and signal on the semaphores whose name contains it, tagged with the calling thread. A signal also dumps the guest trace. Answers "is nobody signalling this, or is it signalled too early" — which the thread dump cannot. |
 | `PSPRECOMP_PAD=start,cross` | Holds pad buttons for the run. There is no window and no gamepad. |
 | `PSPRECOMP_FRAME=<path>` | Where to write the frame. Defaults to `frame.ppm`, and dumps the GE's render target rather than the scanned-out buffer. |
+| `PSPRECOMP_MPEG_DECODE=1` | Enables the sceMpeg video path: ring buffer, demux, openh264. Off by default — without it `GetAvcAu` refuses and the game takes its error path. Which is why every measurement above is labelled. |
+| `PSPRECOMP_MPEG=1` | Narrates the movie path: ring-buffer puts, the first packet in hex, decoded-frame counts. |
 | `TRACE=1 ./scripts/04-emit-build.sh` | Rebuilds the generated C with function-entry tracing. Slow to build; needed by the watch and by any trace dump. |
 
 The boot summary also reports, without any flag: the firmware-call histogram,
@@ -118,6 +170,12 @@ believed before they were checked.
 - **The unbalanced-return total is not a before/after metric.** It counts
   returns, so it tracks how many frame-loop iterations fit in the drain window.
   Two runs of the *same* build differed by 5,688. Use distinct sites and leaks.
+- **`threads: all finished` counted force-stops as finishes.** `stop_all`
+  marks every thread dead, so a run killed at an unsatisfiable wait also
+  reported zero live threads — indistinguishable, in the summary, from a run
+  that ran to completion. The default run's summary said *all finished* for
+  most of a session while the game sat parked on a semaphore nobody would ever
+  signal. The stop reason (patch 0021) is the difference.
 
 ### The trace ring is not a call stack
 
@@ -166,13 +224,16 @@ something inexplicable, check what it was last told.
   28,470 of the 28,482 unimplemented calls in a run and returns a float on the
   frame path, so a zero looked certain to poison the frame timing. Implemented:
   the picture did not change by a single pixel.
-- **The `sceKernelWaitSema cannot be satisfied` report as a blocker.** It is
-  teardown noise *after* the 60s drain deadline — drain gives up, the main
-  context takes the token back, and the still-running thread's next wait then
-  finds main `RUNNING` rather than `READY`. It fires once, after the
-  `still running after 60s` line. Check the order before reading anything into
-  it; stderr is unbuffered and stdout is not, so the two interleave misleadingly
-  in a redirected log.
+- **The `sceKernelWaitSema cannot be satisfied` report — *as it was*.** It
+  used to be teardown noise *after* the 60s drain deadline: drain gave up, the
+  main context took the token back, and a still-running thread's next wait
+  found main `RUNNING` rather than `READY`. It fired once, after the
+  `still running after 60s` line. **In the default run today it is the
+  terminal event itself, before any deadline**: the controller's second wait
+  on Movie Start, with the frame consumer parked on Movie Sync and no third
+  thread able to signal either. Do not apply the old ordering lesson to that
+  one — but the stderr/stdout interleave warning still stands: stderr is
+  unbuffered, stdout is not, and a redirected log mixes them.
 - **Returning a clean end-of-stream from sceMpeg to end the movie.** The game
   already ends it. `SCE_MPEG_ERROR_INVALID_VALUE` makes the AU-fetch wrapper at
   `0x002750C0` print its own `Fatal Error!!!` and return 0; the caller's
@@ -191,8 +252,10 @@ something inexplicable, check what it was last told.
   lines of evidence say the movie's sync semaphore is never signalled by
   anything, anywhere. At run time the uid census records every uid ever passed
   to `sceKernelSignalSema` and `Movie Sync` (`0x0004001C`) is not among them.
-  Statically, no instruction in the module loads offset 100 — where SoundThread
-  reads it — and reaches `SignalSema`; the offsets that do feed its `$a0` are
+  Counted directly in the HLE log: **zero `sceKernelSignalSema` calls on
+  0x0004001C, in both configurations.** Statically, no instruction in the
+  module loads offset 100 — where SoundThread reads it — and reaches
+  `SignalSema`; the offsets that do feed its `$a0` are
   {0, 4, 8, 20, 40, 52, 128, 132, 140, 176, 396, 668}, and 100 is absent.
 
   What the surrounding structure does say: `struct[88]` is a queue depth,
@@ -232,9 +295,12 @@ it from transcripts, and inherited a stale premise doing so. Anything worth
 picking up next session goes here, in the repository, with enough context to act
 on without the conversation that produced it.
 
-1. **The movie decoder fills its frame queue and nothing drains it.** The decode
-   loop spins half a billion times a run without ever fetching an access unit,
-   and the branch that turns it back is two instructions before the fetch:
+1. **The movie decoder fills its frame queue and nothing drains it.**
+   (Decoder configuration. Measured on today's build: `GetAvcAu` 5 calls,
+   `AvcDecode` 4, then never again; Movie Start signalled ~7.4M times; Movie
+   Sync signalled 0 times.) The decode loop spins half a billion times a run
+   without ever fetching an access unit, and the branch that turns it back is
+   two instructions before the fetch:
 
    ```
    0027516C  lw   $a0, 172($s0)      queue capacity
@@ -311,32 +377,39 @@ on without the conversation that produced it.
    So the whole chain is ordinary calls, and the live question is which of these
    callers runs and which does not — not how they are reached.
 
-1. **The game never leaves its intro-movie state.** It is not stuck; it
-   repeats — ~2.3M frame presents against 21 GE lists for the whole run. The
-   blocked-thread dump now names the object, and that settles it:
+1. **The game never leaves its intro-movie state.** Both configurations stall
+   with the frame consumer parked on Movie Sync — the default run then dies at
+   the controller's second Movie Start wait, the decoder run spins to the
+   deadline. The blocked-thread dump names the object:
 
    ```
    uid 0x00040021  entry 0x0027594C  prio 16  blocked on sceKernelWaitSema(Movie Sync sema)
    ```
 
-   Nothing signals it. The movie *teardown* has been walked and it runs to
-   completion — `0x00273804` signals `Movie Start`, `0x00273838` reaches
-   `sceMpegAvcDecodeStop` (implemented, returns OK), and `0x00274420` marks the
-   movie stopped with `struct[140] = 2`. Confirmed against the trace ring, not
-   inferred. Nothing in that chain touches `Movie Sync`, and the one teardown
-   step that would wait on a semaphore, `0x0027394C`, is skipped.
+   An earlier reading said the movie *teardown* runs to completion and stops
+   the movie cleanly by its own lights. The teardown does run — `0x00273804`
+   signals `Movie Start`, `0x00273838` reaches `sceMpegAvcDecodeStop`
+   (implemented, returns OK), and `0x00274420` marks the movie stopped with
+   `struct[140] = 2`, all confirmed against the trace ring — but it is not a
+   clean stop: the controller afterwards waits on Movie Start a second time,
+   nothing signals it, and the host force-stops the run (see *How a run
+   ends*). Nothing in the teardown chain touches `Movie Sync`, and the one
+   teardown step that would wait on a semaphore, `0x0027394C`, is skipped.
 
-   So the game's *failure* path stops the movie cleanly by its own lights and
-   leaves the frame consumer parked forever. That thread is woken by the frame
-   producer, and at shutdown by whatever sets its quit flag — neither happens
-   here. Nothing in this chain is a psprecomp bug: every call behaves correctly.
-   We are driving the game down an error path its authors never expected to be
-   taken, because on hardware `sceMpegGetAvcAu` does not fail.
+   So the game's failure path leaves **two** unmet dependencies, not one: the
+   frame consumer's Movie Sync, and the controller's second Movie Start. On
+   hardware neither arises, because `sceMpegGetAvcAu` does not fail and the
+   pipeline keeps moving — we are driving the game down an error path its
+   authors never expected to be taken.
 
    Which makes the choice explicit, and it is a real fork: make the game take
    its *normal* completion path (sceMpeg succeeding and reporting the stream
    ending), decode for real, or find another way past. The pad is already ruled
-   out.
+   out. Note the *normal* path already is the decode path — the fork is really
+   "finish the decode pipeline so the movie ends by itself" against "fake a
+   stream end well enough to satisfy the teardown", and the second Movie Start
+   wait shows that faking the stream end alone would not even satisfy the
+   failure path.
 
    `sceDisplayGetFramePerSec` was the obvious suspect and is **not** the cause:
    28,470 of the run's 28,482 unimplemented calls, returning zero on the frame
@@ -413,9 +486,15 @@ on without the conversation that produced it.
    instruction-level trace diffing, not another hypothesis — which means giving
    the recompiled side a per-instruction register dump to match
    `allegrexrecomp interp --regs`.
-4. **The guest's panic message.** The abort chain is `sceKernelStdout` ->
-   `sceIoWrite` -> `abort()`, but no text reaches stderr. Worth having before
-   the HLE push, for the same reason as the 0-is-OK pattern above.
+4. **The guest's panic message.** Partly fixed by patch 0020: the synchronous
+   write path already reached stderr (the movie's `Fatal Error!!!` line is the
+   proof), but the *async* variant returned BADF for fds 1 and 2 — no
+   descriptor slot — and dropped exactly the write a panic path makes right
+   before `abort()`. That hole is closed and pinned by `test_stdio_async`. No
+   run has yet reached the abort itself (the default run stops at the
+   unsatisfiable Movie Start wait first), so whether any text still fails to
+   arrive is untested; next run that hits an abort, check the log for what
+   reached stderr.
 5. **`$k0` thread control block and reent.** Bring-up completeness, not a live
    blocker — only twelve sites in the whole module read `r_k0`.
 
