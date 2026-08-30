@@ -651,7 +651,16 @@ int main(int argc, char **argv) {
     int live = psp_sched_live();
     printf("  [6] threads   %d spawned by module_start\n", live);
     if (g_guest_exited) printf("      (the guest already exited during entry)\n");
-    if (live > 0) live = psp_sched_drain(60);
+    /* 60s is the bring-up default: long enough to reach a deadlock, short
+     * enough to stay interactive. A movie is longer than that, so watching
+     * one end needs a bigger window -- PSPRECOMP_DRAIN=<seconds>. */
+    int drain_s = 60;
+    if (getenv("PSPRECOMP_DRAIN")) {
+        drain_s = atoi(getenv("PSPRECOMP_DRAIN"));
+        if (drain_s <= 0) drain_s = 60;
+        printf("      drain     %ds (PSPRECOMP_DRAIN)\n", drain_s);
+    }
+    if (live > 0) live = psp_sched_drain(drain_s);
 
     printf("---\n");
     printf("ctors:    %s\n", ctors_ok == 0 ? "ok" : "incomplete");

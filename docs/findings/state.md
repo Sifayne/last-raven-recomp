@@ -145,7 +145,8 @@ rather than a stuck one.
 
 Three endings, three signatures. Reading one as another has cost sessions.
 
-- **Deadline.** `psp_sched_drain` gives up after 60 seconds and prints
+- **Deadline.** `psp_sched_drain` gives up after 60 seconds —
+  `PSPRECOMP_DRAIN=<seconds>` widens it — and prints
   `still running after 60s` with the live list. Not a deadlock — a run still
   going round. **The decoder run ends here.** Slots saying `running` are what the
   timeout path does: a guest thread cannot be unwound from outside, so the main
@@ -179,8 +180,10 @@ All are off by default and cost nothing when off.
 | `PSPRECOMP_FINDPTR=<hex>` | Every address in the module, RAM and VRAM holding that value as a word, tagged by region. For pointers that only exist once the PRX is relocated — and for tracking a value's *identity* rather than one of its addresses. |
 | `PSPRECOMP_PEEK=<hex>[,...]` | The word and the byte at each address when the run stops. Answers "what is this field", where FINDPTR answers "where is this value". |
 | `PSPRECOMP_PAD=start,cross` | Holds pad buttons for the run. There is no window and no gamepad. |
+| `PSPRECOMP_PAD_PRESS=start,15,0.5` | Presses a button at a wall-clock moment — down at `delay` seconds, up `duration` (default 0.5) later. A held button never reads as *pressed*, because a press is a transition. Headless only; in a windowed run the SDL layer owns the pad. |
 | `PSPRECOMP_FRAME=<path>` | Where to write the frame. Defaults to `frame.ppm`, and dumps the GE's render target rather than the scanned-out buffer. |
 | `PSPRECOMP_MPEG_DECODE=1` | Demuxer and openh264 video path. Refused, loudly, in a build without openh264. |
+| `PSPRECOMP_DRAIN=<seconds>` | Widens the scheduler drain past its 60-second default, for runs that are supposed to still be going — a movie, for one. |
 | `PSPRECOMP_MPEG=1` | Narrates the movie path. Everything it prints is throttled except `RingbufferPut`, which is bounded by the disc read — safe in either configuration. |
 | `PSPRECOMP_MPEG_DUMP=<path>` | The demuxed elementary stream, once it exceeds 1 MB. For checking against a decoder that is not ours. |
 | `PSPRECOMP_MPEG_FRAME=<path>`, `PSPRECOMP_MPEG_FRAME_NO=<n>` | One decoded frame as a PPM. |
@@ -654,6 +657,84 @@ that produced it.
    inside the scene update is the only remaining candidate — which is the thread
    that item 2 above is already about.
 
+   ### Measured, post-0030: Movie Sync is a startup handshake, and the drain runs
+
+   The whole reachability table from earlier in this item re-measured, in the
+   decoder configuration with patch `0030` (a `TRACE=1` build,
+   `PSPRECOMP_REACHED`, `PSPRECOMP_SEMA=Sync`, sixty seconds):
+
+   | block | reached |
+   |---|---|
+   | `0x002729C0`, the display-side body | **yes** |
+   | `0x0027399C`, the guard | **yes** |
+   | `0x002739D0`, the guard's return-nonzero exit | **yes** |
+   | `0x00272D8C`, the block holding `jal 0x00273A50` | **yes** |
+   | `0x00273A50`, the drain's wrapper | **yes** |
+   | `0x00273E30`, the drain | **yes** |
+   | `0x00273E98`, the block signalling Movie Sync | **yes** |
+
+   Everything is reached. The drain decodes, from the emitted C, into a
+   **startup state machine on `struct[152]`**: while it holds 0 or 1, each call
+   advances it by one and signals Movie Sync — which is why Movie Sync is
+   signalled **exactly twice** per movie, and why the pre-0030 runs, which
+   never got past the first update, saw zero. At `struct[152] >= 2` the drain
+   switches to the retire path: `sceKernelWaitSemaCB(struct[180], 1, 0)` —
+   **Movie Ring buffer sema**, counted against the *ring's* fill rather than
+   the frame queue — then the `struct[168]` decrement at `0x00273E7C`, the
+   matching signal, and finally a signal to `struct[184]`, which is
+   `0x00040020` **Movie Display wait**. That last one is signalled 4,077 times
+   and taken zero — its consumer is `MovieDisplayThread`, which item 2 above
+   proves can never exist here. Growth without a taker is what that semaphore
+   does in this build, by the game's own choice.
+
+   Per-uid counts over a sixty-second decoder run (`PSPRECOMP_SEMA=Movie`):
+   Ring buffer 5,208 signal / 5,208 take / 5,208 park, perfectly balanced —
+   the video queue cycles at display rate. Sound lock 165,816/165,816, Movie
+   Lock 8,154/8,154, Movie Start 53,306 signals against one take (each decode
+   fetch signals it; only the startup handshake waits for it). Nothing here is
+   stuck. **Item 3 below is thereby closed as a frame of its own: the queue
+   full *is* the drain pacing the decode loop, not a deadlock.**
+
+   ### The real blocker was end-of-stream, and patch `0036` is the fix
+
+   With `0030` in, the movie plays — 1.68 billion pixels in sixty seconds,
+   67 MB of stream read, `PSPRECOMP_FRAMES` dumps showing the actual intro —
+   and then plays forever, because `sceMpegGetAvcAu` answered `NO_DATA` at the
+   end of the stream, and `NO_DATA` is precisely what this game's decode loop
+   reads as *go round again* (`0x0027528C`). Audio was worse: `GetAtracAu`
+   succeeded unconditionally, so SoundThread pumped silence down its channel
+   at a steady 55 thousand calls per minute for as long as the run lasted.
+
+   Patch `0036` makes the end observable where it already was visible: the
+   ring callback's contract says a short delivery is the end of the file, so
+   `RingbufferPut` records it in the `es_eof` field that had been declared in
+   the context since the decoder landed and never once read; `avc_pump` decodes
+   the final NAL at end-of-stream instead of waiting forever for a successor
+   that will not come; and both AU fetches return `SCE_MPEG_ERROR_INVALID_VALUE`
+   once everything fed has been consumed — the code path this game's decode
+   loop reads as *report and stop*.
+
+   Measured with the fix: the first movie **ends cleanly, with no Fatal Error
+   print**, its six semaphores torn down, and a second movie instance created
+   with fresh uids — 18 creates across a 240-second run, i.e. three movies
+   back to back. The intro sequence progresses. What it ends *into* is the
+   next open question: at the 240-second drain `user_main` is still in
+   `sceKernelWaitThreadEnd` and three fresh movie threads are alive, so the
+   game is in its next-attract/loop state, unverified past that.
+
+   ### The pad cannot skip the intro, because nothing reads the pad
+
+   `PSPRECOMP_PAD_PRESS` (patch `0037`) presses a button at a wall-clock
+   moment — the held variant cannot, because a game reads *pressed* as a
+   transition and a button down before the first poll never transitions. The
+   press fires; the game ignores it; and the histogram says why:
+   **`sceCtrlReadBufferPositive` is called zero times in the whole run.** The
+   movie loop does not poll the pad in either configuration. Either the intro
+   is unskippable on hardware too, or input arrives through a path not
+   implemented here (a sampling callback — `sceCtrlSetSamplingMode` is
+   currently a no-op). Not a movie-gate problem; recorded so it is not
+   re-chased as one.
+
 3. **The decode loop's frame queue fills and its drain is never reached.**
    *(decoder)* The loop fetches — frames 1, 2, 3 with `ready=1` — then stops,
    because `struct[168]` reaches capacity `struct[172]` and the guard two
@@ -668,6 +749,13 @@ that produced it.
 
    `struct[168]` is decremented in exactly one place, `0x00273E7C` inside the
    drain — which is not reached. Downstream of item 2.
+
+   **Closed, post-0030.** The drain is reached (see the measured table in
+   item 2), the retire path runs, and the Ring buffer sema balances at
+   5,208 signal / 5,208 take per sixty seconds: the queue fills and drains at
+   display rate. The pre-0030 numbers described a movie that never started;
+   with `0030`'s clock fix and `0036`'s end-of-stream, the queue is simply the
+   pipeline working.
 
 4. **The two composed-chain oracle divergences.** Each callee agrees in isolation;
    the disagreement only appears in the chain. Needs instruction-level trace
