@@ -1,9 +1,9 @@
 diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
 new file mode 100644
-index 0000000..e3a2b8a
+index 0000000..b63da82
 --- /dev/null
 +++ b/src/hle/mpeg.c
-@@ -0,0 +1,754 @@
+@@ -0,0 +1,910 @@
 +/* psprecomp — sceMpeg.
 + *
 + * ## What this is, and what it is not
@@ -125,6 +125,15 @@ index 0000000..e3a2b8a
 +    void    *dec;          /* ISVCDecoder*, opaque here so the header stays out */
 +    int      dec_failed;
 +    int      frames;       /* decoded so far */
++
++    /* The most recently decoded picture, copied out of the decoder.
++     * openh264 hands back pointers into its own buffers that stay valid only
++     * until the next decode, and the game fetches an access unit and decodes it
++     * as two separate calls -- so it is copied rather than borrowed. */
++    uint8_t *pic;          /* I420, planes back to back */
++    int      pic_w, pic_h;
++    int      pic_ready;
++    uint32_t pts;          /* 90kHz, derived from the frame number */
 +} mpeg_ctx;
 +
 +static mpeg_ctx g_mpeg[MAX_MPEG];
@@ -462,6 +471,27 @@ index 0000000..e3a2b8a
 +        if (info.iBufferStatus == 1 && planes[0]) {
 +            c->frames++;
 +            produced++;
++            {   /* Copy the picture out while it is still ours to read. */
++                const SSysMEMBuffer *b = &info.UsrData.sSystemBuffer;
++                const size_t need = (size_t)b->iWidth * (size_t)b->iHeight * 3 / 2;
++                if (!c->pic || c->pic_w != b->iWidth || c->pic_h != b->iHeight) {
++                    free(c->pic);
++                    c->pic = (uint8_t *)malloc(need);
++                    c->pic_w = b->iWidth;
++                    c->pic_h = b->iHeight;
++                }
++                if (c->pic) {
++                    uint8_t *d = c->pic;
++                    for (int y = 0; y < b->iHeight; y++, d += b->iWidth)
++                        memcpy(d, planes[0] + (size_t)y * b->iStride[0], (size_t)b->iWidth);
++                    for (int pl = 1; pl <= 2; pl++)
++                        for (int y = 0; y < b->iHeight / 2; y++, d += b->iWidth / 2)
++                            memcpy(d, planes[pl] + (size_t)y * b->iStride[1], (size_t)b->iWidth / 2);
++                    c->pic_ready = 1;
++                    /* 90kHz at 25fps, which is what the stream declares. */
++                    c->pts = (uint32_t)c->frames * (90000u / 25u);
++                }
++            }
 +            if (mpeg_logging() && (c->frames == 1 || c->frames % 50 == 0))
 +                fprintf(stderr, "mpeg: %d frames decoded\n", c->frames);
 +            const char *fp = getenv("PSPRECOMP_MPEG_FRAME");
@@ -558,7 +588,10 @@ index 0000000..e3a2b8a
 +            const uint32_t slot     = packets ? (written % packets) : 0;
 +            const uint32_t bytes    = (uint32_t)n * pkt_size;
 +            const uint8_t *host = (const uint8_t *)psp_mem_ptr(base + slot * pkt_size, bytes);
-+            if (host) { ps_demux(c, host, bytes); avc_pump(c); }
++            if (host) {
++                ps_demux(c, host, bytes);
++                avc_pump(c);
++            }
 +            /* PSPRECOMP_MPEG_DUMP=<path> writes the demuxed elementary stream
 +             * once it is big enough to be worth looking at, so it can be
 +             * checked against a decoder that is not ours. */
@@ -575,10 +608,15 @@ index 0000000..e3a2b8a
 +    }
 +
 +    if (n > 0) {
++        const uint32_t packets = psp_read32(rb + RB_PACKETS);
 +        psp_write32(rb + RB_PACKETS_WRITTEN, psp_read32(rb + RB_PACKETS_WRITTEN) + (uint32_t)n);
-+        const uint32_t free_now = psp_read32(rb + RB_PACKETS_FREE);
-+        psp_write32(rb + RB_PACKETS_FREE,
-+                    free_now > (uint32_t)n ? free_now - (uint32_t)n : 0);
++        psp_write32(rb + RB_PACKETS_READ,    psp_read32(rb + RB_PACKETS_READ) + (uint32_t)n);
++        /* Everything just put has already been demuxed, so the buffer is empty
++         * again and every packet is free. Decrementing instead -- as if the
++         * data were still sitting there waiting for a consumer -- walks the free
++         * count down to zero, at which point the game stops feeding and the
++         * movie ends twenty puts in. */
++        psp_write32(rb + RB_PACKETS_FREE, packets);
 +    }
 +    psp_ret((uint32_t)n);
 +}
@@ -702,21 +740,139 @@ index 0000000..e3a2b8a
 +        psp_ret(SCE_MPEG_ERROR_INVALID_VALUE);
 +        return;
 +    }
-+    if (mpeg_logging()) {
-+        static size_t last;
-+        if (c && c->es_len != last) {
-+            last = c->es_len;
-+            fprintf(stderr, "mpeg: GetAvcAu -- %zu bytes of AVC ES demuxed\n", c->es_len);
++    /* Decode forward until a picture appears. The decoder is the access-unit
++     * boundary detector: it buffers NALs and reports one ready exactly when it
++     * has a whole picture, which saves parsing enough slice-header syntax to
++     * work out the same thing a second time.
++     *
++     * No picture means the ring buffer has not been fed far enough yet, which
++     * is what NO_DATA is for -- the game answers it by putting more. */
++    if (!c || (!c->pic_ready && avc_pump(c) == 0)) {
++        psp_ret(SCE_MPEG_ERROR_NO_DATA);
++        return;
++    }
++
++    const uint32_t au = psp_arg(2);
++    if (au) {
++        /* The timestamps are what the player paces itself on. The elementary
++         * stream stays on our side: the game passes this straight back to
++         * sceMpegAvcDecode and never reads through esBuffer itself. */
++        psp_write32(au + AU_PTS,     c->pts);
++        psp_write32(au + AU_PTS + 4, 0);
++        psp_write32(au + AU_DTS,     c->pts);
++        psp_write32(au + AU_DTS + 4, 0);
++        psp_write32(au + AU_ES_SIZE, 0);
++    }
++    if (mpeg_logging() && c->frames <= 3)
++        fprintf(stderr, "mpeg: GetAvcAu -> frame %d, pts %u\n", c->frames, c->pts);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++/* The audio access unit.
++ *
++ * ATRAC3+ has no permissively licensed decoder, so this cannot produce sound --
++ * but the player fetches a video AU and an audio AU on every pass and will not
++ * advance without both. Refusing here stops the movie just as surely as
++ * refusing video did: measured at ten million calls a minute.
++ *
++ * So the AU is reported, timed to the video, and sceMpegAtracDecode fills its
++ * buffer with silence. That is a substitution, not a claim -- the audio really
++ * is in the stream and we really cannot decode it, and what the game gets is a
++ * correctly shaped, audible-as-nothing result rather than a success with
++ * nothing written behind it. The movie plays; it plays silent. */
++static void hle_GetAtracAu(void) {
++    mpeg_ctx *c = ctx_of(psp_arg(0));
++    if (!mpeg_decoding() || !c) {
++        no_decoder("sceMpegGetAtracAu");
++        psp_ret(SCE_MPEG_ERROR_INVALID_VALUE);
++        return;
++    }
++    const uint32_t au = psp_arg(2);
++    if (au) {
++        psp_write32(au + AU_PTS,     c->pts);
++        psp_write32(au + AU_PTS + 4, 0);
++        psp_write32(au + AU_DTS,     c->pts);
++        psp_write32(au + AU_DTS + 4, 0);
++        psp_write32(au + AU_ES_SIZE, MPEG_ATRAC_ES_SIZE);
++    }
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++/* sceMpegAvcDecode(mpeg, au, frameWidth, bufferAddr, initAddr)
++ *
++ * bufferAddr points at the address of the output buffer rather than being it,
++ * and frameWidth is the stride in pixels, not the picture width -- 512 for a
++ * 480-wide movie. initAddr is the "first call" flag the player clears itself.
++ *
++ * Written as 8888 because that is the format this game's display is in; a mode
++ * selector exists on hardware (sceMpegAvcDecodeMode) and would belong here if a
++ * game ever set something else. */
++static void write_picture(mpeg_ctx *c, uint32_t dst, uint32_t stride) {
++    if (!c->pic || !dst) return;
++    const int w = c->pic_w, h = c->pic_h;
++    const uint8_t *Y = c->pic;
++    const uint8_t *U = Y + (size_t)w * h;
++    const uint8_t *V = U + (size_t)(w / 2) * (h / 2);
++
++    for (int y = 0; y < h; y++) {
++        for (int x = 0; x < w; x++) {
++            const int yy = Y[(size_t)y * w + x] - 16;
++            const int u  = U[(size_t)(y / 2) * (w / 2) + x / 2] - 128;
++            const int v  = V[(size_t)(y / 2) * (w / 2) + x / 2] - 128;
++            const int yr = 76309 * yy;
++            int r  = (yr + 104597 * v) >> 16;
++            int g  = (yr -  53279 * v - 25674 * u) >> 16;
++            int b  = (yr + 132201 * u) >> 16;
++            r = r < 0 ? 0 : r > 255 ? 255 : r;
++            g = g < 0 ? 0 : g > 255 ? 255 : g;
++            b = b < 0 ? 0 : b > 255 ? 255 : b;
++            psp_write32(dst + ((uint32_t)y * stride + (uint32_t)x) * 4,
++                        0xFF000000u | ((uint32_t)b << 16) | ((uint32_t)g << 8) | (uint32_t)r);
 +        }
 +    }
-+    psp_ret(SCE_MPEG_ERROR_NO_DATA);
 +}
-+static void hle_GetAtracAu(void)    { no_decoder("sceMpegGetAtracAu");
-+                                      psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); }
-+static void hle_AvcDecode(void)     { no_decoder("sceMpegAvcDecode");
-+                                      psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); }
-+static void hle_AtracDecode(void)   { no_decoder("sceMpegAtracDecode");
-+                                      psp_ret(SCE_MPEG_ERROR_INVALID_VALUE); }
++
++static void hle_AvcDecode(void) {
++    mpeg_ctx *c = ctx_of(psp_arg(0));
++    if (!mpeg_decoding() || !c) {
++        no_decoder("sceMpegAvcDecode");
++        psp_ret(SCE_MPEG_ERROR_INVALID_VALUE);
++        return;
++    }
++    const uint32_t stride   = psp_arg(2);
++    const uint32_t buf_ptr  = psp_arg(3);
++    const uint32_t init_ptr = psp_arg(4);
++    const uint32_t dst      = buf_ptr ? psp_read32(buf_ptr) : 0;
++
++    if (mpeg_logging()) {
++        static int said;
++        if (said++ < 3)
++            fprintf(stderr, "mpeg: AvcDecode frame %d -> dst 0x%08X stride %u ready=%d\n",
++                    c->frames, dst, stride, c->pic_ready);
++    }
++
++    if (c->pic_ready) {
++        write_picture(c, dst, stride ? stride : 512);
++        c->pic_ready = 0;
++    }
++    /* The player clears this itself after the first call; it is only ever
++     * written here so a game that never initialised it sees something sane. */
++    if (init_ptr) psp_write32(init_ptr, 0);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++/* Silence, in the shape the caller asked for. See hle_GetAtracAu. */
++static void hle_AtracDecode(void) {
++    mpeg_ctx *c = ctx_of(psp_arg(0));
++    if (!mpeg_decoding() || !c) {
++        no_decoder("sceMpegAtracDecode");
++        psp_ret(SCE_MPEG_ERROR_INVALID_VALUE);
++        return;
++    }
++    const uint32_t dst = psp_arg(2);
++    if (dst) {
++        void *p = psp_mem_ptr(dst, MPEG_ATRAC_ES_OUT_SIZE);
++        if (p) memset(p, 0, MPEG_ATRAC_ES_OUT_SIZE);
++    }
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
 +static void hle_AvcDecodeStop(void) {
 +    /* Reports zero frames left, so a drain loop terminates. */
 +    if (psp_arg(3)) psp_write32(psp_arg(3), 0);
