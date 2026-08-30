@@ -1,0 +1,125 @@
+diff --git a/src/hle/ge.c b/src/hle/ge.c
+index eaa42b1..c37c407 100644
+--- a/src/hle/ge.c
++++ b/src/hle/ge.c
+@@ -949,17 +949,25 @@ static void run_list(ge_queue *q) {
+          * actually sets -- the PSP offers eleven pixel formats, four palette
+          * formats and a swizzle, and building all of that before knowing which
+          * are used is how a rasterizer ends up mostly untested code. */
++        /* Texture and palette addresses arrive in two registers, and the
++         * second one carries the high *nibble* -- bits 24..27 -- in its own
++         * bits 16..19, not in its low byte. Both addresses are 16-byte
++         * aligned, so the low four bits of the base are not part of it
++         * either. Taking the low byte instead reads the palette from a
++         * completely different place, which leaves texel *indices* right and
++         * every colour wrong: legible shapes, speckled everywhere. */
+         case GE_TEXADDR0:
+-            g_ge.tex_addr = (g_ge.tex_addr & 0xFF000000u) | (arg & 0xFFFFFFu);
++            g_ge.tex_addr = (g_ge.tex_addr & 0x0F000000u) | (arg & 0x00FFFFF0u);
+             break;
+         case GE_TEXBUFWIDTH0:
+-            g_ge.tex_stride = arg & 0xFFFF;
+-            g_ge.tex_addr   = (g_ge.tex_addr & 0x00FFFFFFu) | ((arg & 0xFF0000u) << 8);
++            g_ge.tex_stride = arg & 0x7FF;
++            g_ge.tex_addr   = (g_ge.tex_addr & 0x00FFFFF0u) | ((arg << 8) & 0x0F000000u);
+             break;
+         case GE_TEXSIZE0:
+-            /* log2 of each dimension, width in the low byte. */
+-            g_ge.tex_w = 1u << (arg & 0xFF);
+-            g_ge.tex_h = 1u << ((arg >> 8) & 0xFF);
++            /* log2 of each dimension, four bits each. Masking a whole byte
++             * lets a stray high bit ask for a 1 << 200 texture. */
++            g_ge.tex_w = 1u << (arg & 0xF);
++            g_ge.tex_h = 1u << ((arg >> 8) & 0xF);
+             break;
+         case GE_TEXFORMAT:
+             g_ge.tex_format = arg & 0xF;
+@@ -977,13 +985,10 @@ static void run_list(ge_queue *q) {
+             g_ge.clut_format = arg & 3;
+             break;
+         case GE_CLUTADDR:
+-            g_ge.clut_addr = (g_ge.clut_addr & 0xFF000000u) | (arg & 0xFFFFFFu);
++            g_ge.clut_addr = (g_ge.clut_addr & 0x0F000000u) | (arg & 0x00FFFFF0u);
+             break;
+-        /* The palette address arrives in two halves and only the low one was
+-         * being taken, so every CLUT pointed into the first 16MB regardless of
+-         * where the game put it. */
+         case GE_CLUTADDRUPPER:
+-            g_ge.clut_addr = (g_ge.clut_addr & 0x00FFFFFFu) | ((arg & 0xFFu) << 24);
++            g_ge.clut_addr = (g_ge.clut_addr & 0x00FFFFF0u) | ((arg << 8) & 0x0F000000u);
+             break;
+         case GE_TEXFUNC:
+             g_ge.tex_func = arg & 7;
+diff --git a/src/render.c b/src/render.c
+index 5ecc079..79e9b4a 100644
+--- a/src/render.c
++++ b/src/render.c
+@@ -12,6 +12,8 @@
+ #include "psprecomp/render.h"
+ #include "psprecomp/mem.h"
+ 
++#include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ 
+ /* ---- shared target state ------------------------------------------------- */
+@@ -59,11 +61,24 @@ static struct {
+     int      w, h, fmt, func, swizzled;
+ } g_tex;
+ 
++/* PSPRECOMP_TEXDUMP=<path> writes each distinct texture the game binds, decoded
++ * through this same sampler, as <path>-NN.ppm.
++ *
++ * "The picture is speckled" has two causes that look identical on screen: the
++ * sampler reading the wrong texels, or the texture in memory not being what we
++ * think. Decoding it standalone separates them -- if the dump is clean and the
++ * frame is not, the fault is downstream of sampling. */
++static uint32_t g_dumped[16];
++static int      g_dumped_n;
++
++static void dump_texture(void);
++
+ static void sw_texture(uint32_t addr, uint32_t stride, int w, int h,
+                        int fmt, int func, int swizzled) {
+     g_tex.addr = addr; g_tex.stride = stride;
+     g_tex.w = w; g_tex.h = h;
+     g_tex.fmt = fmt; g_tex.func = func; g_tex.swizzled = swizzled;
++    dump_texture();
+ }
+ 
+ enum {
+@@ -171,6 +186,34 @@ static uint32_t sample_texel(int u, int v) {
+     return expand16((uint32_t)psp_read16(g_tex.addr + off), g_tex.fmt);
+ }
+ 
++static void dump_texture(void) {
++    const char *base = getenv("PSPRECOMP_TEXDUMP");
++    if (!base || !*base || g_dumped_n >= 16) return;
++    if (!texture_usable()) return;
++    for (int i = 0; i < g_dumped_n; i++) if (g_dumped[i] == g_tex.addr) return;
++    g_dumped[g_dumped_n] = g_tex.addr;
++
++    char path[1024];
++    snprintf(path, sizeof path, "%s-%02d.ppm", base, g_dumped_n);
++    FILE *f = fopen(path, "wb");
++    if (!f) return;
++    fprintf(f, "P6\n%d %d\n255\n", g_tex.w, g_tex.h);
++    for (int v = 0; v < g_tex.h; v++)
++        for (int u = 0; u < g_tex.w; u++) {
++            const uint32_t c = sample_texel(u, v);
++            const uint8_t rgb[3] = { (uint8_t)(c & 0xFF), (uint8_t)((c >> 8) & 0xFF),
++                                     (uint8_t)((c >> 16) & 0xFF) };
++            fwrite(rgb, 1, 3, f);
++        }
++    fclose(f);
++    fprintf(stderr, "tex: %s  0x%08X %dx%d stride %u fmt %d%s clut 0x%08X fmt %d "
++                    "shift %d mask %02X start %d\n",
++            path, g_tex.addr, g_tex.w, g_tex.h, g_tex.stride, g_tex.fmt,
++            g_tex.swizzled ? " swizzled" : "", g_clut.addr, g_clut.fmt,
++            g_clut.shift, g_clut.mask, g_clut.start);
++    g_dumped_n++;
++}
++
+ /* Modulate: texel times vertex colour, per channel. */
+ static uint32_t modulate(uint32_t tex, uint32_t col) {
+     uint32_t out = 0;
