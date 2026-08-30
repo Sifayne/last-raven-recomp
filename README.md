@@ -5,9 +5,11 @@ the game's Allegrex MIPS code into C ahead of time, linked against a native
 runtime, to produce a real PC executable rather than an emulated one. Same model
 as N64Recomp / *Zelda 64: Recompiled*.
 
-**Status: Phase 0 complete — feasibility measured, verdict GO. The game does not
-run.** See [docs/findings/phase0.md](docs/findings/phase0.md) for the numbers and
-what is still missing.
+**Status: Phase 0 complete — feasibility measured, verdict GO. The game boots
+and reaches its frame loop; the intro movie is the current blocker.** Phase 0's
+numbers are in [docs/findings/phase0.md](docs/findings/phase0.md); where things
+stand right now, and how to measure them, is
+[docs/findings/state.md](docs/findings/state.md).
 
 Phase 1 added the differential oracle: an Allegrex interpreter sharing the
 toolkit's decoder, runtime and HLE, so a disagreement with the recompiled C
@@ -59,18 +61,27 @@ Then the oracle, which needs stage 04's objects:
 scripts/05-oracle.sh 400
 ```
 
+Then the boot host, which loads the module, runs its constructors and threads
+against a scheduler, a software GE and the HLE:
+
+```bash
+scripts/06-boot.sh
+```
+
 Stage 04 emits ~2.1M lines of C, compiles it, and links it against the runtime.
-It takes a couple of minutes and produces a link probe, not a playable game.
+It takes a couple of minutes. The boot host runs the game today: it reaches its
+frame loop and stalls on the intro movie — see
+[docs/findings/state.md](docs/findings/state.md) for exactly where and why.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `scripts/` | the Phase 0 pipeline, one stage per file |
-| `host/` | the native host. Currently just a link probe |
+| `scripts/` | the pipeline, one stage per file — 00–06 bring-up, `07-autotests.sh` the behavioural-oracle scaffold, `verify-patches.sh` the patch-series check |
+| `host/` | the native host: `boot` (module load, scheduler, GE rasterizer, HLE) and the link probe |
 | `docs/` | decisions and findings |
-| `patches/` | fixes to vendored tools, applied by `build-tools.sh` |
-| `tools/psprecomp` | submodule — the recompiler and runtime (MIT) |
+| `patches/` | fixes and additions to vendored tools, applied by `build-tools.sh`, checked by `verify-patches.sh` |
+| `tools/psprecomp` | submodule — the recompiler, runtime and interpreter (MIT) |
 | `tools/pspdecrypt` | submodule — decryption, for the mode-9 path psprecomp lacks |
 | `game/`, `reports/` | gitignored working directories |
 
@@ -92,8 +103,13 @@ means for this project's own license first.
 
 ## Upstream
 
-`patches/` carries three changes to `psprecomp`, applied by `build-tools.sh` and
-verified to apply to a pristine checkout in order:
+`patches/` carries changes to `psprecomp`, applied by `build-tools.sh` and
+verified to apply to a pristine checkout in order — `scripts/verify-patches.sh`
+is that check, and `--build` compiles and tests the pristine clone too.
+
+The first three are upstream bugs with a fix that belongs in
+[sp00nznet/psprecomp](https://github.com/sp00nznet/psprecomp); they are kept
+here so a fresh clone reproduces the same build in the meantime:
 
 | Patch | What |
 |---|---|
@@ -101,6 +117,7 @@ verified to apply to a pristine checkout in order:
 | `0002` | Two emitter codegen bugs: an invalid float literal, and a label-ordering hazard |
 | `0003` | The interpreter oracle, filling an unchecked box in upstream's Phase 5 roadmap |
 
-All three belong upstream in
-[sp00nznet/psprecomp](https://github.com/sp00nznet/psprecomp); they are kept
-here so a fresh clone reproduces the same build in the meantime.
+Patches `0004` onward are this project's bring-up — HLE additions (threads,
+scheduler, disc filesystem, sceMpeg), discovery fixes, and the diagnostics the
+findings documents lean on. They are driven from this repo's needs rather than
+upstream's, and each patch's own diff carries the reasoning.
