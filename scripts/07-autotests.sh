@@ -14,10 +14,10 @@
 # and nothing built from them is committed — same policy as game data.
 #
 # Current capability, stated plainly: each ELF's module_start runs under the
-# interpreter with HLE imports bound. A test's main thread is started by HLE
-# thread creation, and the interpreter does not yet service that re-entry — it
-# counts it. So a test today exercises its startup path and its direct
-# module_start code, and the report says how much never ran.
+# interpreter with HLE imports bound, and HLE re-entry -- thread starts and
+# dispatched callbacks -- is served interpreted and nested. Threads run to
+# completion at their start point; that is sequential semantics, not
+# scheduling. See docs/findings/autotests.md for the full seam list.
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -37,7 +37,10 @@ for f in "${ELFS[@]}"; do
     name="$(basename "$f")"
     out="$REPORTS/07-${name%.*}.txt"
     info "interp $name (budget $BUDGET)"
-    if "$AR" interp "$f" --budget "$BUDGET" > "$out" 2>&1; then
+    # --dispatch: a test's main thread is started by HLE and its callbacks
+    # dispatch into guest code; serving them is what makes anything past
+    # module_start execute at all. See docs/findings/autotests.md.
+    if "$AR" interp "$f" --dispatch --budget "$BUDGET" > "$out" 2>&1; then
         PASS=$((PASS + 1))
     else
         FAIL=$((FAIL + 1))
@@ -46,9 +49,9 @@ for f in "${ELFS[@]}"; do
     # `|| true` because an absent pattern exits 1 under pipefail, and set -e
     # would take the whole run down with it.
     status="$(grep -m1 '^stopped:' "$out" | cut -d' ' -f2- || true)"
-    reentry="$(grep -m1 '^re-entry:' "$out" | cut -d' ' -f2- || true)"
+    refused="$(grep -m1 '^re-entry:' "$out" | cut -d' ' -f2- || true)"
     printf '    %-28s %s\n' "$name" "${status:-no output}"
-    [ -n "$reentry" ] && printf '    %-28s %s\n' "" "$reentry"
+    [ -n "$refused" ] && printf '    %-28s %s\n' "" "$refused"
 done
 
 info "$PASS returned cleanly, $FAIL stopped early — details in $REPORTS/07-*.txt"

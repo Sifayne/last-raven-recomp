@@ -1,7 +1,7 @@
 # A behavioural oracle: pspautotests through the interpreter
 
-Written as scaffolding, not as a working harness — the difference matters and
-is stated up front.
+Written as a working harness with known seams — what it does and does not do
+is listed below, and the list is load-bearing.
 
 ## Why at all
 
@@ -23,43 +23,47 @@ ground truth where the current oracle cannot see.
 ## What exists now
 
 `scripts/07-autotests.sh <dir-of-elfs>` runs each ELF through
-`allegrexrecomp interp`, which loads any ELF/PRX, applies relocations, binds
-import thunks to HLE, and runs from the module entry under an instruction
-budget. Reports land in `reports/07-<name>.txt`.
+`allegrexrecomp interp --dispatch`, which loads any ELF/PRX, applies
+relocations, binds import thunks to HLE, and runs from the module entry under
+an instruction budget. HLE re-entry is **served**: a firmware handler that
+starts a thread or dispatches into guest code runs that code interpreted,
+nested, charged against the run's budget (`psp_interp_service_dispatch`; the
+dispatch hook and the spawn hook in interp.c). Reports land in
+`reports/07-<name>.txt`.
 
 You build the tests yourself (`pspdev/pspautotests`, your own toolchain) and
 point the script at the directory. Nothing prebuilt is fetched, nothing built
 from them is committed — the same policy as game data, for the same reason.
 
-## What it cannot do yet, and the milestones
+## Where the seams are
 
 Stated plainly, because a harness that silently runs less than it looks like
 it runs is the whole class of bug this project keeps writing down:
 
-1. **A test's main thread never runs.** The standard crt's `module_start`
-   creates and starts the main thread through HLE, and the interpreter does
-   not yet service HLE re-entry into guest code — it counts it (`re-entry:` in
-   the report). Today a test exercises its startup path and nothing else.
-   *Milestone: run the thread entry the way the boot host's scheduler does.*
-   The scheduler exists in the runtime (`sched.c`) and the boot host proves it
-   works; the interpreter does not use it yet.
-2. **No output capture.** A test prints through `sceKernelStdout`/`printf`,
-   which reaches stderr via the fd-1 path in `hle_Write` (and via the async
-   path since patch 0020). The script's report captures interpreter stdout,
-   and the guest's own prints are interleaved in it. Comparing against
-   recorded real-hardware output comes after milestone 1.
+1. **Threads run to completion at their start point.** That is sequential
+   semantics, not scheduling: no interleaving, no preemption, and a thread
+   that blocks part-way has nothing to be resumed *into* — the nested run
+   ends one way or another and the starter carries on. Most pspautotests
+   mains run their checks and return, which is exactly the shape this
+   serves. Tests that depend on real concurrency are out of reach until the
+   interpreter runs on the boot host's scheduler.
+2. **No output comparison.** A test prints through `sceKernelStdout`/`printf`,
+   which reaches stderr via the fd-1 path in `hle_Write` (and the async path
+   since patch 0020). The report captures interpreter stdout with the guest's
+   own prints interleaved. Comparing against recorded real-hardware output
+   comes next.
 3. **No expected-output database.** Some tests need hardware recordings;
    those come from whoever has the hardware, test by test.
 
-The honest first measurement this scaffold supports: point it at any built
-test ELF and read the `re-entry:` count — that number is how much of the test
-never ran, and it is the size of milestone 1.
+`nest refused` in a report is the bounded-execution signal: a callback or
+thread start beyond the nesting limit did not run, so the result is not a
+faithful execution of that test.
 
 ## Not this tool's job
 
 - Building the PSP toolchain or the tests. `pspautotests` upstream documents
   that; it is out of scope here.
 - Recompiling the tests through the emit pipeline. That is the eventual shape
-  (the differential oracle ran the same module both ways), but milestone 1
-  comes first: if a test cannot run under the interpreter, recompiling it
-  proves nothing about the environment.
+  (the differential oracle ran the same module both ways), but running them
+  interpreted comes first: if a test cannot execute, recompiling it proves
+  nothing about the environment.
