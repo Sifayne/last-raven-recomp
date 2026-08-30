@@ -155,6 +155,15 @@ something inexplicable, check what it was last told.
   `0x0027394C`. `NO_DATA` would restore the fifteen-million-query spin — see
   the header comment in `mpeg.c`, which has the guest disassembly. **The stall
   is downstream, in the teardown, which never signals `Movie Sync`.**
+- **A colour-conversion or decode-mode stage as the missing display step.** The
+  game imports **none** of `sceMpegAvcDecodeMode`, `sceMpegAvcCsc`,
+  `sceMpegAvcDecodeYCbCr`, `sceMpegAvcCopyYCbCr` or `sceMpegAvcQueryYCbCrSize`.
+  All 23 of its sceMpeg imports were identified by SHA-1 and they are the plain
+  path only — init, create, ring buffer, regist, the queries, `InitAu`,
+  `GetAvcAu`, `GetAtracAu`, `AvcDecode`, `AtracDecode`, `AvcDecodeStop`, delete,
+  finish. So `sceMpegAvcDecode` writing into the buffer the game passes **is**
+  the whole display mechanism, and registering `sceMpegAvcDecodeMode` would be
+  dead code.
 - **Skipping the intro movie with `PSPRECOMP_PAD`.** The game does read the
   pad — holding `start,cross` visibly changes which threads park where — but
   the skip path routes back into the movie subsystem rather than around it:
