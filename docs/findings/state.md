@@ -250,6 +250,15 @@ on without the conversation that produced it.
    The decoder is not starved and the semaphores are not stuck. The consumer
    simply never runs, so the queue reaches capacity and stays there.
 
+   And the consumer is only reachable through a function pointer. Its callers
+   `0x00272224` and `0x00272278` are the target of no `jal` anywhere in the
+   module; all four addresses in that chain appear in the entry list only
+   because the relocation-pointer scan found them stored as data. There are 143
+   `jalr` sites in this stretch of code, and the sound player at `0x00281CB4`
+   shows the idiom — `lw $a3, 4($a1)` then `jalr $a3`, a C++ virtual call. So
+   the queue is drained by a virtual method that something must dispatch, and
+   nothing does.
+
 1. **The game never leaves its intro-movie state.** It is not stuck; it
    repeats — ~2.3M frame presents against 21 GE lists for the whole run. The
    blocked-thread dump now names the object, and that settles it:
