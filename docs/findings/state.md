@@ -8,9 +8,13 @@ out so it is not investigated twice.
 ## What the game does today
 
 It boots. Constructors run, `module_start` returns, the disc is read through
-async I/O, and a frame loop runs to a steady state it never leaves. The intro
-movie does **not** end — see the open work below; that is the thing holding
-everything else up.
+async I/O, and a frame loop runs to a steady state. Since the scheduler stopped
+starving the game's lower-priority workers the run now **finishes** rather than
+hitting the drain deadline: `threads: all finished`.
+
+The intro movie still does not produce a picture on screen, but its machinery
+runs — with the decoder enabled, the two semaphores that were never signalled
+all session now are.
 
 ```
 entry:     returned
@@ -34,6 +38,24 @@ never runs.
 **The renderer is not the blocker**, and neither is the scheduler. Work on
 textures, sampling or the block transfer will not change the picture while
 nothing is submitted to draw.
+
+### A yield cannot give way to a lower priority
+
+`handoff_locked` picks the most urgent READY thread, and `psp_sched_yield`
+leaves the caller READY — so a yield from the top priority hands the token
+straight back to itself. A game whose main loop is `render(); delay();` at
+priority 16 therefore starves its own priority-17 and -18 workers forever, and
+they show up in the thread list as **ready, not blocked**: not waiting for
+anything, simply never chosen.
+
+That is what `sceKernelDelayThread` had been doing. It uses `psp_sched_delay`
+now, which makes the caller ineligible for one round so anything runnable can
+win, then becomes ready again. The duration still cannot be honoured — there is
+no clock — but the ineligibility is the half that matters.
+
+**Ready-but-never-running is the signature.** A thread parked on something names
+what it waits for; a starved one names nothing, which reads like an idle thread
+rather than a stuck one.
 
 ### The run ends on a deadline, not on a deadlock
 
