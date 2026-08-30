@@ -1,0 +1,37 @@
+diff --git a/src/hle/ge.c b/src/hle/ge.c
+index 4cb4015..249e305 100644
+--- a/src/hle/ge.c
++++ b/src/hle/ge.c
+@@ -725,12 +725,18 @@ static void draw_prim_transformed(uint32_t type, uint32_t count,
+                 if (v[i].y < y0) y0 = v[i].y;   if (v[i].y > y1) y1 = v[i].y;
+             }
+             fprintf(stderr, "draw: %-14s %2u verts  x %4d..%-4d y %4d..%-4d  "
+-                            "rgba %08X  vtype %06X  tex %s\n",
+-                    PRIM_NAME[type & 7], decoded, x0, x1, y0, y1, v[0].rgba,
++                            "fbp %08X  rgba %08X  vtype %06X  tex %s\n",
++                    PRIM_NAME[type & 7], decoded, x0, x1, y0, y1,
++                    ge_fb_address(g_ge.fbp), v[0].rgba,
+                     g_ge.vtype, (g_ge.tex_enable && tex_off >= 0 && g_ge.tex_addr)
+                                 ? "yes" : "no");
+-            fprintf(stderr, "      world");
++            fprintf(stderr, "      fbp %08X fbw %u\n      world", 
++                    ge_fb_address(g_ge.fbp), g_ge.fbw);
+             for (int i = 0; i < 12; i++) fprintf(stderr, " %.2f", g_tl.world[i]);
++            fprintf(stderr, "\n      view ");
++            for (int i = 0; i < 12; i++) fprintf(stderr, " %.2f", g_tl.view[i]);
++            fprintf(stderr, "\n      proj ");
++            for (int i = 0; i < 16; i++) fprintf(stderr, " %.3f", g_tl.proj[i]);
+             fprintf(stderr, "\n      model v0");
+             {
+                 float m[3];
+@@ -874,8 +880,9 @@ static void draw_prim(uint32_t type, uint32_t count) {
+                 if(v[i].y<y0)y0=v[i].y; if(v[i].y>y1)y1=v[i].y;
+             }
+             fprintf(stderr, "2d:   %-14s %2u verts  x %4d..%-4d y %4d..%-4d  "
+-                            "rgba %08X %08X  vtype %06X  tex %s\n",
++                            "fbp %08X  rgba %08X %08X  vtype %06X  tex %s\n",
+                     PRIM_NAME[type & 7], decoded, x0,x1,y0,y1,
++                    ge_fb_address(g_ge.fbp),
+                     v[0].rgba, v[decoded>1?1:0].rgba, g_ge.vtype,
+                     has_uv ? "yes" : "no");
+             fprintf(stderr, "      clear %s (z %d)  blend %s src %d dst %d  "
