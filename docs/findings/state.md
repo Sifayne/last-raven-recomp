@@ -404,7 +404,48 @@ that produced it.
    wash-out would also produce — **one sample cannot separate those**, and
    reaching for the sequence is what settled it in one run.
 
-   **What is left:** perspective-correct interpolation is absent (affine only,
+   **The logo is 68px left of where it belongs, and the cause is upstream of
+   the GE.** A reference render (PPSSPP) puts the glyphs at x 69..420, y
+   119..147. Ours land at x 1..349, y 118..148 — **the y position and the width
+   match**, and only x is short, by exactly 68.
+
+   Everything the GE is given has been verified byte-for-byte:
+
+   - the vertex layout — raw bytes `00000000 00000000 808080FF 00000000...`,
+     stride 24, UV at 0, colour at 8, position at 12, model v0 = (0,0,0);
+   - the viewport and offset — scale 240,-136, centre 2048,2048, offset
+     1808,1912, **identical** to the fullscreen quads that land correctly;
+   - the view matrix (identity) and the projection (plain ortho, 0..480 → screen
+     1:1, so screen x equals model x).
+
+   The world matrix arrives as `1,0,0 | 0,1,0 | 0,68,1 | 0,117,0`. Under the
+   layout `sceGuSetMatrix` uses — a column-major 4x4 with the last row dropped —
+   translation is the last group, `(0,117,0)`. The y is right and there is no x.
+   **No reading of that matrix can put 68 into x**: with the vertices' z at 0 it
+   can only ever affect y.
+
+   And the game's own data says x should be 68. At `0x09ACE27C`:
+
+   ```
+   0.0   352.0   38.0   68.0   117.0   1.0   1.0
+         width   height  x      y      scale
+   ```
+
+   The uploader is `psp_func_002B752C`, which packs 24-bit floats with `lwr` at
+   offsets 4k+1 — `lui $t, 0x3B00` then `lwr $t, 1($a2)` — reading elements
+   0,1,2, 4,5,6, 8,9,10, 12,13,14. So DATA word 7 is element **m[9]** and word 9
+   is **m[12]**. Word 7 carried `0x428800` (68.0) and word 9 carried zero, which
+   says directly that the source matrix has the x translation in `m[9]` —
+   col2's y — instead of `m[12]`.
+
+   `lwr` itself is fine: it yields exact floats (1.0 → `0x3F8000`, 68.0 →
+   `0x428800`). **So the matrix is built wrong before the GE ever sees it, by
+   recompiled guest code** — which would make this the first codegen defect
+   found with a visible consequence, and the differential oracle is the tool
+   for it. Identify the builder (a `sceGumTranslate`-shaped function feeding
+   `psp_func_002B752C`) and run that one function through `oracle_diff`.
+
+   **Also left:** perspective-correct interpolation is absent (affine only,
    exact on a fullscreen quad), and there is no clipper.
 
 1. **How the renderer got there.** *(Closed — kept for the measurements, which
