@@ -1,0 +1,178 @@
+diff --git a/tools/allegrexrecomp/interp.c b/tools/allegrexrecomp/interp.c
+index e503c03..70aa7cb 100644
+--- a/tools/allegrexrecomp/interp.c
++++ b/tools/allegrexrecomp/interp.c
+@@ -466,6 +466,27 @@ static int branch_taken(const a_insn *in) {
+ #define NESTED_RA  0x0DEAD100u
+ #define MAX_NEST   64
+ 
++/* A nested run that ends badly is otherwise silent.
++ *
++ * Only the outermost run's status is reported, and it says "returned" whenever
++ * the *outer* context got its $ra back -- which it does even when the thread it
++ * started died on a bad instruction two frames down. That reads as a clean run
++ * that simply printed nothing, and sends you looking at the program instead of
++ * at the interpreter. Say which nested entry point stopped, and why. */
++static unsigned long long g_nest_failed;
++
++static void note_nested(const char *what, uint32_t entry, const psp_interp *sub) {
++    /* I_EXIT is a finish, not a failure: a test's main thread ends by calling
++     * sceKernelExitGame, and reporting that as a dead thread would flag every
++     * healthy run. */
++    if (sub->status == I_OK_RETURN || sub->status == I_EXIT) return;
++    g_nest_failed++;
++    fprintf(stderr, "interp: nested %s 0x%08X stopped: %s at pc 0x%08X\n",
++            what, entry, psp_interp_status_str(sub->status), sub->fault_pc);
++}
++
++unsigned long long psp_interp_nest_failed(void) { return g_nest_failed; }
++
+ static psp_interp *g_active;      /* the run currently executing, if any */
+ static int         g_nest;
+ static uint64_t    g_nest_refused;
+@@ -504,6 +525,7 @@ static int dispatch_hook(uint32_t addr) {
+     psp_interp_run(&sub);
+     g_active = outer;
+     g_nest--;
++    note_nested("callback", addr, &sub);
+ 
+     outer->executed += sub.executed;
+     psp_cpu.r[PSP_RA_INDEX] = saved_ra;
+@@ -560,6 +582,10 @@ static int spawn_hook(uint32_t uid, uint32_t entry, uint32_t sp,
+     R(PSP_REG_A0) = a0;
+     R(PSP_REG_A1) = a1;
+     R(PSP_REG_SP) = sp;
++    /* $gp is per-module, not per-thread, and the starter is in the same module
++     * as the thread it starts -- so inheriting it is both correct and the only
++     * source available here. Zero would point the small-data area at address 0. */
++    R(PSP_REG_GP) = saved.r[PSP_REG_GP];
+ 
+     psp_interp sub;
+     psp_interp_init(&sub, entry, NESTED_RA, left);
+@@ -571,6 +597,7 @@ static int spawn_hook(uint32_t uid, uint32_t entry, uint32_t sp,
+     psp_interp_run(&sub);
+     g_active = outer;
+     g_nest--;
++    note_nested("thread", entry, &sub);
+ 
+     outer->executed += sub.executed;
+     psp_cpu = saved;
+@@ -709,7 +736,29 @@ psp_interp_status psp_interp_run(psp_interp *it) {
+      * in here. */
+     psp_interp *prev = g_active;
+     g_active = it;
+-    while (psp_interp_step(it) == I_RUNNING) { }
++    uint64_t check_at = 0;
++    while (psp_interp_step(it) == I_RUNNING) {
++        /* A program that calls sceKernelExitGame is done, and the HLE records
++         * that rather than killing the process. Nobody was reading the flag,
++         * so the guest ran on past its own exit until the budget stopped it --
++         * and "instruction budget exhausted" reads as a hang, not as a program
++         * that finished and had nowhere to return to. Checked here so it ends
++         * every nested run too, innermost first.
++         *
++         * Sampled rather than tested every step: this is the hot loop of the
++         * oracle's millions of instructions, and stopping within 4K of the
++         * call is as good as stopping at it for every use this has.
++         *
++         * A threshold, not `executed & 0xFFF`. A step is an instruction *plus
++         * its delay slot*, so the counter advances by one or two, and a spin
++         * loop -- which is exactly what a program sits in after asking to exit
++         * -- advances by two every time. Land on the wrong parity there and no
++         * value of the counter is ever a multiple of 4096, so the check never
++         * fires. It was written as a mask first, and did nothing at all. */
++        if (it->executed < check_at) continue;
++        check_at = it->executed + 4096;
++        if (psp_exit_requested()) { it->status = I_EXIT; break; }
++    }
+     g_active = prev;
+     return it->status;
+ }
+@@ -725,6 +774,7 @@ const char *psp_interp_status_str(psp_interp_status s) {
+     case I_TRAP_BREAK:   return "break";
+     case I_TRAP_BRANCH_IN_SLOT: return "control transfer in a delay slot";
+     case I_TRAP_BADPC:   return "pc left mapped memory";
++    case I_EXIT:         return "guest called sceKernelExitGame";
+     }
+     return "unknown";
+ }
+diff --git a/tools/allegrexrecomp/interp.h b/tools/allegrexrecomp/interp.h
+index 834d7b1..5f52429 100644
+--- a/tools/allegrexrecomp/interp.h
++++ b/tools/allegrexrecomp/interp.h
+@@ -40,6 +40,7 @@ typedef enum {
+     I_TRAP_BREAK,
+     I_TRAP_BRANCH_IN_SLOT, /* a control transfer inside a delay slot */
+     I_TRAP_BADPC,     /* pc left mapped memory */
++    I_EXIT,           /* the guest called sceKernelExitGame -- a clean finish */
+ } psp_interp_status;
+ 
+ /* A run in progress.
+@@ -145,6 +146,11 @@ void psp_interp_service_dispatch(int enable);
+  * not a faithful execution. */
+ uint64_t psp_interp_nest_refused(void);
+ 
++/* How many nested runs ended on anything other than a clean return. Each one
++ * is reported to stderr as it happens; this is for the end-of-run summary, so
++ * that "returned" at the top level cannot hide a thread that died. */
++unsigned long long psp_interp_nest_failed(void);
++
+ /* Human-readable status, for error messages. Never NULL. */
+ const char *psp_interp_status_str(psp_interp_status s);
+ 
+diff --git a/tools/allegrexrecomp/main.c b/tools/allegrexrecomp/main.c
+index 15f6c4e..338d644 100644
+--- a/tools/allegrexrecomp/main.c
++++ b/tools/allegrexrecomp/main.c
+@@ -981,6 +981,9 @@ static int cmd_interp(const char *path, uint32_t from, int have_from,
+ 
+     memset(&psp_cpu, 0, sizeof psp_cpu);
+     psp_cpu.r[PSP_REG_SP] = INTERP_STACK_TOP;
++    /* A module with a small-data area reads it through $gp and never loads the
++     * register itself; the value comes from the module info. */
++    psp_cpu.r[PSP_REG_GP] = li.gp;
+ 
+     psp_interp it;
+     psp_interp_init(&it, entry, INTERP_RA_DONE, budget);
+@@ -991,6 +994,8 @@ static int cmd_interp(const char *path, uint32_t from, int have_from,
+     printf("mapped:   0x%08X + %u bytes (%d segments)\n", lo, hi - lo, e.nsegments);
+     printf("relocs:   %d applied%s\n", li.nrelocs,
+            li.nreloc_skipped ? " (some skipped -- see loader.c)" : "");
++    printf("gp:       0x%08X%s\n", li.gp,
++           li.gp ? "" : " (module declares none)");
+     printf("imports:  %d thunks routed to HLE\n", nimports);
+     printf("entry:    0x%08X%s\n", entry, have_from ? " (--from)" : " (module entry)");
+     printf("budget:   %llu instructions\n", (unsigned long long)budget);
+@@ -1002,13 +1007,14 @@ static int cmd_interp(const char *path, uint32_t from, int have_from,
+     printf("stopped:  %s\n", psp_interp_status_str(it.status));
+     printf("executed: %llu instructions\n", (unsigned long long)it.executed);
+     if (dispatch)
+-        printf("re-entry: served interpreted; nest refused %llu\n",
+-               (unsigned long long)psp_interp_nest_refused());
++        printf("re-entry: served interpreted; nest refused %llu, failed %llu\n",
++               (unsigned long long)psp_interp_nest_refused(),
++               psp_interp_nest_failed());
+     else if (g_reentry_count)
+         printf("re-entry: %llu HLE callbacks into guest code, first 0x%08X\n"
+                "          (needs the interpreter to service psp_dispatch)\n",
+                (unsigned long long)g_reentry_count, g_reentry_first);
+-    if (it.status != I_OK_RETURN && it.status != I_BUDGET) {
++    if (it.status != I_OK_RETURN && it.status != I_BUDGET && it.status != I_EXIT) {
+         a_insn in;
+         a_decode(psp_read32(it.fault_pc), it.fault_pc, &in);
+         char buf[96];
+@@ -1021,9 +1027,11 @@ static int cmd_interp(const char *path, uint32_t from, int have_from,
+     free(imports);
+     psp_mem_free();
+     psp_blob_free(&b);
+-    /* A clean return is success. Anything else is a finding, not a crash, so
+-     * report it through the exit status without a scary message. */
+-    return it.status == I_OK_RETURN ? 0 : 1;
++    /* A clean return is success, and so is the guest asking to exit -- a
++     * program that runs to its own sceKernelExitGame finished, it just had
++     * nowhere to return to. Anything else is a finding, not a crash, so report
++     * it through the exit status without a scary message. */
++    return (it.status == I_OK_RETURN || it.status == I_EXIT) ? 0 : 1;
+ 
+ fail:
+     psp_mem_free();
