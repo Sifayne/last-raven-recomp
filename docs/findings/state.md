@@ -155,6 +155,12 @@ something inexplicable, check what it was last told.
   `0x0027394C`. `NO_DATA` would restore the fifteen-million-query spin — see
   the header comment in `mpeg.c`, which has the guest disassembly. **The stall
   is downstream, in the teardown, which never signals `Movie Sync`.**
+- **A deep or surprising call chain into the decode step.** gdb says it is flat:
+  `psp_func_002750C0` is called directly from `psp_body_00274398`
+  (MovieDecodeThread) and nothing else, every time. It runs **exactly 60 times**
+  in a 60-second run and then stops being called, while the thread stays alive
+  in the census — so it blocks rather than exits, and the loop terminating is
+  the thing to explain.
 - **A `SignalSema` on the semaphore SoundThread waits for.** Two independent
   lines of evidence say the movie's sync semaphore is never signalled by
   anything, anywhere. At run time the uid census records every uid ever passed
