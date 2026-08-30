@@ -739,7 +739,7 @@ index 0000000..e27e81c
 +    return uid;
 +}
 diff --git a/src/hle/threadman.c b/src/hle/threadman.c
-index bba5683..759ed77 100644
+index bba5683..18a4e7c 100644
 --- a/src/hle/threadman.c
 +++ b/src/hle/threadman.c
 @@ -5,38 +5,33 @@
@@ -1025,7 +1025,7 @@ index bba5683..759ed77 100644
 +    psp_sched_yield();
 +    psp_ret(SCE_KERNEL_ERROR_OK);
 +}
- 
++
 +/* A thread died by returning from its entry point. Records what it returned and
 + * releases anyone waiting for it. */
 +static void on_thread_end(uint32_t uid, uint32_t status) {
@@ -1037,7 +1037,7 @@ index bba5683..759ed77 100644
 +        psp_sched_wake(t->enders[i]);
 +    t->nenders = 0;
 +}
-+
+ 
 +/* sceKernelWaitThreadEnd(SceUID thid, SceUInt *timeout)
 + *
 + * The second argument is a *timeout pointer*, not somewhere to put the exit
@@ -1072,8 +1072,9 @@ index bba5683..759ed77 100644
 +    }
 +
 +    psp_ret(t->exit_status);
-+}
-+
+ }
+ 
+-static void hle_GetThreadId(void) { psp_ret(g_current ? g_current->uid : 0); }
 +static void hle_GetThreadId(void) { psp_ret(psp_sched_current()); }
 +
 +/* ---- the clock ------------------------------------------------------------
@@ -1086,9 +1087,8 @@ index bba5683..759ed77 100644
 +    const uint64_t us = psp_clock_read();
 +    psp_cpu.r[PSP_REG_V0] = (uint32_t)us;
 +    psp_cpu.r[PSP_REG_V1] = (uint32_t)(us >> 32);
- }
- 
--static void hle_GetThreadId(void) { psp_ret(g_current ? g_current->uid : 0); }
++}
++
 +static void hle_GetSystemTimeLow(void) {
 +    psp_ret((uint32_t)psp_clock_read());
 +}
@@ -1122,7 +1122,7 @@ index bba5683..759ed77 100644
      psp_ret(SCE_KERNEL_ERROR_OK);
  }
  
-@@ -273,11 +397,42 @@ static void hle_GetThreadStackFreeSize(void) {
+@@ -273,11 +397,71 @@ static void hle_GetThreadStackFreeSize(void) {
       * paint one, so report the whole stack: it is used for "am I close to
       * overflowing", and claiming plenty of room is the safe direction. */
      psp_thread *t = find_thread(psp_arg(0));
@@ -1158,15 +1158,44 @@ index bba5683..759ed77 100644
 +
 +static void sema_log(const psp_sema *s, const char *op, int32_t arg, int trace) {
 +    if (!sema_watched(s)) return;
-+    fprintf(stderr, "sema: thread 0x%08X  %-7s %-20s count=%d arg=%d\n",
-+            psp_sched_current(), op, s->name, s->count, arg);
++    fprintf(stderr, "sema: thread 0x%08X  %-7s uid 0x%08X %-20s count=%d arg=%d\n",
++            psp_sched_current(), op, s->uid, s->name, s->count, arg);
 +    if (trace) psp_trace_dump();
++}
++
++/* Every distinct semaphore uid ever handed to sceKernelSignalSema.
++ *
++ * "Nobody signals this one" is a claim about code that was never executed, and
++ * the watch above can only report signals that happened. This records the whole
++ * set instead, so the claim can be checked against it rather than inferred from
++ * silence -- including the case where the name the watch matches on is not the
++ * object the waiter is actually parked on. */
++#define MAX_SIGNALLED_UIDS 64
++static uint32_t g_sig_uid[MAX_SIGNALLED_UIDS];
++static int      g_sig_uids;
++
++static void note_signalled(uint32_t uid) {
++    for (int i = 0; i < g_sig_uids; i++) if (g_sig_uid[i] == uid) return;
++    if (g_sig_uids < MAX_SIGNALLED_UIDS) g_sig_uid[g_sig_uids++] = uid;
++}
++
++void psp_threadman_dump_signalled(FILE *out) {
++    fprintf(out, "  semaphore uids ever signalled (%d):", g_sig_uids);
++    for (int i = 0; i < g_sig_uids; i++) fprintf(out, " 0x%08X", g_sig_uid[i]);
++    fprintf(out, "\n");
++    for (int i = 0; i < MAX_SEMAS; i++) {
++        if (!g_sema[i].used) continue;
++        int seen = 0;
++        for (int k = 0; k < g_sig_uids; k++) if (g_sig_uid[k] == g_sema[i].uid) seen = 1;
++        fprintf(out, "    uid 0x%08X  %-24s %s\n", g_sema[i].uid, g_sema[i].name,
++                seen ? "signalled" : "NEVER SIGNALLED");
++    }
 +}
 +
  static void hle_CreateSema(void) {
      /* (name, attr, initVal, maxVal, option) */
      psp_sema *s = NULL;
-@@ -290,6 +445,12 @@ static void hle_CreateSema(void) {
+@@ -290,6 +474,12 @@ static void hle_CreateSema(void) {
      s->max_count = (int32_t)psp_arg(3);
      s->uid = g_next_uid++;
      s->used = 1;
@@ -1179,10 +1208,11 @@ index bba5683..759ed77 100644
      psp_ret(s->uid);
  }
  
-@@ -305,20 +466,78 @@ static void hle_SignalSema(void) {
+@@ -305,20 +495,79 @@ static void hle_SignalSema(void) {
      if (!s) { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_UID); return; }
      s->count += (int32_t)psp_arg(1);
      if (s->max_count > 0 && s->count > s->max_count) s->count = s->max_count;
++    note_signalled(s->uid);
 +    sema_log(s, "signal", (int32_t)psp_arg(1), 1);
 +
 +    /* Wake everyone parked on this semaphore and let them re-test. Waking only
@@ -1194,11 +1224,11 @@ index bba5683..759ed77 100644
 +        urgent |= psp_sched_wake(s->waiters[i]);
 +    s->nwaiters = 0;
 +
-     psp_ret(SCE_KERNEL_ERROR_OK);
++    psp_ret(SCE_KERNEL_ERROR_OK);
 +    /* Released a thread that outranks us, so it runs now. */
 +    if (urgent) psp_sched_yield();
- }
- 
++}
++
 +/* Take the semaphore if it can be taken, and never block. The distinction from
 + * WaitSema is the whole point of the call: a caller uses it precisely because
 + * it has something else to do when the answer is no. */
@@ -1216,9 +1246,9 @@ index bba5683..759ed77 100644
 + * selects a level we would reach anyway. */
 +static void hle_RotateReadyQueue(void) {
 +    psp_sched_yield();
-+    psp_ret(SCE_KERNEL_ERROR_OK);
-+}
-+
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
 +static void hle_DeleteCallback(void) { psp_ret(SCE_KERNEL_ERROR_OK); }
 +
  static void hle_WaitSema(void) {
@@ -1265,7 +1295,7 @@ index bba5683..759ed77 100644
  }
  
  /* ---- event flags --------------------------------------------------------- */
-@@ -380,6 +599,13 @@ static void hle_WaitEventFlag(void) {
+@@ -380,6 +629,13 @@ static void hle_WaitEventFlag(void) {
      if (out) psp_write32(out, f->pattern);
  
      if (!satisfied) {
@@ -1279,7 +1309,7 @@ index bba5683..759ed77 100644
          warn_block("sceKernelWaitEventFlag");
          psp_ret(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
          return;
-@@ -431,6 +657,9 @@ void psp_threadman_register(void) {
+@@ -431,6 +687,9 @@ void psp_threadman_register(void) {
      psp_hle_register(0xCEADEB47, "ThreadManForUser", "sceKernelDelayThread",             hle_DelayThread);
      psp_hle_register(0x68DA9E36, "ThreadManForUser", "sceKernelDelayThreadCB",           hle_DelayThread);
      psp_hle_register(0x278C0DF5, "ThreadManForUser", "sceKernelWaitThreadEnd",           hle_WaitThreadEnd);
@@ -1289,7 +1319,7 @@ index bba5683..759ed77 100644
      psp_hle_register(0x293B45B8, "ThreadManForUser", "sceKernelGetThreadId",             hle_GetThreadId);
      psp_hle_register(0x9944F31F, "ThreadManForUser", "sceKernelSuspendThread",           hle_SuspendThread);
      psp_hle_register(0x75156E8F, "ThreadManForUser", "sceKernelResumeThread",            hle_ResumeThread);
-@@ -443,6 +672,15 @@ void psp_threadman_register(void) {
+@@ -443,6 +702,15 @@ void psp_threadman_register(void) {
      psp_hle_register(0x28B6489C, "ThreadManForUser", "sceKernelDeleteSema",              hle_DeleteSema);
      psp_hle_register(0x3F53E640, "ThreadManForUser", "sceKernelSignalSema",              hle_SignalSema);
      psp_hle_register(0x4E3A1105, "ThreadManForUser", "sceKernelWaitSema",                hle_WaitSema);
