@@ -839,7 +839,7 @@ that produced it.
    stuck. **Item 3 below is thereby closed as a frame of its own: the queue
    full *is* the drain pacing the decode loop, not a deadlock.**
 
-   ### The real blocker was end-of-stream, and patch `0046` is the fix
+   ### The real blocker was end-of-stream, and patch `0051` is the fix
 
    With `0030` in, the movie plays — 1.68 billion pixels in sixty seconds,
    67 MB of stream read, `PSPRECOMP_FRAMES` dumps showing the actual intro —
@@ -849,7 +849,7 @@ that produced it.
    succeeded unconditionally, so SoundThread pumped silence down its channel
    at a steady 55 thousand calls per minute for as long as the run lasted.
 
-   Patch `0046` makes the end observable where it already was visible: the
+   Patch `0051` makes the end observable where it already was visible: the
    ring callback's contract says a short delivery is the end of the file, so
    `RingbufferPut` records it in the `es_eof` field that had been declared in
    the context since the decoder landed and never once read; `avc_pump` decodes
@@ -868,7 +868,7 @@ that produced it.
 
    ### The pad cannot skip the intro, because nothing reads the pad
 
-   `PSPRECOMP_PAD_PRESS` (patch `0047`) presses a button at a wall-clock
+   `PSPRECOMP_PAD_PRESS` (patch `0052`) presses a button at a wall-clock
    moment — the held variant cannot, because a game reads *pressed* as a
    transition and a button down before the first poll never transitions. The
    press fires; the game ignores it; and the histogram says why:
