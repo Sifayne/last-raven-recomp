@@ -621,10 +621,9 @@ that produced it.
      iteration, `0x40001` consumes the single Movie Start, waits again, and
      nothing alive can signal it. Force-stop. Nothing here is a psprecomp bug;
      the game is on an error path its authors did not expect.
-   - **decoder** — Movie Start signals continuously and `0x40001` wakes each
-     time, but the scene dispatcher still runs only its original 188 times, so
-     the movie's display update never runs a second time and the frame queue is
-     never drained. The 60-second drain follows.
+   - **decoder** — *(fixed by patch `0030`; see below.)* Movie Start signalled
+     continuously and `0x40001` woke each time, but the scene dispatcher still
+     ran only its original 188 times.
 
    ### `MovieDisplayThread` can never exist in this build
 
@@ -733,11 +732,29 @@ scripts/05-oracle.sh 4000
 
 ```
 attempted: 3957 functions
-compared:  3110      match: 3108      differ: 2      dispatch miss: 0
+compared:  3006      match: 3003      differ: 3      dispatch miss: 0
 ```
 
-The oracle exits 1, because two divergences are the standing state. Exit 0 would
-mean the sample missed them.
+The oracle exits 1, because divergences are the standing state. Exit 0 would
+mean the sample missed them. The three:
+
+```
+0001093C  stack[09FFEF70] interp=00000001 recomp=09FFEF84
+0001093C  module[00000000] interp=27BD01D0 recomp=27BDFFD0
+00070760  stack[09FFFFB4] interp=0DEAD100 recomp=00000000
+00195654  stack[09FFEF84] interp=005E2C2F recomp=003323A0
+```
+
+**This baseline moved from 3110/3108/2, and not for the reason it looked like.**
+It changed when the interpreter began *serving* HLE re-entry rather than
+skipping those runs (patch `0023`, from the merge), so the set of functions that
+complete a comparison is different — `HLE re-entry: 0` in the skipped breakdown
+is the tell. It was **not** patch `0030`'s clock change, which was the obvious
+suspect and arrived in the same session: an A/B with the tick disabled
+reproduces 3006/3003/3 and the same three functions exactly.
+
+**Attribute a moved baseline by disabling the suspect, not by reasoning about
+it.** Reasoning gave the wrong answer here, confidently.
 
 **The limit is attempts, and it has to be this big to be comparable.**
 `scripts/05-oracle.sh 400` attempts 396 and compares 316, all matching, because
