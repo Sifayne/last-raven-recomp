@@ -1,16 +1,21 @@
 diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
 new file mode 100644
-index 0000000..6a78060
+index 0000000..45da3dc
 --- /dev/null
 +++ b/src/hle/mpeg.c
-@@ -0,0 +1,991 @@
+@@ -0,0 +1,1041 @@
 +/* psprecomp — sceMpeg.
 + *
 + * ## What this is, and what it is not
 + *
 + * This is the bookkeeping half of MPEG playback: init, contexts, the ring
-+ * buffer, stream registration, and the PSMF header queries. It is **not** a
-+ * decoder. No video frame is produced and no audio is decoded.
++ * buffer, stream registration, and the PSMF header queries. By default it is
++ * **not** a decoder: no video frame is produced and no audio is decoded.
++ *
++ * PSPRECOMP_MPEG_DECODE=1 turns on the other half -- a PSMF demuxer and an
++ * openh264 video path, below -- which does produce frames and hand them back.
++ * It is opt-in because it does not yet get the game further; see "What the
++ * decode path does not do" at the end of this block.
 + *
 + * That is a deliberate split rather than an unfinished one. A game reaches
 + * sceMpeg long before it plays a movie, because the class that owns FMV is
@@ -50,6 +55,31 @@ index 0000000..6a78060
 + *
 + * Constants and structure layouts are PPSSPP's (Core/HLE/sceMpeg.cpp and
 + * sceMpeg.h), which is the closest thing to a specification these have.
++ *
++ * ## What the decode path does not do
++ *
++ * Stated rather than hidden, because each is correct for the one situation this
++ * game creates and wrong in general. None is worth fixing while the path is
++ * opt-in and single-context; all of them are worth knowing before it is not.
++ *
++ *   - `ctx_for_ringbuffer` matches on the ring buffer the game passed to
++ *     sceMpegCreate, and otherwise falls back to the first context in use. With
++ *     one context that is unambiguous. With two, RingbufferPut and
++ *     AvailableSize both misroute to whichever occupies the lower slot.
++ *   - PACKETS_READ is advanced in RingbufferPut alongside PACKETS_WRITTEN,
++ *     rather than when the decoder consumes. So read == written always and
++ *     neither counter carries information. AvailableSize synthesises the
++ *     answer from the elementary stream instead. Hardware does not work this
++ *     way; decrementing a real free-count per put walked it to zero and ended
++ *     the movie twenty puts in, which is why it is done this way here.
++ *   - Presentation timestamps are `frames * 3600` -- 90kHz at a hardcoded
++ *     25fps. The rate is never read from the bitstream and the PES headers'
++ *     own PTS fields are discarded by the demuxer.
++ *   - `atrac_pts` advances on every successful GetAtracAu with no idempotency
++ *     key, so a caller that retries the same access unit advances the audio
++ *     clock twice. It is decoupled from the video frame on purpose -- pinned to
++ *     video it stood still and SoundThread synced on it -- but decoupling it
++ *     from any consumption signal is what allows the double-advance.
 + */
 +
 +#include "psprecomp/hle.h"
@@ -328,14 +358,34 @@ index 0000000..6a78060
 +/* PSPRECOMP_MPEG_DECODE=1 turns on the video path: the ring buffer is filled
 + * from the game's callback, demuxed, and decoded.
 + *
-+ * Opt-in because it is not finished. The frames are real -- byte-identical to
-+ * an independent decoder -- but they are not yet handed back to the game, so
-+ * the player asks for an access unit that never comes and spins. Default is the
-+ * refusal that at least lets the game give up cleanly. Remove this switch when
-+ * sceMpegGetAvcAu can return an AU. */
++ * Opt-in because it does not get the game further, not because it does not
++ * work. The frames are real -- byte-identical to an independent decoder -- and
++ * they are handed back: GetAvcAu returns access units and AvcDecode writes
++ * pictures. What then happens is that the game's own frame queue fills, because
++ * the code that drains it is never reached, so it stops asking. Default is the
++ * refusal, which at least lets the game give up cleanly instead of spinning.
++ *
++ * Without openh264 the decoder is a stub that reports "no picture" forever, and
++ * NO_DATA means "not yet" -- so honouring the switch in that build would ask
++ * the player to wait for a frame that cannot arrive, which is exactly the
++ * infinite spin the choice of INVALID_VALUE above exists to avoid. Refuse the
++ * override instead of quietly doing the harmful thing. */
 +static int mpeg_decoding(void) {
 +    static int done, on;
-+    if (!done) { const char *v = getenv("PSPRECOMP_MPEG_DECODE"); on = v && *v && *v != '0'; done = 1; }
++    if (!done) {
++        const char *v = getenv("PSPRECOMP_MPEG_DECODE");
++        on = v && *v && *v != '0';
++#if !PSPRECOMP_HAVE_OPENH264
++        if (on) {
++            fprintf(stderr,
++                    "psprecomp: PSPRECOMP_MPEG_DECODE ignored -- this build has no\n"
++                    "  openh264, so no picture can ever be produced and the game\n"
++                    "  would wait for one forever. Rebuild with openh264 available.\n");
++            on = 0;
++        }
++#endif
++        done = 1;
++    }
 +    return on;
 +}
 +
