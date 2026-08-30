@@ -448,3 +448,30 @@ The check that actually proves it is not `ctest` but a tree diff: apply the whol
 series to a pristine checkout and compare every file the series owns against the
 working tree. **Byte-identical across all 40 files is the bar.** Green tests only
 approximate it.
+
+## The regression checks, with the numbers they should produce
+
+```bash
+scripts/05-oracle.sh 4000
+```
+
+```
+attempted: 3957 functions
+compared:  3110      match: 3108      differ: 2      dispatch miss: 0
+```
+
+It exits 1, because two divergences are the standing state — see the open-work
+item. Exit 0 would mean the sample missed them.
+
+**The limit is attempts, and it has to be this big to be comparable.**
+`scripts/05-oracle.sh 400` attempts 396 and compares 316, all matching, because
+the two known divergences are outside that sample. A clean run at the wrong size
+is not evidence of anything, which is the positional-sampling trap from "Four
+ways to measure nothing" wearing a different hat.
+
+```bash
+ctest --test-dir build/psprecomp -C Release --output-on-failure   # 12/12
+```
+
+Read `LastTest.log` for the current result. `LastTestsFailed.log` persists from
+whenever a test last failed and will happily name a test that passes today.
