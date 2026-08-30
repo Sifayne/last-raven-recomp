@@ -438,12 +438,39 @@ that produced it.
    says directly that the source matrix has the x translation in `m[9]` —
    col2's y — instead of `m[12]`.
 
-   `lwr` itself is fine: it yields exact floats (1.0 → `0x3F8000`, 68.0 →
-   `0x428800`). **So the matrix is built wrong before the GE ever sees it, by
-   recompiled guest code** — which would make this the first codegen defect
-   found with a visible consequence, and the differential oracle is the tool
-   for it. Identify the builder (a `sceGumTranslate`-shaped function feeding
-   `psp_func_002B752C`) and run that one function through `oracle_diff`.
+   `lwr` itself is fine: it yields exact floats (1.0 -> `0x3F8000`, 68.0 ->
+   `0x428800`). And the source matrix has now been read directly at upload time:
+
+   ```
+   | 1  0  0  0 | 0  1  0  0 | 0  68  1  0 | 0  117  0  1 |
+   ```
+
+   `m[9] = 68`, `m[13] = 117`. So the **matrix is already wrong in the game's own
+   memory** — the upload is faithful to it, and the transform is faithful to the
+   upload. PPSSPP's `Vec3ByMatrix43` reads the world translation from the
+   streamed array's `[9],[10],[11]`, which is exactly what this does, so the
+   reading is not in question either.
+
+   ### It is not proven to be codegen
+
+   The obvious next move was the differential oracle, and it does **not** support
+   the hypothesis. Every function around the upload matches:
+
+   ```
+   002B9548  002B938C  002B85A0  002B989C
+   002B99C8  002B63C0  002B899C  002B752C     all: match 1, differ 0
+   ```
+
+   That is weak evidence — `--from` seeds its own inputs, so a divergence that
+   only appears on real data would not show — but it is evidence, and it means
+   the GU library is not where this goes wrong. Whatever builds the matrix from
+   the object's `(68, 117)` is upstream of all of it and has not been found.
+
+   **The instrument this needs does not exist yet: a watch on *writes* to an
+   address.** `PSPRECOMP_PEEK` reads memory once the run has stopped and
+   `PSPRECOMP_WATCH` fires on function entry; neither answers "who wrote this
+   word". The matrix buffer is `0x00424820`, the wrong value lands at
+   `+36`, and one write-watch on that address names the culprit in a single run.
 
    **Also left:** perspective-correct interpolation is absent (affine only,
    exact on a fullscreen quad), and there is no clipper.
