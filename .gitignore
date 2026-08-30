@@ -66,3 +66,4 @@ compile_commands.json
 frame.ppm
 frame.ppm*
 reports/seq/
+__testoutput.txt
