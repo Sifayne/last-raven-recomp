@@ -66,4 +66,11 @@ compile_commands.json
 frame.ppm
 frame.ppm*
 reports/seq/
+# pspautotests write their results through host0:, which iofilemgr resolves
+# relative to the working directory. 07-autotests.sh runs them from
+# reports/hostfs/ (already ignored); these catch a run started by hand from
+# the repo root, which would otherwise drop them into host/ next to boot.c.
 __testoutput.txt
+__testerror.txt
+__testfinish.txt
+host/__test*.txt
