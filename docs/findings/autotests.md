@@ -108,9 +108,9 @@ it runs is the whole class of bug this project keeps writing down:
    | test | stopped | ours / expected |
    |---|---|---|
    | `matrix` | ExitGame | **MATCHES hardware** |
-   | `gum` | ExitGame | 45 / 45 lines, 4 differ |
-   | `prefixes` | ExitGame | 26 / 26 lines, 38 differ |
-   | `vregs` | ExitGame | 30 / 48 lines, 42 differ |
+   | `prefixes` | ExitGame | 26 / 26 lines, **1** differs |
+   | `gum` | ExitGame | 45 / 45 lines, 8 differ |
+   | `vregs` | ExitGame | 30 / 48 lines, 34 differ |
    | `colors` | `.word 0xD480000C` | 1 / 5 lines |
    | `vavg` | `.word 0xD0470480` | no output |
    | `convert` | budget | 1 / 108 lines |
@@ -157,16 +157,55 @@ it runs is the whole class of bug this project keeps writing down:
    pointer and a run that eventually executed ASCII. `gum` went from 2 lines and
    58 bad accesses to 45 lines and none.
 
-6. **What is left in `gum` is the prefixes, and they are a deliberate gap.**
-   The last four lines are `checkGlRotate`, where pspgl builds the rotation with
-   two `vmov.p` under a `vpfxs` carrying a lane negation -- `(cos, sin)` and
-   `(-sin, cos)`. `vfpu.h` states the policy: a pending prefix makes the next
-   arithmetic op report and skip rather than compute something that ignores it.
-   That is what happens, twice, and the identity survives instead. Not an
-   oversight; the cost of the policy, visible.
+6. **The operand prefixes are implemented.** They were the largest remaining
+   gap and the one blocking the most tests. `prefixes.prx` went from 38
+   differing lines to **1**.
 
-   `prefixes` and `vregs` report 16 such ops each. Implementing the operand
-   prefixes is the single change that would move the most tests.
+   A prefix instruction rewrites the operands of the *next* VFPU instruction --
+   swizzling lanes, taking absolute values, substituting one of eight
+   constants, negating, saturating the result, masking lanes out of the write
+   -- and nothing in that instruction's own encoding says so. They were left
+   out deliberately for a long time, with a pending prefix making the next op
+   report and skip rather than compute a number that ignored it. That policy
+   was right, and it was also what left pspgl's `glRotatef` returning an
+   identity: it builds `(cos, sin)` and `(-sin, cos)` as two `vmov.p` whose
+   only prefix content is a lane negation.
+
+   Three details were worth getting from a hardware-validated source rather
+   than reasoning about:
+
+   - **Identity, not "unset".** The hardware restores 0xE4 (swizzle x,y,z,w)
+     for the source prefixes and 0 for the destination after *every* VFPU
+     instruction, so "no prefix" and "the identity prefix" are one state. Every
+     op consumes all three, including matrix ops that ignore them -- one left
+     set would apply to whatever came next.
+   - **Absolute value and negation are bit operations**, not `fabsf` and unary
+     minus. The sign of a zero and of a NaN is observable, and the test prints
+     both.
+   - **The [0,1] clamp substitutes its bound**, so -0.0 saturates to +0.0,
+     while the [-1,1] clamp on the next line of the same test leaves -0.0
+     alone. That pair is what shows it is about the bound rather than zero.
+
+   The one line still differing is `-NaN + -1/3`: hardware canonicalises the
+   result to a positive NaN where x86 propagates the operand's sign. That is
+   FPU NaN propagation, not prefixes.
+
+7. **`viim`/`vfim` wrote the wrong register.** The immediate loads take their
+   destination from the vt field; the low seven bits, where every other VFPU op
+   keeps vd, are part of the immediate. `vfim v84, 1/90` encodes as 0xDFD421B0
+   and we were naming v48.
+
+   pspgl converts degrees to quarter-turns with exactly that instruction, so
+   `glRotatef(180, ...)` multiplied its angle by an untouched register and got
+   zero. `vrot` then produced cos=1, sin=0 -- a clean identity, no error
+   anywhere, and indistinguishable from the prefix gap above until that one was
+   closed.
+
+8. **What is left in `gum` is a layout, not a value.** With both of the above,
+   `checkGlRotate` computes the right rotation -- `-1.0` and `0.000767`, the
+   hardware figures -- but places it transposed and two columns over. Eight
+   lines, all of them present and correct in the wrong slot. That is a separate
+   bug from anything above and has not been chased yet.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a
