@@ -23,8 +23,10 @@
 
 #include "loader.h"
 #include "container.h"
+#include "present.h"
 
 #include "decode.h"          /* PSP_RA_INDEX */
+#include "psprecomp/clock.h"
 #include "psprecomp/cpu.h"
 #include "psprecomp/ctors.h"
 #include "psprecomp/dispatch.h"
@@ -623,6 +625,23 @@ int main(int argc, char **argv) {
     psp_hle_register(0x8F2DF740u, "ModuleMgrForUser", "StopUnloadSelfModule",
                      hle_stop_unload_self);
     printf("  [2] runtime   %u functions registered\n", psp_dispatch_count());
+
+    /* Presentation, before the module loads: the real-time clock anchors to
+     * the moment it is enabled, and that moment should be the start of the
+     * run rather than the end of the load. PSPRECOMP_WINDOW enables the SDL
+     * layer -- window, pad, audio -- and implies pacing; PSPRECOMP_REALTIME
+     * paces a headless run on its own, which is what makes a wall-clock
+     * measurement of a real scene honest. */
+    if (getenv("PSPRECOMP_WINDOW")) {
+        if (present_start() == 0)
+            printf("      window    on (SDL2: video, pad, audio; implies real-time pacing)\n");
+        else
+            printf("      window    unavailable -- running headless\n");
+    } else if (getenv("PSPRECOMP_REALTIME")) {
+        psp_clock_realtime(1);
+        printf("      pacing    real-time (headless)\n");
+    }
+
     install_watch();
     psp_sched_set_thread_hook(install_alt_stack);
     printf("      disc      %s\n", iso ? iso : "(none -- raw umd: opens will fail)");
@@ -680,7 +699,16 @@ int main(int argc, char **argv) {
     int live = psp_sched_live();
     printf("  [6] threads   %d spawned by module_start\n", live);
     if (g_guest_exited) printf("      (the guest already exited during entry)\n");
-    if (live > 0) live = psp_sched_drain(60);
+    /* 60s is the bring-up default: long enough to reach a deadlock, short
+     * enough to stay interactive. A movie is longer than that, so watching
+     * one end needs a bigger window -- PSPRECOMP_DRAIN=<seconds>. */
+    int drain_s = 60;
+    if (getenv("PSPRECOMP_DRAIN")) {
+        drain_s = atoi(getenv("PSPRECOMP_DRAIN"));
+        if (drain_s <= 0) drain_s = 60;
+        printf("      drain     %ds (PSPRECOMP_DRAIN)\n", drain_s);
+    }
+    if (live > 0) live = psp_sched_drain(drain_s);
 
     printf("---\n");
     printf("ctors:    %s\n", ctors_ok == 0 ? "ok" : "incomplete");
