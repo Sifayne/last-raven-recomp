@@ -455,4 +455,5 @@ old `N`, fold the new change in, and diff.
 The check that actually proves it is not `ctest` but a tree diff: apply the
 whole series to a pristine checkout and compare every file the series owns
 against the working tree. Byte-identical is the bar. Green tests only
-approximate it.
+approximate it. `scripts/verify-patches.sh` runs that check — add `--build`
+to compile and test the pristine clone too.
