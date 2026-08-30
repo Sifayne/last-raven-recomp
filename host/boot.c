@@ -140,6 +140,28 @@ static void watch_hit(uint32_t addr) {
                     psp_read8(deref + 2), psp_read8(deref + 3));
         fprintf(stderr, "\n");
     }
+    /* The object `this` points at, when it is one.
+     *
+     * A guard on `this->[28]` is decided by a value that only exists while the
+     * run is going, and PSPRECOMP_PEEK reads memory after it has stopped. Those
+     * are different questions, and answering the second while asking the first
+     * is how a field that is zero at the end gets read as a condition that was
+     * never true. */
+    {
+        const uint32_t o = psp_arg(0);
+        if (o >= PSP_RAM_BASE && o + 64 < PSP_RAM_BASE + PSP_RAM_SIZE) {
+            fprintf(stderr, "         [this]");
+            for (int i = 0; i < 12; i++)
+                fprintf(stderr, " +%d:%08X", i * 4, psp_read32(o + (uint32_t)i * 4));
+            fprintf(stderr, "\n");
+        }
+    }
+    /* And how it got here. A watched function reached through a vtable has no
+     * `jal` naming its caller, so the arguments alone say what was asked and
+     * not who asked. The ring is entries-in-order rather than a call stack --
+     * see the note in the findings -- so read the nearest entries as "what ran
+     * just before", not as a stack, and confirm anything structural with gdb. */
+    psp_trace_dump();
 }
 
 /* Write the framebuffer the display is scanning out to a PPM.
