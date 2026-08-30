@@ -15,7 +15,13 @@ need_tool
 [ -f "$ELF" ] || die "no $ELF — run scripts/01-extract-decrypt.sh first"
 
 PREFIX=aclr
+# A traced build and a plain one are different objects answering different
+# questions, and they used to share a directory: TRACE=1 only changed CFLAGS, so
+# it silently overwrote the fast build's objects and left a build/host-trace
+# that someone had moved aside by hand. Keep them apart, so having one never
+# means losing the other.
 OBJ="$ROOT/build/host"
+[ "${TRACE:-0}" != "0" ] && OBJ="$ROOT/build/host-trace"
 mkdir -p "$OBJ"
 
 info "emitting C"

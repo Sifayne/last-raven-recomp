@@ -29,7 +29,7 @@ index 5f63355..ce3cad9 100644
  void psp_trace_marks_init(uint32_t lo, uint32_t words);
  int psp_trace_was_marked(uint32_t addr);
 diff --git a/src/dispatch.c b/src/dispatch.c
-index fb6a625..0b8de5a 100644
+index fb6a625..d06e05c 100644
 --- a/src/dispatch.c
 +++ b/src/dispatch.c
 @@ -99,7 +99,14 @@ psp_fn_t psp_lookup(uint32_t addr) {
@@ -48,7 +48,28 @@ index fb6a625..0b8de5a 100644
  static uint32_t g_trace[TRACE_DEPTH];
  static uint64_t g_trace_n;
  
-@@ -289,28 +296,90 @@ int psp_trace_was_marked(uint32_t addr) {
+@@ -248,9 +255,17 @@ int psp_log_indirect;
+  * indistinguishable from a real one. That flaw produced a confidently wrong
+  * conclusion about an allocation failing.
+  *
+- * Marking every label closes it: any address the emitter gave a label to can
+- * now be watched, and psp_trace_watch_ok() says up front whether an address is
+- * observable at all. */
++ * Marking every label closes it for any address the emitter gave a label to --
++ * branch and jump targets, function entries, split entries, fall-through
++ * targets.
++ *
++ * It does not close it for anything else, and the distinction is not visible
++ * from in here. psp_trace_was_marked returns -1 only for an address outside the
++ * marked range; an in-module address that never got a label returns 0, which
++ * reads as "not reached" when it means "cannot be seen". Observability is a
++ * property of the emitted C, and this layer holds no label table to check it
++ * against, so the caller has to map an address to its covering label first --
++ * see PSPRECOMP_REACHED in the boot host, which documents the grep. */
+ static uint32_t g_mark_addr;
+ static void (*g_mark_fn)(uint32_t);
+ static uint8_t *g_marked;
+@@ -289,28 +304,90 @@ int psp_trace_was_marked(uint32_t addr) {
   *
   * Checking the invariant at every return finds the culprit directly. */
  static uint64_t g_sp_bad;

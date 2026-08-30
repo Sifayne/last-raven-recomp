@@ -180,6 +180,58 @@ static void find_pointer(uint32_t lo, uint32_t size) {
     printf("\n");
 }
 
+/* PSPRECOMP_REACHED=<hex>[,<hex>...] says, for each address, whether control
+ * ever arrived there.
+ *
+ * "Does this code run" has been answered here with gdb breakpoints and with
+ * PSPRECOMP_WATCH. Breakpoints are external and one batch per run; the watch
+ * hooks PSP_ENTER, which the emitter writes once per function *body*, so a
+ * watch on anything that is not a function entry never fires and reports a
+ * negative it cannot actually see. dispatch.c records that flaw producing a
+ * confidently wrong conclusion. The mark bitmap covers every label instead.
+ *
+ * It has a smaller version of the same limit, and it matters. PSP_MARK is
+ * emitted only at *labels* -- branch and jump targets, function entries, split
+ * entries, fall-through targets. A `jal` site, or a store in the middle of a
+ * block, is not a label and can never be marked, so asking about one gets
+ * "not reached" when the truth is "cannot be seen from here".
+ * psp_trace_was_marked only reports -1 for an address outside the module; it
+ * cannot tell an unlabelled address from an unvisited one. So map an address
+ * to the label that covers it before asking:
+ *
+ *     grep -o 'L_[0-9A-F]\{8\}: PSP_MARK' game/generated/aclr_funcs.c | sort -u
+ *
+ * and take the greatest label <= the address within the same function. Control
+ * reaching that label is control reaching the block the instruction sits in,
+ * which is the question worth asking anyway. */
+enum { MAX_REACHED = 32 };
+static uint32_t g_reached[MAX_REACHED];
+static int      g_reached_n;
+
+static void reached_init(uint32_t lo, uint32_t hi) {
+    const char *v = getenv("PSPRECOMP_REACHED");
+    if (!v || !*v) return;
+    for (const char *p = v; *p && g_reached_n < MAX_REACHED; ) {
+        char *end;
+        const uint32_t a = (uint32_t)strtoul(p, &end, 0);
+        if (end == p) break;
+        g_reached[g_reached_n++] = a;
+        p = (*end == ',') ? end + 1 : end;
+    }
+    psp_trace_marks_init(lo, (hi - lo) / 4);
+    printf("      reached   %d address(es) watched (needs a PSPRECOMP_TRACE build)\n",
+           g_reached_n);
+}
+
+static void reached_report(void) {
+    for (int i = 0; i < g_reached_n; i++) {
+        const int m = psp_trace_was_marked(g_reached[i]);
+        printf("reached:  0x%08X  %s\n", g_reached[i],
+               m < 0 ? "not observable -- outside the loaded module"
+                     : m ? "reached" : "not reached (or not a label -- see PSPRECOMP_REACHED)");
+    }
+}
+
 static void survey_vram(void) {
     enum { BLOCK = 0x10000 };
     printf("vram:     ");
@@ -415,6 +467,7 @@ int main(int argc, char **argv) {
     if (psp_load_module(&b, &e, &li) != 0) { fprintf(stderr, "cannot load module\n"); return 1; }
     printf("  [1] load      0x%08X + %u bytes, %d relocations\n",
            li.lo, li.hi - li.lo, li.nrelocs);
+    reached_init(li.lo, li.hi);
 
     /* 2 — registration and firmware. */
     psp_recomp_register();
@@ -520,6 +573,7 @@ int main(int argc, char **argv) {
     }
     psp_ge_dump_stats(stdout);
     find_pointer(li.lo, li.hi - li.lo);
+    reached_report();
     survey_vram();
     dump_framebuffer();
     if (getenv("PSPRECOMP_SEMA")) {

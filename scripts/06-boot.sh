@@ -13,7 +13,10 @@ set -euo pipefail
 . "$(dirname "$0")/common.sh"
 
 RECOMP_DIR="$ROOT/tools/psprecomp/tools/allegrexrecomp"
+# Match 04-emit-build.sh: TRACE=1 boots the traced objects, from their own
+# directory, without disturbing the plain build.
 OUT="$ROOT/build/host"
+[ "${TRACE:-0}" != "0" ] && OUT="$ROOT/build/host-trace"
 LIB="$ROOT/build/psprecomp/libpsprecomp.a"
 
 [ -f "$LIB" ] || die "no runtime library; run scripts/build-tools.sh first"
