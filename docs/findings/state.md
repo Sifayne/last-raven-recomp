@@ -155,6 +155,19 @@ something inexplicable, check what it was last told.
   `0x0027394C`. `NO_DATA` would restore the fifteen-million-query spin — see
   the header comment in `mpeg.c`, which has the guest disassembly. **The stall
   is downstream, in the teardown, which never signals `Movie Sync`.**
+- **A `SignalSema` on the semaphore SoundThread waits for.** Two independent
+  lines of evidence say the movie's sync semaphore is never signalled by
+  anything, anywhere. At run time the uid census records every uid ever passed
+  to `sceKernelSignalSema` and `Movie Sync` (`0x0004001C`) is not among them.
+  Statically, no instruction in the module loads offset 100 — where SoundThread
+  reads it — and reaches `SignalSema`; the offsets that do feed its `$a0` are
+  {0, 4, 8, 20, 40, 52, 128, 132, 140, 176, 396, 668}, and 100 is absent.
+
+  What the surrounding structure does say: `struct[88]` is a queue depth,
+  incremented by the producer at `0x00275770` and decremented by the consumer at
+  `0x00275844`, and **both of those signal `struct[96]`, not `struct[100]`**. So
+  the producer half of that queue is a path the game never reaches, rather than
+  a signal we are dropping.
 - **A colour-conversion or decode-mode stage as the missing display step.** The
   game imports **none** of `sceMpegAvcDecodeMode`, `sceMpegAvcCsc`,
   `sceMpegAvcDecodeYCbCr`, `sceMpegAvcCopyYCbCr` or `sceMpegAvcQueryYCbCrSize`.
