@@ -581,8 +581,65 @@ that produced it.
    signalled, `struct[168]` never being decremented — follows from this and is
    not independently broken.
 
-   The question worth asking next is what makes `Movie Start` repeat on
-   hardware, since a single signal is what the failure path produces here.
+   ### Correction: Movie Start signalling once is a *default-configuration*
+   fact, not a general one
+
+   The uid lives at **context + 176** (`findptr` → `ram:0x08D3EA30`), and three
+   `SignalSema` sites load that offset. The one that fires is `0x0027510C`,
+   inside the AU-fetch wrapper `psp_func_002750C0`:
+
+   ```
+   002750FC  lw   $a0, 140($s0)          ; movie state
+   00275100  bnel $a0, $s2, 0x00275124   ; state != 1 -> skip the signal
+   00275108  lw   $a0, 176($s0)          ; Movie Start
+   0027510C  jal  SignalSema
+   00275118  sw   $a0, 156($s0)          ; struct[156] = 1
+   0027511C  sb   $a0, 742($s0)          ; flag742  = 1
+   ```
+
+   Note what the signal is bundled with: **`struct[156] = 1` is the other field
+   the display guard `psp_func_0027399C` tests.** Signalling Movie Start and
+   declaring the movie ready are the same step — a handshake, not two
+   independent things.
+
+   How often that wrapper runs, measured:
+
+   | configuration | calls to `psp_func_002750C0` |
+   |---|---|
+   | default | **1** |
+   | decoder | **177,546** |
+
+   So Movie Start is signalled once **because sceMpeg refuses**: MovieDecodeThread
+   runs the wrapper once, is refused, prints its `Fatal Error!!!`, signals Movie
+   Start on the way out, and tears down. With the decoder on it is signalled
+   continuously. An earlier version of this item called the single signal *the*
+   deadlock; it is the failure path's shape, and only in one configuration.
+
+   ### What that leaves, per configuration
+
+   - **default** — sceMpeg refuses, the decode thread aborts after one
+     iteration, `0x40001` consumes the single Movie Start, waits again, and
+     nothing alive can signal it. Force-stop. Nothing here is a psprecomp bug;
+     the game is on an error path its authors did not expect.
+   - **decoder** — Movie Start signals continuously and `0x40001` wakes each
+     time, but the scene dispatcher still runs only its original 188 times, so
+     the movie's display update never runs a second time and the frame queue is
+     never drained. The 60-second drain follows.
+
+   ### `MovieDisplayThread` can never exist in this build
+
+   This is structural, and worth stating plainly because it removes a whole
+   line of enquiry. The frame-queue consumer — the thread that signals Movie
+   Sync twice and carries the second decrement of `struct[168]` — is created
+   only when `flag744` is set. The **only** write of 1 is `0x002733C8`, in the
+   initialiser; the initialiser has exactly **one** `jal` caller, `0x00272608`;
+   and that caller writes a hard-coded 0 to `flag744` four instructions later at
+   `0x0027262C`. So the flag is 1 for four instructions and 0 thereafter, on
+   every path, always.
+
+   The consumer therefore cannot be what drains the queue here, and the drain
+   inside the scene update is the only remaining candidate — which is the thread
+   that item 2 above is already about.
 
 3. **The decode loop's frame queue fills and its drain is never reached.**
    *(decoder)* The loop fetches — frames 1, 2, 3 with `ready=1` — then stops,
