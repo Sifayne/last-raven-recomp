@@ -172,10 +172,30 @@ static void find_pointer(uint32_t lo, uint32_t size) {
     const char *v = getenv("PSPRECOMP_FINDPTR");
     if (!v || !*v) return;
     const uint32_t want = (uint32_t)strtoul(v, NULL, 0);
+
+    /* The module image, then RAM, then VRAM.
+     *
+     * Scanning only the module was enough for a function pointer written by
+     * the loader, and useless for anything the game allocates -- a kernel uid
+     * lives in a heap object, and reporting "nowhere" for it invites the
+     * conclusion that only one place holds it. Which offset a value sits at is
+     * only an argument about *one* struct: the same uid can live at two
+     * offsets in two objects, and a static search that assumes otherwise
+     * proves nothing. */
+    const struct { const char *what; uint32_t lo, size; } region[] = {
+        { "module", lo,            size          },
+        { "ram",    PSP_RAM_BASE,  PSP_RAM_SIZE  },
+        { "vram",   PSP_VRAM_BASE, PSP_VRAM_SIZE },
+    };
     printf("findptr:  0x%08X stored at:", want);
     int n = 0;
-    for (uint32_t a = lo; a + 4 <= lo + size; a += 4)
-        if (psp_read32(a) == want && n < 24) { printf(" 0x%08X", a); n++; }
+    for (size_t r = 0; r < sizeof region / sizeof *region; r++)
+        for (uint32_t a = region[r].lo;
+             a + 4 <= region[r].lo + region[r].size && n < 32; a += 4)
+            if (psp_read32(a) == want) {
+                printf(" %s:0x%08X", region[r].what, a);
+                n++;
+            }
     if (!n) printf(" nowhere");
     printf("\n");
 }
