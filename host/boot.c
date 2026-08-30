@@ -498,7 +498,10 @@ int main(int argc, char **argv) {
     psp_ge_dump_stats(stdout);
     survey_vram();
     dump_framebuffer();
-    if (getenv("PSPRECOMP_SEMA")) psp_threadman_dump_signalled(stdout);
+    if (getenv("PSPRECOMP_SEMA")) {
+        psp_threadman_dump_threads(stdout);
+        psp_threadman_dump_signalled(stdout);
+    }
     printf("  most-called firmware functions:\n");
     psp_hle_dump_calls(stdout, 12);
     psp_hle_dump_recent(stdout);
