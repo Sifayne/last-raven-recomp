@@ -49,7 +49,7 @@ info "linking"
 GEN_OBJS=()
 for src in "$GEN"/*.c; do GEN_OBJS+=("$OBJ/$(basename "${src%.c}").o"); done
 cc -o "$OBJ/${PREFIX}_probe" "${GEN_OBJS[@]}" "$OBJ/link_probe.o" \
-      "$ROOT/build/psprecomp/libpsprecomp.a" -lm
+      "$ROOT/build/psprecomp/libpsprecomp.a" -lm $HOST_LIBS
 
 info "link closed: $(du -h "$OBJ/${PREFIX}_probe" | cut -f1) executable"
 "$OBJ/${PREFIX}_probe"
