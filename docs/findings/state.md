@@ -339,39 +339,55 @@ reports failures it does not already expect.
 here, in the repository, with enough context to act on without the conversation
 that produced it.
 
-1. **The GE has no transform pipeline, so every 3D primitive is discarded.**
-   *(default)* This is why the frame is a flat colour, and it is now measured
-   rather than suspected. The draw path declined 2,444 of 2,958 submitted
-   vertices, and patch 0025 splits that counter by cause:
+1. **T&L exists; the picture still does not.** Patch 0026 added the transform
+   pipeline — world and view as 4×3, projection as 4×4, the 24-bit float
+   encoding, viewport and offset, and backface culling. Patch 0025 had found
+   that **all** 2,444 declined vertices were the missing-transform case (the
+   arithmetic closed exactly: 2,958 − 2,444 = 514 = 257 sprites × 2), so the
+   611 triangle-strips the game submits are real geometry that used to be
+   dropped at `draw_prim`'s first line.
+
+   They are now transformed and rasterized:
 
    ```
-   2444 vertices needing a transform (not through-mode; no T&L here)
-      0 vertices dropped: no vertex address set
-      0 vertices dropped: layout not decoded (weighted, or no position)
+   drawn      868 prims (was 257)      pixels 74,680,830 (was 33,423,361)
+   transformed 2444 vertices; viewport set
+     (scale 240.0,-136.0 centre 2048.0,2048.0 offset 1808.0,1912.0), cull ccw
+   matrix words: world 20881, view 15625, proj 34081
+   screen bounds: x 0.0..480.0  y 0.0..272.0        (decoder configuration)
    ```
 
-   **All of it is the transform case.** The arithmetic closes exactly:
-   2,958 − 2,444 = 514 = the 257 sprites × 2 vertices. So the 611
-   triangle-strips the game submits are real 3D geometry and every one is
-   dropped at `draw_prim`'s first line:
+   That viewport is the textbook PSP arrangement — 480/2, −272/2, the 2048
+   guard-band centre, offsets 2048−240 and 2048−136 — which is good evidence
+   the matrix and viewport decode is right rather than merely plausible. In the
+   decoder configuration the transformed geometry lands in **exactly** the
+   screen rectangle, so these are fullscreen backdrop quads, not scene geometry.
 
-   ```c
-   if (!VT_THROUGH(g_ge.vtype)) { g_skip_transform += count; return; }
-   ```
+   **The frame is still one flat colour** — white now rather than dark teal.
+   Three things are missing, and each is separable work:
 
-   What still draws is the 2D overlay alone — 257 through-mode sprites, at
-   ~130K pixels each, which is a full-screen quad. A flat colour is the correct
-   output for "all shape discarded, all backdrop kept".
+   - **No depth buffer.** `psp_vertex` carries no z and the backend has no depth
+     test, so primitives land in submission order. Backface culling is honoured,
+     which removes the half of a closed mesh that would paint over the half in
+     front of it, but it is not a substitute.
+   - **No clipper.** A primitive with any vertex at or behind the eye is dropped
+     whole. Dividing anyway would project it to the wrong side of the screen and
+     smear a triangle across the frame, so dropping is the conservative choice —
+     but it is a choice, and it is counted.
+   - **Texture sampling is unvalidated on this path.** UV tracking now works —
+     see below — and reports `u -512.0..640.0 v 0.0..640.0` against a 512×64
+     texture, so coordinates are being tiled or wrapped well outside it. Whether
+     that is correct is the next question.
 
-   That counter used to read "2,444 vertices in an unsupported format
-   (transformed, or no position)" and lumped three causes with three unrelated
-   fixes into one number. Worth noting it went 24 → 2,444 across the GE queue
-   fix, so before that fix this lead was invisible too.
+   **`u_lo`/`u_hi` had never been assigned.** They were declared and printed
+   from the first version of `ge.c`, so every run ever made reported
+   `u 0.0..0.0` — a fixed constant that reads as a measurement. That is the
+   thing that separates "sampled at one corner" from "sampled across the whole
+   surface", and it was answering neither. Fixed in 0026 for both paths.
 
-   **The next renderer milestone is therefore T&L**, not texturing or blending:
-   model/view/projection, the viewport transform, and clipping. Until that
-   exists no amount of sampler work changes the picture, because the geometry
-   never reaches the sampler.
+   Next, in order: a depth buffer (which needs `psp_vertex` and the software
+   backend to carry z), then a near-plane clipper, then validating the sampler
+   against a known texture.
 
 2. **Movie Sync has no signaller, and that is the gate both configurations hit.**
    The frame consumer `0x40021` parks on it and never wakes; the movie therefore
