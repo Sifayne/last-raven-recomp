@@ -1,9 +1,9 @@
 diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
 new file mode 100644
-index 0000000..b63da82
+index 0000000..93bc074
 --- /dev/null
 +++ b/src/hle/mpeg.c
-@@ -0,0 +1,910 @@
+@@ -0,0 +1,941 @@
 +/* psprecomp — sceMpeg.
 + *
 + * ## What this is, and what it is not
@@ -262,8 +262,37 @@ index 0000000..b63da82
 +    psp_ret(SCE_KERNEL_ERROR_OK);
 +}
 +
++static int mpeg_decoding(void);
++static mpeg_ctx *ctx_for_ringbuffer(uint32_t rb);
++
++/* Free packets.
++ *
++ * Not simply "all of them". The game reads this as how much of the buffer is
++ * still occupied, and treats an entirely free ring as nothing having been
++ * buffered at all -- it compares the answer against the full packet count and
++ * gives up when they match. Reporting everything free after each put therefore
++ * ends the movie just as surely as never freeing anything did, by the opposite
++ * route.
++ *
++ * So it is derived from the elementary stream instead: whatever the demuxer has
++ * produced but the decoder has not yet consumed is still notionally sitting in
++ * the buffer. That keeps the number moving the way the game expects while
++ * staying true to what has actually been dealt with. */
 +static void hle_RingbufferAvailableSize(void) {
 +    const uint32_t rb = psp_arg(0);
++    if (mpeg_decoding() && rb) {
++        mpeg_ctx *c = ctx_for_ringbuffer(rb);
++        const uint32_t packets  = psp_read32(rb + RB_PACKETS);
++        const uint32_t pkt_size = psp_read32(rb + RB_PACKET_SIZE);
++        if (c && packets && pkt_size) {
++            const size_t pending = c->es_len > c->es_pos ? c->es_len - c->es_pos : 0;
++            uint32_t held = (uint32_t)(pending / pkt_size);
++            if (held > packets) held = packets;
++            psp_ret(packets - held);
++            return;
++        }
++    }
++
 +    psp_ret(rb ? psp_read32(rb + RB_PACKETS_FREE) : 0);
 +}
 +
@@ -589,8 +618,13 @@ index 0000000..b63da82
 +            const uint32_t bytes    = (uint32_t)n * pkt_size;
 +            const uint8_t *host = (const uint8_t *)psp_mem_ptr(base + slot * pkt_size, bytes);
 +            if (host) {
++                /* Demux only. Decoding is driven by sceMpegGetAvcAu, one
++                 * picture at a time, so that what has arrived but not yet been
++                 * decoded stays measurable -- that difference is what
++                 * AvailableSize reports, and the game reads it as how full the
++                 * buffer is. Decoding eagerly here empties the buffer as fast
++                 * as it fills and the game concludes nothing was ever put. */
 +                ps_demux(c, host, bytes);
-+                avc_pump(c);
 +            }
 +            /* PSPRECOMP_MPEG_DUMP=<path> writes the demuxed elementary stream
 +             * once it is big enough to be worth looking at, so it can be
@@ -611,12 +645,9 @@ index 0000000..b63da82
 +        const uint32_t packets = psp_read32(rb + RB_PACKETS);
 +        psp_write32(rb + RB_PACKETS_WRITTEN, psp_read32(rb + RB_PACKETS_WRITTEN) + (uint32_t)n);
 +        psp_write32(rb + RB_PACKETS_READ,    psp_read32(rb + RB_PACKETS_READ) + (uint32_t)n);
-+        /* Everything just put has already been demuxed, so the buffer is empty
-+         * again and every packet is free. Decrementing instead -- as if the
-+         * data were still sitting there waiting for a consumer -- walks the free
-+         * count down to zero, at which point the game stops feeding and the
-+         * movie ends twenty puts in. */
-+        psp_write32(rb + RB_PACKETS_FREE, packets);
++        /* The free count itself is answered by AvailableSize, which derives it
++         * from how much of the stream is still undecoded. */
++        (void)packets;
 +    }
 +    psp_ret((uint32_t)n);
 +}
