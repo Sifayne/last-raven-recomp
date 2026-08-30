@@ -250,14 +250,11 @@ on without the conversation that produced it.
    The decoder is not starved and the semaphores are not stuck. The consumer
    simply never runs, so the queue reaches capacity and stays there.
 
-   And the consumer is only reachable through a function pointer. Its callers
-   `0x00272224` and `0x00272278` are the target of no `jal` anywhere in the
-   module; all four addresses in that chain appear in the entry list only
-   because the relocation-pointer scan found them stored as data. There are 143
-   `jalr` sites in this stretch of code, and the sound player at `0x00281CB4`
-   shows the idiom — `lw $a3, 4($a1)` then `jalr $a3`, a C++ virtual call. So
-   the queue is drained by a virtual method that something must dispatch, and
-   nothing does.
+   The consumer's callers are ordinary. `psp_body_002729C0` is called by
+   `0x00272264` and `0x00272280`, inside `psp_body_00272224` and
+   `psp_body_00272278`, and those two are called by plain `jal` from
+   `0x0013B040` (in `psp_body_0013B02C`) and `0x0018BE48` (in
+   `psp_body_0018BDB0`). Nothing here is a virtual call.
 
    The display side never gets far enough to dispatch it. SoundThread wakes on
    Movie Sync and then guards on two fields before doing anything:
@@ -288,12 +285,10 @@ on without the conversation that produced it.
    ```
 
    `flag741` is set to 1 by an initialiser at `0x002733A4`, inside
-   `psp_body_00273334` — **which no `jal` in the module targets**. Like the drain
-   path, it is reached only through a function pointer.
+   `psp_body_00273334`, which is called by `jal` from `0x00272608`.
 
-   So the same answer arrives from both ends: the movie's display object has its
-   initialiser, its enqueue gate and its drain all behind virtual dispatch, and
-   nothing is driving that object. That is one question, not three.
+   So the whole chain is ordinary calls, and the live question is which of these
+   callers runs and which does not — not how they are reached.
 
 1. **The game never leaves its intro-movie state.** It is not stuck; it
    repeats — ~2.3M frame presents against 21 GE lists for the whole run. The
