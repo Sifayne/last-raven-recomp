@@ -1,4 +1,3 @@
-diff --git a/src/hle/clock.c b/src/hle/clock.c
 --- a/src/hle/clock.c
 +++ b/src/hle/clock.c
 @@ -2,6 +2,9 @@
@@ -11,7 +10,7 @@ diff --git a/src/hle/clock.c b/src/hle/clock.c
  /* 59.94Hz, the PSP's refresh rate, rounded to whole microseconds. */
  #define PSP_FRAME_US 16667u
  
-@@ -14,21 +17,106 @@
+@@ -14,21 +17,119 @@
  
  static uint64_t g_us;
  
@@ -36,8 +35,10 @@ diff --git a/src/hle/clock.c b/src/hle/clock.c
 + *
 + * What the mode must NOT do is keep the artificial advances. A read's tick
 + * and a firmware call's tick would run guest time ahead of the wall it is
-+ * anchored to, and the pacing waits would never wait. Wall time passes on its
-+ * own here, which is what both ticks were standing in for. */
++ * anchored to, and the pacing waits would never wait. Both instead adopt
++ * elapsed wall time -- which reaches the threads that need it, because the
++ * spin loops that charge ticks call in constantly, and each call pulls the
++ * clock up to the wall. */
 +
 +static int      g_realtime;
 +static uint64_t g_origin_ns;
@@ -105,10 +106,21 @@ diff --git a/src/hle/clock.c b/src/hle/clock.c
 -void psp_clock_tick(void) { g_us += PSP_READ_TICK_US; }
 + * time it is" stay distinguishable at the call site.
 + *
-+ * In real-time mode a no-op: wall time is what passes while the spinning
-+ * thread spins, and charging ticks would push guest time ahead of it. */
++ * In real-time mode this adopts elapsed wall time rather than charging an
++ * invented tick -- but it must not be a no-op, which is what it was first
++ * written as, and the difference is the whole movie. The decode loop paces
++ * the old-fashioned way: it spins on the ring, charging a tick per call, and
++ * those ticks are what let the sleeping update thread's deadline arrive. A
++ * no-op froze guest time behind exactly that spin -- the pre-0030 stall,
++ * reproduced in real time to the pixel. Wall time passes on its own, but only
++ * a clock read reaches a thread that never sleeps and never asks; the spin
++ * now asks every call. */
 +void psp_clock_tick(void) {
-+    if (g_realtime) return;
++    if (g_realtime) {
++        const uint64_t wall = (wall_ns() - g_origin_ns) / 1000u;
++        if (wall > g_us) g_us = wall;
++        return;
++    }
 +    g_us += PSP_READ_TICK_US;
 +}
  
@@ -123,7 +135,6 @@ diff --git a/src/hle/clock.c b/src/hle/clock.c
 +        g_us = us;
 +    }
 +}
-diff --git a/include/psprecomp/clock.h b/include/psprecomp/clock.h
 --- a/include/psprecomp/clock.h
 +++ b/include/psprecomp/clock.h
 @@ -32,13 +32,16 @@
