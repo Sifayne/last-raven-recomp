@@ -224,6 +224,27 @@ static void find_pointer(uint32_t lo, uint32_t size) {
  * and take the greatest label <= the address within the same function. Control
  * reaching that label is control reaching the block the instruction sits in,
  * which is the question worth asking anyway. */
+/* PSPRECOMP_PEEK=<hex>[,<hex>...] prints what is at each address when the run
+ * stops: the word, and the byte, because guest structs mix both and which one
+ * a field is decides what "zero" means.
+ *
+ * The recurring question here is not "where is this value" -- FINDPTR answers
+ * that -- but "what is this field", and answering it has meant a watch, a
+ * rebuild, or a guess. A branch on a byte flag is the commonest guard in this
+ * game's movie code and the commonest thing to be wrong about. */
+static void peek(void) {
+    const char *v = getenv("PSPRECOMP_PEEK");
+    if (!v || !*v) return;
+    for (const char *p = v; *p; ) {
+        char *end;
+        const uint32_t a = (uint32_t)strtoul(p, &end, 0);
+        if (end == p) break;
+        printf("peek:     0x%08X  word 0x%08X  byte 0x%02X\n",
+               a, psp_read32(a), psp_read8(a));
+        p = (*end == ',') ? end + 1 : end;
+    }
+}
+
 enum { MAX_REACHED = 32 };
 static uint32_t g_reached[MAX_REACHED];
 static int      g_reached_n;
@@ -640,6 +661,7 @@ int main(int argc, char **argv) {
     psp_ge_dump_stats(stdout);
     find_pointer(li.lo, li.hi - li.lo);
     reached_report();
+    peek();
     survey_vram();
     dump_framebuffer();
     if (getenv("PSPRECOMP_SEMA")) {
