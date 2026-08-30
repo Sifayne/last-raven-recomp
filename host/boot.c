@@ -250,21 +250,19 @@ static void survey_vram(void) {
     printf("\n");
 }
 
-static void dump_framebuffer(void) {
-    /* The buffer the GE last drew into, falling back to the one the display is
-     * scanning out. They are usually different -- the game renders to the back
-     * buffer and presents the front -- and the interesting one during bring-up
-     * is where the drawing went. */
-    uint32_t base   = psp_ge_target();
-    if (!base) base = psp_display_framebuffer();
+/* Dump one buffer.
+ *
+ * Both are written, because picking one has already been misleading. The GE's
+ * render target is the back buffer, and a run that stops just after a
+ * frame-start clear finds it freshly cleared -- which reads as "nothing was
+ * drawn" when a whole frame was drawn and then presented. The buffer the
+ * display is scanning out is the one a player would be looking at. */
+static void dump_one(uint32_t base, const char *path, const char *label) {
     const uint32_t stride = psp_display_stride();
     if (!base || !stride) {
-        printf("frame:    not dumped -- the guest never set a framebuffer\n");
+        printf("frame%s:  not dumped -- no framebuffer\n", label);
         return;
     }
-
-    const char *path = getenv("PSPRECOMP_FRAME");
-    if (!path || !*path) path = "frame.ppm";
 
     enum { W = 480, H = 272 };          /* the panel, whatever the stride is */
     FILE *f = fopen(path, "wb");
@@ -294,8 +292,48 @@ static void dump_framebuffer(void) {
         }
     }
     fclose(f);
-    printf("frame:    %s  (0x%08X stride %u fmt %u, %llu of %d pixels non-black)\n",
-           path, base, stride, fmt, (unsigned long long)nonzero, W * H);
+    printf("frame%s:  %s  (0x%08X stride %u fmt %u, %llu of %d pixels differing from the corner)\n",
+           label, path, base, stride, fmt, (unsigned long long)nonzero, W * H);
+}
+
+static void dump_framebuffer(void) {
+    const char *path = getenv("PSPRECOMP_FRAME");
+    if (!path || !*path) path = "frame.ppm";
+
+    const uint32_t ge = psp_ge_target();
+    const uint32_t disp = psp_display_framebuffer();
+
+    dump_one(ge ? ge : disp, path, "");
+    if (disp && disp != ge) {
+        char alt[1024];
+        snprintf(alt, sizeof alt, "%s.display.ppm", path);
+        dump_one(disp, alt, "(shown)");
+    }
+
+    /* And the fullest frame the run ever presented, which is the one that
+     * answers "did anything appear" -- the two above only say what was in the
+     * buffers at the instant the run stopped. */
+    const uint64_t score = psp_display_best_score();
+    if (!score) {
+        printf("frame(best): no presented frame had a non-black pixel\n");
+        return;
+    }
+    char best[1024];
+    snprintf(best, sizeof best, "%s.best.ppm", path);
+    FILE *f = fopen(best, "wb");
+    if (!f) { printf("frame(best): cannot write %s\n", best); return; }
+    enum { W = 480, H = 272 };
+    fprintf(f, "P6\n%d %d\n255\n", W, H);
+    const uint32_t *px = psp_display_best();
+    for (int i = 0; i < W * H; i++) {
+        const uint32_t p = px[i];
+        const uint8_t rgb[3] = { (uint8_t)(p & 0xFF), (uint8_t)((p >> 8) & 0xFF),
+                                 (uint8_t)((p >> 16) & 0xFF) };
+        fwrite(rgb, 1, 3, f);
+    }
+    fclose(f);
+    printf("frame(best): %s  (0x%08X, %llu of %d pixels differing from the corner)\n",
+           best, psp_display_best_addr(), (unsigned long long)score, W * H);
 }
 
 static void install_watch(void) {
