@@ -101,25 +101,52 @@ it runs is the whole class of bug this project keeps writing down:
    `MATCHES hardware`, `differs: N line(s)`, or `NO OUTPUT`. It removes the
    file before each run, so a test that emits nothing cannot inherit its
    predecessor's verdict.
-4. **Nothing matches hardware yet, and the differences are the point.**
+4. **`matrix` matches hardware exactly.** All 50 lines, byte-identical to real
+   PSP output: every `vtfm`, `vhtfm`, `vmmul`, `vmidt`, `vmscl` and transpose
+   case. That is the first end-to-end confirmation of anything in the VFPU
+   against hardware rather than against ourselves.
 
    | test | stopped | ours / expected |
    |---|---|---|
-   | `matrix` | ExitGame | 50 / 50 lines, 58 differ |
-   | `prefixes` | ExitGame | 26 / 26 lines, 40 differ |
-   | `vregs` | ExitGame | 30 / 48 lines, 58 differ |
+   | `matrix` | ExitGame | **MATCHES hardware** |
+   | `prefixes` | ExitGame | 26 / 26 lines, 38 differ |
+   | `vregs` | ExitGame | 30 / 48 lines, 42 differ |
    | `gum` | `mtv $a1, v52` | 2 / 45 lines |
    | `colors` | `.word 0xD480000C` | 1 / 5 lines |
    | `vavg` | `.word 0xD0470480` | no output |
    | `convert` | budget | 1 / 108 lines, 99.3M bad accesses |
    | `vector` | budget | 1045 / 5329 lines |
 
-   `matrix` answers the open question this file was waiting on. Its
-   `transpose:` block is our four rows rotated by two — we print `3,7,11,15`
-   where hardware prints `1,5,9,13` — and every `vmmul.q` case differs. That
-   is a matrix row-indexing bug in the VFPU, the same shape as the logo's
-   68-pixel offset landing in `m[9]` instead of `m[12]`. `vfpu.c` flagged the
-   orientation as unverified; it is now verified wrong.
+   Getting there took three bugs, each invisible to the differential oracle
+   because the oracle runs the same decoder and the same `psp_vfpu_*` helpers on
+   both sides:
+
+   - **`lv`/`sv` decoded the wrong register field.** The arithmetic ops carry
+     `vt` as a contiguous 7 bits at 22..16; load/store cannot, because bits
+     22..21 are the top of the *base register*, so it puts `vt`'s low five bits
+     at 20..16 and its top two at 1..0. Reading it as the contiguous field mixes
+     the base register into the register number -- `lv.q R000, 0($a1)` becomes
+     0x60 instead of 0x20, the same matrix and column at row 2 instead of row 0,
+     four lanes rotated by two. Which registers were affected depended on which
+     base register the compiler happened to pick, which is why it looked erratic.
+   - **A matrix register names a sub-matrix.** `M022` is the 2x2 at column 2,
+     row 2. `matrix_cols` built a synthetic register from the matrix and
+     transpose bits only, forcing both offsets to zero, so every matrix op wrote
+     the top-left corner whatever register it was given.
+   - **`vmmul` and `vtfm` indexed their matrix operand transposed.** `vmmul`
+     reads its first operand transposed *twice* -- the assembler sets the
+     transpose bit in the encoding, and the hardware then indexes by
+     [output row][summation] -- and the two cancel. Honouring only the encoded
+     bit gives the product of the transpose: 7621 where hardware gives 1585.
+     `vhtfm` was not implemented at all; it has no opcode of its own, being
+     `vtfm` with the vector one element narrower than the instruction's order.
+
+   **This was also the logo bug.** With the load/store field fixed the game's
+   `FROM SOFTWARE` logo moved 68 pixels right and is now centred (x 69..417,
+   midpoint 243 on a 480-wide screen). The earlier note about a 68 in `m[9]`
+   instead of `m[12]` was a symptom of lanes rotated by two, seen from the far
+   end of the chain -- which is why chasing the write that produced it never
+   reached a cause.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a

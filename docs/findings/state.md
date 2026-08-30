@@ -518,12 +518,21 @@ that produced it.
    info**, which no Armored Core run could have exposed (`-G0`) and the
    differential oracle excludes from comparison by construction.
 
-   **It settles the orientation question.** `matrix.expected` prints the same
-   four rows we do, rotated by two: hardware `1,5,9,13` where we print
-   `3,7,11,15`, and every `vmmul.q` case differs. `vfpu.c`'s note that the
-   matrix operand orientation is unverified is now resolved -- it is wrong,
-   not merely unchecked. Whether it is *this* geometry fault remains open;
-   the retraction above still stands.
+   **It settled the orientation question, and the answer closed the logo
+   offset.** `matrix.prx` now matches real hardware on all 50 lines. Three bugs
+   stood between: `lv`/`sv` decoded the wrong `vt` field (the arithmetic ops'
+   contiguous 22..16, where load/store puts the low five at 20..16 and the top
+   two at 1..0, because 22..21 are the base register); a matrix register names
+   a *sub-matrix* and both base offsets were being forced to zero; and `vmmul`
+   and `vtfm` indexed their matrix operand transposed. `vfpu.c`'s note that the
+   orientation was unverified is resolved -- it was wrong.
+
+   The first of those **is** the 68-pixel logo offset. Fixing it moves the
+   logo to x 69..417, midpoint 243 on a 480-wide screen -- centred. The `m[9]`
+   versus `m[12]` observation was four lanes rotated by two, seen from the far
+   end of the chain; that is why chasing the write that produced the 68 never
+   reached a cause. The retraction above about `psp_func_002AFEF8` still
+   stands -- that function is still never called, and was never the route.
 
    **Also left:** perspective-correct interpolation is absent (affine only,
    exact on a fullscreen quad), and there is no clipper.
