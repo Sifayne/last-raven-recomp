@@ -1,9 +1,9 @@
 diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
 new file mode 100644
-index 0000000..93bc074
+index 0000000..7fd20ef
 --- /dev/null
 +++ b/src/hle/mpeg.c
-@@ -0,0 +1,941 @@
+@@ -0,0 +1,956 @@
 +/* psprecomp — sceMpeg.
 + *
 + * ## What this is, and what it is not
@@ -880,13 +880,28 @@ index 0000000..93bc074
 +                    c->frames, dst, stride, c->pic_ready);
 +    }
 +
-+    if (c->pic_ready) {
++    const int got = c->pic_ready;
++    if (got) {
 +        write_picture(c, dst, stride ? stride : 512);
 +        c->pic_ready = 0;
 +    }
-+    /* The player clears this itself after the first call; it is only ever
-+     * written here so a game that never initialised it sees something sane. */
-+    if (init_ptr) psp_write32(init_ptr, 0);
++
++    /* The fifth argument is where the caller learns a picture was produced, and
++     * it is the difference between the movie advancing and not.
++     *
++     * This game reads the word back and compares it against a constant 1 that
++     * its prologue put in $s2, and only then waits on its display semaphore and
++     * moves on -- anything else and it goes round the loop again. Writing zero
++     * here therefore looked exactly like a successful decode that produced no
++     * frame, so the player kept asking and the picture never reached the screen:
++     *
++     *     002750D0  ori $s2, $zero, 0x1        ; the constant
++     *     00275218  lw  $a0, 8($sp)            ; the word written here
++     *     0027521C  bne $a0, $s2, 0x00275268   ; no match -> round again
++     *     00275224  lw  $a0, 180($s0)          ; match -> wait, then proceed
++     *
++     * It arrives in $t0 rather than on the stack, which psp_arg already knows. */
++    if (init_ptr) psp_write32(init_ptr, got ? 1u : 0u);
 +    psp_ret(SCE_KERNEL_ERROR_OK);
 +}
 +/* Silence, in the shape the caller asked for. See hle_GetAtracAu. */
