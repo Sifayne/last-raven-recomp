@@ -228,6 +228,28 @@ it from transcripts, and inherited a stale premise doing so. Anything worth
 picking up next session goes here, in the repository, with enough context to act
 on without the conversation that produced it.
 
+1. **The movie decoder fills its frame queue and nothing drains it.** The decode
+   loop spins half a billion times a run without ever fetching an access unit,
+   and the branch that turns it back is two instructions before the fetch:
+
+   ```
+   0027516C  lw   $a0, 172($s0)      queue capacity
+   00275170  lw   $a1, 168($s0)      frames outstanding
+   00275174  subu $a0, $a0, $a1
+   00275178  blez $a0, 0x00275268    full -> return 1, go round again
+   00275198  jal  sceMpegGetAvcAu    never reached
+   ```
+
+   `struct[168]` is incremented on every successful decode at `0x00275250` and
+   decremented in exactly one place, `0x00273E7C` inside `psp_func_00273E30`,
+   which then signals Movie Lock. That function is reached from MovieDecodeThread's
+   *teardown* loop at `0x00274410` — not its playback loop — and from a wrapper
+   at `0x00273A50` whose single caller is `psp_body_002729C0`, on the display
+   side. So during playback the counter only ever climbs.
+
+   The decoder is not starved and the semaphores are not stuck. The consumer
+   simply never runs, so the queue reaches capacity and stays there.
+
 1. **The game never leaves its intro-movie state.** It is not stuck; it
    repeats — ~2.3M frame presents against 21 GE lists for the whole run. The
    blocked-thread dump now names the object, and that settles it:
