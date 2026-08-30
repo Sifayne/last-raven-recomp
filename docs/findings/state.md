@@ -186,12 +186,24 @@ on without the conversation that produced it.
    uid 0x00040021  entry 0x0027594C  prio 16  blocked on sceKernelWaitSema(Movie Sync sema)
    ```
 
-   Nothing can ever signal it, because sceMpeg playback is refused. So the game
-   waits out a movie that cannot finish, presenting blank frames, and the state
-   machine never advances to anything that would submit geometry. Making the
-   movie path terminate is the next move — either drive the game's own teardown
-   from the refusal, or report a clean end-of-stream instead of refusing, which
-   is the more honest of the two.
+   Nothing signals it. The movie *teardown* has been walked and it runs to
+   completion — `0x00273804` signals `Movie Start`, `0x00273838` reaches
+   `sceMpegAvcDecodeStop` (implemented, returns OK), and `0x00274420` marks the
+   movie stopped with `struct[140] = 2`. Confirmed against the trace ring, not
+   inferred. Nothing in that chain touches `Movie Sync`, and the one teardown
+   step that would wait on a semaphore, `0x0027394C`, is skipped.
+
+   So the game's *failure* path stops the movie cleanly by its own lights and
+   leaves the frame consumer parked forever. That thread is woken by the frame
+   producer, and at shutdown by whatever sets its quit flag — neither happens
+   here. Nothing in this chain is a psprecomp bug: every call behaves correctly.
+   We are driving the game down an error path its authors never expected to be
+   taken, because on hardware `sceMpegGetAvcAu` does not fail.
+
+   Which makes the choice explicit, and it is a real fork: make the game take
+   its *normal* completion path (sceMpeg succeeding and reporting the stream
+   ending), decode for real, or find another way past. The pad is already ruled
+   out.
 
    `sceDisplayGetFramePerSec` was the obvious suspect and is **not** the cause:
    28,470 of the run's 28,482 unimplemented calls, returning zero on the frame
