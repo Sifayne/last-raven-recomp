@@ -9,9 +9,14 @@
 # the oracle is structurally blind. See docs/findings/autotests.md for what
 # this can and cannot tell you yet.
 #
-# You build the tests yourself with your own PSP toolchain (pspdev/pspautotests)
-# and point this at the directory of ELFs. Nothing prebuilt is downloaded here,
-# and nothing built from them is committed — same policy as game data.
+# The tests live in hrydgard/pspautotests, and no toolchain is needed to run
+# them: the .prx binaries are committed there alongside .expected files holding
+# real-hardware output. Clone it into game/ (gitignored) and point this at a
+# test directory. Nothing is downloaded by this script and nothing from it is
+# committed — same policy as game data.
+#
+#   git clone --depth 1 https://github.com/hrydgard/pspautotests game/pspautotests
+#   scripts/07-autotests.sh game/pspautotests/tests/cpu/vfpu
 #
 # Current capability, stated plainly: each ELF's module_start runs under the
 # interpreter with HLE imports bound, and HLE re-entry -- thread starts and
@@ -21,7 +26,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-DIR="${1:-$GAME_DIR/autotests}"
+DIR="${1:-$GAME_DIR/pspautotests/tests/cpu/vfpu}"
 BUDGET="${BUDGET:-100000000}"
 [ -d "$DIR" ] || die "no autotest directory at $DIR — build pspautotests and point this at it"
 
@@ -50,8 +55,26 @@ for f in "${ELFS[@]}"; do
     # would take the whole run down with it.
     status="$(grep -m1 '^stopped:' "$out" | cut -d' ' -f2- || true)"
     refused="$(grep -m1 '^re-entry:' "$out" | cut -d' ' -f2- || true)"
-    printf '    %-28s %s\n' "$name" "${status:-no output}"
-    [ -n "$refused" ] && printf '    %-28s %s\n' "" "$refused"
+
+    # Compare against the recorded hardware output, which is the entire point:
+    # a test that runs and returns has proved nothing until what it printed is
+    # checked. The guest's own prints are interleaved with the interpreter's
+    # report, so the comparison takes the lines between the two `---` markers.
+    exp="${f%.*}.expected"
+    verdict="no .expected"
+    if [ -f "$exp" ]; then
+        got="$REPORTS/07-${name%.*}.got"
+        sed -n '/^---$/,/^---$/p' "$out" | sed '1d;$d' > "$got"
+        if [ ! -s "$got" ]; then
+            verdict="NO OUTPUT (test ran but printed nothing)"
+        elif diff -q "$got" "$exp" >/dev/null 2>&1; then
+            verdict="MATCHES hardware"
+        else
+            verdict="differs: $(diff "$got" "$exp" | grep -c '^[<>]') line(s)"
+        fi
+    fi
+    printf '    %-20s %-22s %s\n' "$name" "${status:-no output}" "$verdict"
+    [ -n "$refused" ] && printf '    %-20s %s\n' "" "$refused"
 done
 
 info "$PASS returned cleanly, $FAIL stopped early — details in $REPORTS/07-*.txt"

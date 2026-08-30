@@ -31,9 +31,19 @@ nested, charged against the run's budget (`psp_interp_service_dispatch`; the
 dispatch hook and the spawn hook in interp.c). Reports land in
 `reports/07-<name>.txt`.
 
-You build the tests yourself (`pspdev/pspautotests`, your own toolchain) and
-point the script at the directory. Nothing prebuilt is fetched, nothing built
-from them is committed — the same policy as game data, for the same reason.
+**No toolchain is needed, and the repository name here was wrong.** The tests
+live in `hrydgard/pspautotests`, not `pspdev/pspautotests`, and the `.prx`
+binaries are committed there alongside `.expected` files holding real-hardware
+output. Clone it into `game/` (gitignored) and point the script at a test
+directory:
+
+```bash
+git clone --depth 1 https://github.com/hrydgard/pspautotests game/pspautotests
+scripts/07-autotests.sh game/pspautotests/tests/cpu/vfpu
+```
+
+Nothing is fetched by the script and nothing from it is committed — the same
+policy as game data, for the same reason.
 
 ## Where the seams are
 
@@ -47,13 +57,30 @@ it runs is the whole class of bug this project keeps writing down:
    mains run their checks and return, which is exactly the shape this
    serves. Tests that depend on real concurrency are out of reach until the
    interpreter runs on the boot host's scheduler.
-2. **No output comparison.** A test prints through `sceKernelStdout`/`printf`,
-   which reaches stderr via the fd-1 path in `hle_Write` (and the async path
-   since patch 0020). The report captures interpreter stdout with the guest's
-   own prints interleaved. Comparing against recorded real-hardware output
-   comes next.
-3. **No expected-output database.** Some tests need hardware recordings;
-   those come from whoever has the hardware, test by test.
+2. **The tests run and print nothing.** This is now the blocker, and it is
+   specific rather than general. All eight `cpu/vfpu` tests load, execute and
+   return cleanly — `matrix.prx` runs 574,221 instructions — but not one emits
+   a line. From an HLE log of `matrix.prx`, in order: `sceKernelStdin/Stdout/
+   Stderr` answer 0/1/2, an **unimplemented `IoFileMgrForUser` NID
+   `0x54F5FB11`** is called twice, the display is set up, three bad accesses
+   happen (`read32 at 0xFFFF800C`, `read16`/`write16 at 0xAFB40070` — the
+   latter is the encoding of `sw $s4, 0x70($sp)`, so a code word is being used
+   as an address), the test opens its output file (`sceIoOpen` flags 0x602 →
+   fd 3), and returns without a single `sceIoWrite`.
+
+   The uncached mirror is *not* the cause: `psp_mem_ptr` already collapses
+   mirrors with `addr & PSP_ADDR_MASK`, so `sceDisplaySetFrameBuf(0x44000000)`
+   resolves correctly.
+3. **Output comparison exists now.** The script diffs the guest's prints
+   against the test's `.expected` and reports `MATCHES hardware`, `differs: N
+   line(s)`, or `NO OUTPUT (test ran but printed nothing)`. Today every VFPU
+   test reports the last of those, which is an honest reading of a harness that
+   is complete except for the tests being able to speak.
+4. **The expected-output database is no longer missing.** It ships with the
+   tests. `cpu/vfpu/matrix.expected` covers exactly the open question — it has
+   explicit `non transpose:` and `transpose:` sections and four `vmmul.q`
+   cases — so the moment output flows, the VFPU matrix orientation that
+   `vfpu.c` flags as unverified is answerable against hardware.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a
