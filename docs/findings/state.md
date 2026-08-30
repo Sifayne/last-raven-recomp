@@ -339,13 +339,39 @@ reports failures it does not already expect.
 here, in the repository, with enough context to act on without the conversation
 that produced it.
 
-1. **The picture does not reach the framebuffer.** *(default)* The GE executes
-   633 lists, 257 prims and a real swizzled CLUT8 texture, and the frame is still
-   a single flat `rgb(0, 32, 32)`. The strongest lead is in the summary: **2,444
-   vertices in an unsupported format (transformed, or no position)**, up from 24
-   before the queue fix. `read_vertex`/`vertex_layout` in `ge.c` decide that.
-   Second lead: the dump takes the GE's last render target, which may not be the
-   buffer the game intends to show.
+1. **The GE has no transform pipeline, so every 3D primitive is discarded.**
+   *(default)* This is why the frame is a flat colour, and it is now measured
+   rather than suspected. The draw path declined 2,444 of 2,958 submitted
+   vertices, and patch 0025 splits that counter by cause:
+
+   ```
+   2444 vertices needing a transform (not through-mode; no T&L here)
+      0 vertices dropped: no vertex address set
+      0 vertices dropped: layout not decoded (weighted, or no position)
+   ```
+
+   **All of it is the transform case.** The arithmetic closes exactly:
+   2,958 − 2,444 = 514 = the 257 sprites × 2 vertices. So the 611
+   triangle-strips the game submits are real 3D geometry and every one is
+   dropped at `draw_prim`'s first line:
+
+   ```c
+   if (!VT_THROUGH(g_ge.vtype)) { g_skip_transform += count; return; }
+   ```
+
+   What still draws is the 2D overlay alone — 257 through-mode sprites, at
+   ~130K pixels each, which is a full-screen quad. A flat colour is the correct
+   output for "all shape discarded, all backdrop kept".
+
+   That counter used to read "2,444 vertices in an unsupported format
+   (transformed, or no position)" and lumped three causes with three unrelated
+   fixes into one number. Worth noting it went 24 → 2,444 across the GE queue
+   fix, so before that fix this lead was invisible too.
+
+   **The next renderer milestone is therefore T&L**, not texturing or blending:
+   model/view/projection, the viewport transform, and clipping. Until that
+   exists no amount of sampler work changes the picture, because the geometry
+   never reaches the sampler.
 
 2. **Movie Sync has no signaller, and that is the gate both configurations hit.**
    The frame consumer `0x40021` parks on it and never wakes; the movie therefore
