@@ -339,7 +339,36 @@ reports failures it does not already expect.
 here, in the repository, with enough context to act on without the conversation
 that produced it.
 
-1. **T&L exists; the picture still does not.** Patch 0026 added the transform
+0. **There is a picture.** The FromSoftware logo renders — 13,156 of 130,560
+   pixels varying, 28 distinct colours, in a 360×48 band across the middle of
+   the screen. It took patches 0025–0028: the transform pipeline, the texture
+   formats the game actually uses, depth, and alpha blending.
+
+   **Three instruments had to be fixed before it could be seen**, and each was
+   reporting a confident falsehood:
+
+   - The dump took the GE's *render target*, which is the back buffer. A run
+     stopping just after a frame-start clear finds it empty and reports that
+     nothing was drawn. Both buffers are dumped now.
+   - Neither buffer says anything about frames that came and went, so the
+     display HLE now scores every presented frame and keeps the best.
+   - **Ranking frames by non-black pixels put a white flash at the top.** A
+     solid fill is maximally lit and carries no information. Ranking by how
+     much a frame *varies from its own corner* asks the question that was
+     actually meant, and is what surfaced the logo.
+
+   Read the frame with `PSPRECOMP_FRAME=<path>`; it writes `<path>`,
+   `<path>.display.ppm` and `<path>.best.ppm`. The best frame is dim — peak
+   channel value 68 of 255 — because it is caught mid fade-in, so brighten it
+   before judging.
+
+   **What is left on it:** the lettering is legible but speckled, so texel
+   sampling is not exactly right yet — a swizzle or palette-indexing detail.
+   Perspective-correct interpolation is absent (affine only, exact on a
+   fullscreen quad), and there is no clipper.
+
+1. **T&L exists; the picture still does not.** *(superseded by item 0 — kept for
+   the measurements.)* Patch 0026 added the transform
    pipeline — world and view as 4×3, projection as 4×4, the 24-bit float
    encoding, viewport and offset, and backface culling. Patch 0025 had found
    that **all** 2,444 declined vertices were the missing-transform case (the
