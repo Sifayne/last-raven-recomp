@@ -525,64 +525,64 @@ that produced it.
    `PSPRECOMP_WATCH` on `0x0027399C` fires **once**, with
    `a0 = 0x08D3E980` — the MPEG context itself.
 
-   **So this is not a condition that is false, it is a poll that happens too
-   early.** The display update is called once, before the movie has set
-   `flag740` (the only write of 1 is at `0x00274FF4`, in a block that *is*
-   reached), sees a zero, skips its body, and is never called again. The drain
-   inside it therefore never runs, `Movie Sync` is never signalled, SoundThread
-   never wakes, the movie never ends, and `user_main` — which is parked in
-   `sceKernelWaitThreadEnd` on the movie controller — never runs the update
-   loop that would poll it a second time.
+   **So the condition is not false — at the moment it was asked, the movie had
+   not started yet.** And the reason it is asked only once is not what it looks
+   like.
 
-   That is the deadlock, stated precisely: **the game polls the movie once from
-   an update loop that only runs again after the movie finishes.** On hardware
-   that update loop keeps running, which is the environment difference to hunt
-   next — not a missing signal, and not a wrong HLE return.
+   ### Correction: the update loop does not stop. The movie is simply last.
 
-   The chain below it is now measured rather than inferred. `0x00275864` is the
-   *audio* pump; the strings its error path prints identify `0x002E4928` as
-   `sceMpegGetAtracAu` and `0x002E48E0` as `sceMpegAtracDecode`:
+   An earlier version of this item concluded "the game polls the movie once from
+   an update loop that only runs again after the movie finishes". That was
+   wrong, and measuring it rather than reasoning about it is what showed why.
 
-   ```c
-   if (this[92] - this[88] <= 0)                                  return 0;   // queue full
-   if (sceMpegGetAtracAu(this[124], this[128], &this[4], &attr))  return 0;   // <- here
-   buf = f_00275714(this);
-   r = sceMpegAtracDecode(this[124], &this[4], buf, this[104]);
-   if (r) { printf("Fatal Error!!! : sceMpegAtracDecode() is failed...ret=%08X", r);
-            return -1; }
-   if (this[104] == 0) f_00275744(this);      // the producer; this[104] is the init flag
-   this[104] = 0;  return 1;
+   `psp_func_0013680C` is the per-frame update dispatcher. It calls the movie's
+   display update as **virtual slot `+0x4C`** of the child at `this->[16]` —
+   `psp_body_0013B02C` has no `jal` sites at all and is reached only through the
+   vtable at `0x003248A0`. Watching the dispatcher and dumping `this` on every
+   hit gives the sequence of children it updated, run-length encoded, identical
+   in **both** configurations:
+
+   ```
+   09ACDFA0 x34
+   09ACD030 x153
+   09ACDEC0 x1      <- the movie, and the last update of the run
    ```
 
-   `PSPRECOMP_REACHED` on the blocks, both configurations:
+   **188 updates, not one.** The loop was running the whole time. The movie
+   becomes the current child at the very end and gets its first update — which
+   correctly does nothing, because the movie has not started — and there is no
+   second update.
 
-   | block | default | decoder |
-   |---|---|---|
-   | `0x00275864` entry | reached | reached |
-   | `0x00275934` early return 0 | **reached** | reached |
-   | `0x00275904` past both guards | not reached | **reached** |
-   | `0x00275744` the producer | not reached | **reached** |
+   ### Why there is no second update
 
-   So in the default configuration `sceMpegGetAtracAu` returns `0x806101FE` on
-   its first and only call and the function returns at the second guard; **with
-   the decoder on every block is reached, the producer included**, and
-   `struct[88]` is incremented after all. Nothing guards the producer.
+   That first movie update is where the movie is *started*, and it starts it by
+   blocking the thread that runs the update loop. From the HLE log, all on
+   `0x40001`:
 
-   Also measured, default configuration: `flag741` **is** set (`0x00273334`
-   reached, and the store at `0x002733A4` is inside its entry block), the enqueue
-   wrapper `0x00275864` runs, and `0x0013B02C` is live. The drain `0x00273E30`
-   and its caller `0x0018BDB0` are not reached.
+   ```
+   sceKernelStartThread(0x40021)   SoundThread
+   sceKernelStartThread(0x40022)   MovieReadThread
+   sceKernelStartThread(0x40024)   MovieDecodeThread
+   sceKernelWaitSemaCB(0x0004001E) Movie Start
+   ```
 
-   ### The mistake that produced the question
+   So the update thread hands off to the movie and waits for it to report
+   progress. On hardware that wait is satisfied repeatedly and the loop resumes,
+   updating the movie each frame and draining its queue.
 
-   That table was first measured in the **default** configuration and used to ask
-   "why does the producer not run" — a question that only means anything in the
-   **decoder** configuration. In the default one the producer is *supposed* not
-   to run: sceMpeg refuses playback and everything downstream correctly declines.
-   The table was labelled; the conclusion drawn from it was not, which is the
-   error this document exists to prevent, made while writing it. **Ask which
-   configuration makes the question meaningful before choosing the one to measure
-   in.**
+   Here `Movie Start` is signalled **once** — by MovieDecodeThread on its way
+   out, after `sceMpegGetAvcAu` is refused. `0x40001` wakes, runs one frame,
+   waits again, and by then both movie threads have exited. In the decoder
+   configuration it sleeps instead and the run reaches the 60-second drain.
+
+   **That is the deadlock, and it is one wait, not a chain of them:** the
+   movie's own start step parks the thread that would otherwise drive the movie.
+   Everything downstream — the drain never running, `Movie Sync` never being
+   signalled, `struct[168]` never being decremented — follows from this and is
+   not independently broken.
+
+   The question worth asking next is what makes `Movie Start` repeat on
+   hardware, since a single signal is what the failure path produces here.
 
 3. **The decode loop's frame queue fills and its drain is never reached.**
    *(decoder)* The loop fetches — frames 1, 2, 3 with `ready=1` — then stops,
