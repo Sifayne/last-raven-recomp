@@ -466,7 +466,7 @@ that produced it.
    the GU library is not where this goes wrong. Whatever builds the matrix from
    the object's `(68, 117)` is upstream of all of it and has not been found.
 
-   ### The chain, walked
+   ### The chain, walked -- and where it runs out
 
    `PSPRECOMP_WATCHMEM=<addr>[,<value>]` now answers "who wrote this word" --
    another instrument that was written, declared and never called. Following it
@@ -474,43 +474,43 @@ that produced it.
 
    ```
    GE upload            psp_func_002B752C   packs 24-bit floats with lwr
-     <- sceGumLoadMatrix  psp_func_002B99C8   16-word copy
-       <- stack buffer
-         <- psp_func_002AFEB4                 16-word copy
-           <- immediately precedes a VFPU matrix routine at 0x002AFEF8
-              (lv.q / vtfm4 / sv.q)
+     <- sceGumLoadMatrix  psp_func_002B99C8   16-word copy from a stack buffer
+       <- psp_func_002AFEB4                   16-word copy
+         <- ambiguous from here
    ```
 
-   **Every function on that chain matches under the differential oracle.** That
-   is not the reassurance it looks like: `psp_vtfm` and `psp_vmmul` are called
-   by *both* the interpreter and the emitted code, so a bug in them is
-   identical on both sides and the oracle agrees perfectly while both are
-   wrong. It is the same structural blindness this file records for the
-   execution environment, one layer down -- shared *semantics* rather than
-   shared environment.
+   **It runs out at overlapping stack buffers.** LoadMatrix is fed from
+   `0x09FBBCE0` and `0x09FBBD00`, which are **8 words apart**, so the address
+   carrying the 68 is word 9 of one matrix and word 1 of the other. Attribution
+   by address alone cannot separate them, and the static source both copies
+   from holds zero at both of those words. Distinguishing them needs the watch
+   to record the *base* a copy was made from, not just the address written.
 
-   And `vfpu.c` says so itself, in a note above `psp_vmmul` written long before
-   any of this:
+   ### Retracted: the VFPU lead
 
-   > the operand ORIENTATION here is not independently verified... the
-   > identity/composition tests hold, but those hold for the transposed
-   > convention too -- they cannot tell the two apart. **If recompiled geometry
-   > comes out scrambled rather than absent, this is the first thing to check
-   > against an oracle.**
+   The previous version of this entry said the chain reached a VFPU matrix
+   routine at `0x002AFEF8` that the differential oracle is structurally blind
+   to, and named the behavioural oracle as the way to settle it. **`0x002AFEF8`
+   is never called** -- `PSPRECOMP_WATCH` on it fires zero times. It was
+   inferred from `psp_func_002AFEB4` sitting immediately before it in the
+   disassembly, which is the same mistake as reading `psp_body_002741C4` as
+   part of MovieReadThread: **adjacency in an address range is not
+   involvement**, and this is the second time in one session it produced a
+   confident wrong answer.
 
-   Geometry coming out scrambled rather than absent is exactly the symptom. So
-   the prime suspect is the VFPU matrix orientation, and the instrument that can
-   settle it is the **behavioural oracle** -- `scripts/07-autotests.sh`, from the
-   merge -- precisely because the differential one cannot. That is the next
-   step, and it is the first time the autotests have had a specific question to
-   answer rather than being a good idea in general.
+   The structural point in that entry still holds and is worth keeping on its
+   own merits: `psp_vtfm` and `psp_vmmul` are shared by the interpreter and the
+   emitted code, so the differential oracle can never see a bug in them, and
+   `vfpu.c`'s own note says the matrix operand orientation is unverified. That
+   remains a real gap and a real candidate for *some* future geometry fault. It
+   is not evidence about this one.
 
-   Not yet proven: that the orientation is wrong. A transpose alone does not map
-   index 12 to index 9, so if it is `vmmul` it is not a plain transpose. The
-   value lands one slot short of a stride-4 translation and exactly where a
-   stride-3 one would go, while `ty` lands correctly at stride 4 -- which no
-   single uniform error explains, and which is worth holding onto rather than
-   assuming away.
+   ### Why the autotests could not answer it
+
+   `scripts/07-autotests.sh` needs pspautotests ELFs built with a PSP
+   toolchain, and deliberately downloads nothing -- same policy as game data.
+   No toolchain is installed here, so the behavioural oracle cannot be run at
+   all yet. That is a prerequisite, not a finding.
 
    **Also left:** perspective-correct interpolation is absent (affine only,
    exact on a fullscreen quad), and there is no clipper.
