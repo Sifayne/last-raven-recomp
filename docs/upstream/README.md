@@ -4,9 +4,10 @@ Draft text for [sp00nznet/psprecomp](https://github.com/sp00nznet/psprecomp).
 **Nothing here has been posted.** Review and send it yourself, or ask for
 changes first.
 
-Eight patches sit in `patches/`, applied by `scripts/build-tools.sh`. They apply
-to a pristine checkout in order and the suite stays green (11/11, including two
-new tests).
+The patches sit in `patches/`, applied by `scripts/build-tools.sh`. They apply
+to a pristine checkout in order, reproduce the working tree byte-identically,
+and the suite stays green (12/12). The table below covers the first few; the
+series has grown well past it, so read `patches/` for the current list.
 
 | patch | what | send as |
 |---|---|---|

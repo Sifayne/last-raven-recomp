@@ -92,15 +92,18 @@ means for this project's own license first.
 
 ## Upstream
 
-`patches/` carries three changes to `psprecomp`, applied by `build-tools.sh` and
-verified to apply to a pristine checkout in order:
+`patches/` carries the changes to `psprecomp`, applied by `build-tools.sh` and
+verified to apply to a pristine checkout in order. Read the directory for the
+current list rather than a count here, which rots; broadly they are:
 
-| Patch | What |
+| Area | What |
 |---|---|
-| `0001` | `libm` was never linked — invisible on MSVC, a hard failure on Linux |
-| `0002` | Two emitter codegen bugs: an invalid float literal, and a label-ordering hazard |
-| `0003` | The interpreter oracle, filling an unchecked box in upstream's Phase 5 roadmap |
+| build | `libm` was never linked — invisible on MSVC, a hard failure on Linux |
+| emitter | codegen bugs, PRX relocations, and function discovery: shared epilogues, computed jumps, switch-case ownership |
+| oracle | an Allegrex interpreter to diff against, filling an unchecked box in upstream's Phase 5 roadmap |
+| runtime | thread scheduler and guest clock, disc filesystem, GE display-list lifetime, sceMpeg |
+| diagnostics | firmware call logging, semaphore narration, function tracing and reachability |
 
-All three belong upstream in
+They belong upstream in
 [sp00nznet/psprecomp](https://github.com/sp00nznet/psprecomp); they are kept
 here so a fresh clone reproduces the same build in the meantime.
