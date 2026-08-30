@@ -261,9 +261,17 @@ on without the conversation that produced it.
    `0x001B1770` and `0x001B8BA4`, and both guard on a null field before
    reaching the drain.
 
-   So the queue is drained from the game's own update code, far outside the
-   movie — which is not running, because the game has not left the movie. The
-   movie waits on the game and the game waits on the movie.
+   The drain methods themselves live in the movie's own range, but the calls
+   that reach them come from `0x0013B040` and `0x0018BE48`, in the game's update
+   code — and that code never runs. Breakpoints confirm it: `psp_func_001B134C`
+   and `psp_func_0027ECD4` are hit zero times, while `user_main`
+   (`0x00253324`) is entered exactly once and then blocks in
+   `sceKernelWaitThreadEnd` for thread `0x40001`, the movie controller.
+
+   So the game cannot proceed until the movie thread ends; the movie cannot end
+   until its frame queue drains; and the drain is only called from code that
+   runs once the game has proceeded. Whatever breaks that on hardware, we are
+   not providing it — and it is not reachable from inside sceMpeg.
 
    The display side never gets far enough to dispatch it. SoundThread wakes on
    Movie Sync and then guards on two fields before doing anything:
