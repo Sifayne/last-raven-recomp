@@ -15,6 +15,19 @@
 /* Turn the presentation layer on. Enables the real-time clock, registers the
  * display and audio hooks, and spawns the SDL thread. Returns 0 on success,
  * -1 if SDL could not start (the run continues headless either way). */
+#ifdef HAVE_SDL2
 int present_start(void);
+#else
+/* No SDL2 when this was built, so present.c was never compiled and there is
+ * nothing to link against. The declaration becomes a stub rather than the call
+ * site becoming conditional: a host without SDL2 has to build, and asking for a
+ * window on one should say why it did not get one instead of failing to link. */
+#include <stdio.h>
+static inline int present_start(void) {
+    fprintf(stderr, "present: built without SDL2 -- no window. Install the "
+                    "SDL2 development package and re-run scripts/06-boot.sh\n");
+    return -1;
+}
+#endif
 
 #endif

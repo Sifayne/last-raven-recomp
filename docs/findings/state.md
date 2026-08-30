@@ -163,7 +163,7 @@ Three endings, three signatures. Reading one as another has cost sessions.
 `threads: all finished` is reserved for a run where every thread ended on its
 own. Before patch 0021 it was printed for force-stops too, because
 `psp_sched_stop_all` marks every thread dead and the drain then counts zero —
-indistinguishable from success. See *Five ways to measure nothing*.
+indistinguishable from success. See *Six ways to measure nothing*.
 
 ## The instruments, and what each can and cannot tell you
 
@@ -184,6 +184,8 @@ All are off by default and cost nothing when off.
 | `PSPRECOMP_FRAME=<path>` | Where to write the frame. Defaults to `frame.ppm`, and dumps the GE's render target rather than the scanned-out buffer. |
 | `PSPRECOMP_MPEG_DECODE=1` | Demuxer and openh264 video path. Refused, loudly, in a build without openh264. |
 | `PSPRECOMP_DRAIN=<seconds>` | Widens the scheduler drain past its 60-second default, for runs that are supposed to still be going — a movie, for one. |
+| `PSPRECOMP_WINDOW=1` | An SDL2 window, the gamepad and audio out. Implies real-time pacing. The frame is published at `sceDisplaySetFrameBuf` — the flip — because this game never asks for a vblank; hanging the hook off one publishes nothing, which looks exactly like a broken renderer. Closing the window stops the run through the scheduler, so the end-of-run summary still prints. Needs SDL2 at build time; without it the host still builds and says so when asked for a window. |
+| `PSPRECOMP_REALTIME=1` | Real-time pacing without a window, so a wall-clock measurement of a real scene is honest. Ignored when `PSPRECOMP_WINDOW` is set, which already implies it. |
 | `PSPRECOMP_MPEG=1` | Narrates the movie path. Everything it prints is throttled except `RingbufferPut`, which is bounded by the disc read — safe in either configuration. |
 | `PSPRECOMP_MPEG_DUMP=<path>` | The demuxed elementary stream, once it exceeds 1 MB. For checking against a decoder that is not ours. |
 | `PSPRECOMP_MPEG_FRAME=<path>`, `PSPRECOMP_MPEG_FRAME_NO=<n>` | One decoded frame as a PPM. |
@@ -223,7 +225,7 @@ not usable at all with the decoder on.
 Both write to stderr, so they land wherever it is redirected. Send them to
 `reports/` and not to a scratch directory on tmpfs.
 
-### Five ways to measure nothing
+### Six ways to measure nothing
 
 Each of these produced a confident number that meant nothing.
 
@@ -248,6 +250,18 @@ Each of these produced a confident number that meant nothing.
 - **`threads: all finished` used to mean "or the host killed it".** A force-stop
   marks every thread dead, so the drain counts zero — the same answer a clean
   finish gives. Fixed by patch 0021, which threads the reason through.
+- **"300+ frames published" counts publishes, not pixels.** The window's first
+  working build measured that and read it as the display path being right. It
+  was not: `present_frame` used `sceDisplaySetFrameBuf`'s `bufferwidth` as a
+  *byte* pitch when it is in **pixels**, so each row advanced 512 bytes instead
+  of 2048. The unwritten 480..511 stride padding — which the rasterizer never
+  touches, because it clips at `x < 480` — then walked across the picture as
+  three 32-pixel black bands at x 96, 224 and 352, one visible every fourth
+  row, and only the top 68 scanlines were ever read. Every row stayed inside
+  the buffer, so nothing faulted and `bad mem` stayed at zero. A copy-path
+  fault that presents as a rasterizer fault, and the frame counter cannot tell
+  them apart. `dump_one` and `psp_display_capture` had the arithmetic right all
+  along; the window was the odd one out.
 
 ### The trace ring is not a call stack
 
@@ -825,7 +839,7 @@ that produced it.
    stuck. **Item 3 below is thereby closed as a frame of its own: the queue
    full *is* the drain pacing the decode loop, not a deadlock.**
 
-   ### The real blocker was end-of-stream, and patch `0036` is the fix
+   ### The real blocker was end-of-stream, and patch `0046` is the fix
 
    With `0030` in, the movie plays — 1.68 billion pixels in sixty seconds,
    67 MB of stream read, `PSPRECOMP_FRAMES` dumps showing the actual intro —
@@ -835,7 +849,7 @@ that produced it.
    succeeded unconditionally, so SoundThread pumped silence down its channel
    at a steady 55 thousand calls per minute for as long as the run lasted.
 
-   Patch `0036` makes the end observable where it already was visible: the
+   Patch `0046` makes the end observable where it already was visible: the
    ring callback's contract says a short delivery is the end of the file, so
    `RingbufferPut` records it in the `es_eof` field that had been declared in
    the context since the decoder landed and never once read; `avc_pump` decodes
@@ -854,7 +868,7 @@ that produced it.
 
    ### The pad cannot skip the intro, because nothing reads the pad
 
-   `PSPRECOMP_PAD_PRESS` (patch `0037`) presses a button at a wall-clock
+   `PSPRECOMP_PAD_PRESS` (patch `0047`) presses a button at a wall-clock
    moment — the held variant cannot, because a game reads *pressed* as a
    transition and a button down before the first poll never transitions. The
    press fires; the game ignores it; and the histogram says why:

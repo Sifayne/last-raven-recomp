@@ -631,8 +631,10 @@ int main(int argc, char **argv) {
      * paces a headless run on its own, which is what makes a wall-clock
      * measurement of a real scene honest. */
     if (getenv("PSPRECOMP_WINDOW")) {
-        present_start();
-        printf("      window    on (SDL2: video, pad, audio; implies real-time pacing)\n");
+        if (present_start() == 0)
+            printf("      window    on (SDL2: video, pad, audio; implies real-time pacing)\n");
+        else
+            printf("      window    unavailable -- running headless\n");
     } else if (getenv("PSPRECOMP_REALTIME")) {
         psp_clock_realtime(1);
         printf("      pacing    real-time (headless)\n");

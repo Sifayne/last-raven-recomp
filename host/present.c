@@ -18,6 +18,7 @@
 #include "psprecomp/clock.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
+#include "psprecomp/sched.h"
 
 #include <SDL2/SDL.h>
 
@@ -39,16 +40,44 @@ static pthread_mutex_t g_frame_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_frame_cv;
 static uint32_t        g_frame_rgba[SCREEN_W * SCREEN_H];
 static int             g_frame_fresh;
+/* The SDL thread's own copy, so the upload happens outside g_frame_lock: the
+ * publishing thread holds the scheduler token, and must never wait on a GPU. */
+static uint32_t        g_frame_present[SCREEN_W * SCREEN_H];
+static _Atomic int     g_quit;
 
 /* The display hook. Runs on a guest thread holding the scheduler token, so
  * convert and publish, and get out -- the ~130k reads take well under a
  * millisecond, and the lock is held only across that. */
 static void present_frame(uint32_t addr, uint32_t stride, uint32_t fmt) {
+    /* The window is gone and the run is being torn down; there is nobody to
+     * hand a frame to, and the guest thread should not pay for converting one. */
+    if (atomic_load(&g_quit)) return;
+
+    /* Bring-up diagnostics: the difference between "the window is black"
+     * because nothing was ever published and because SDL failed to paint it
+     * is the first thing to know, and neither leaves another trace. */
+    static int published;
+    if (!published++)
+        fprintf(stderr, "present: first frame addr=0x%08X stride=%u fmt=%u\n",
+                addr, stride, fmt);
+    else if (published % 60 == 0)
+        fprintf(stderr, "present: %d frames (last addr=0x%08X)\n", published, addr);
+
     pthread_mutex_lock(&g_frame_lock);
+
+    /* `stride` is sceDisplaySetFrameBuf's bufferwidth, which is in *pixels*
+     * (512 for a 480-wide panel) -- so a row step is stride * bytes-per-pixel.
+     * Using it as a byte pitch advanced 512 bytes instead of 2048 and sheared
+     * the frame: the unwritten 480..511 stride padding walked across the
+     * picture as three black bands, and only the top 68 scanlines were ever
+     * read. Nothing faults when you do this, which is why it read as a
+     * rasterizer fault. The bpp split matches the switch below, where anything
+     * that is not 565/5551/4444 is 8888. */
+    const uint32_t bpp = (fmt <= 2) ? 2u : 4u;
 
     for (int y = 0; y < SCREEN_H; y++) {
         uint32_t *out = g_frame_rgba + (size_t)y * SCREEN_W;
-        const uint32_t row = addr + (uint32_t)y * stride;
+        const uint32_t row = addr + (uint32_t)y * stride * bpp;
         for (int x = 0; x < SCREEN_W; x++) {
             uint32_t r, g, b, a = 255;
             switch (fmt) {
@@ -221,6 +250,9 @@ static void *sdl_thread(void *arg) {
         SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED |
                                     SDL_RENDERER_PRESENTVSYNC) : NULL;
     if (ren) SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+    /* The window is resizable, so pin the aspect: SDL letterboxes 480x272
+     * inside whatever the user drags it to rather than stretching it. */
+    if (ren) SDL_RenderSetLogicalSize(ren, SCREEN_W, SCREEN_H);
     SDL_Texture *tex = ren ?
         SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888,
                           SDL_TEXTUREACCESS_STREAMING, SCREEN_W, SCREEN_H) : NULL;
@@ -255,9 +287,18 @@ static void *sdl_thread(void *arg) {
         pthread_mutex_lock(&g_frame_lock);
         if (!g_frame_fresh)
             pthread_cond_timedwait(&g_frame_cv, &g_frame_lock, &due);
-        g_frame_fresh = 0;
-        if (tex) SDL_UpdateTexture(tex, NULL, g_frame_rgba, SCREEN_W * 4);
+        const int fresh = g_frame_fresh;
+        if (fresh) {
+            memcpy(g_frame_present, g_frame_rgba, sizeof g_frame_present);
+            g_frame_fresh = 0;
+        }
         pthread_mutex_unlock(&g_frame_lock);
+
+        /* Outside the lock. On a timeout there is no new frame, so the texture
+         * keeps the last one and the window still repaints -- which is the
+         * point of the bounded wait. */
+        if (tex && fresh)
+            SDL_UpdateTexture(tex, NULL, g_frame_present, SCREEN_W * 4);
 
         if (tex) {
             SDL_RenderCopy(ren, tex, NULL, NULL);
@@ -268,8 +309,15 @@ static void *sdl_thread(void *arg) {
         while (SDL_PollEvent(&e)) {
             switch (e.type) {
             case SDL_QUIT:
-                fflush(NULL);
-                _exit(0);
+                /* Stop the run the way the host already stops one, rather than
+                 * _exit(0): that killed the process mid-drain and took the
+                 * whole end-of-run report with it. This is not a guest thread,
+                 * so it marks the guest threads dead and wakes the main
+                 * context in psp_sched_drain, which then reports "stopped by
+                 * the host (window closed)" and prints the summary. */
+                atomic_store(&g_quit, 1);
+                psp_sched_stop_all("window closed");
+                return NULL;
             case SDL_CONTROLLERDEVICEADDED:
                 SDL_GameControllerOpen(e.cdevice.which);
                 break;

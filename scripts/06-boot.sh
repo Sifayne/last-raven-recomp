@@ -22,10 +22,25 @@ LIB="$ROOT/build/psprecomp/libpsprecomp.a"
 [ -f "$LIB" ] || die "no runtime library; run scripts/build-tools.sh first"
 [ -f "$OUT/aclr_funcs.o" ] || die "no emitted module; run scripts/04-emit-build.sh first"
 
+# The presentation layer is optional at build time as well as run time: with
+# SDL2 installed the window, pad and audio exist; without it the host builds
+# and runs exactly as it did before. PSPRECOMP_WINDOW selects it at run time.
+#
+# Probed before the host is compiled, not after: boot.c calls present_start,
+# and present.h turns that into a stub when HAVE_SDL2 is absent. Probing later
+# left the call with nothing to link against on a machine without SDL2.
+PRESENT=""
+SDL_DEF=""
+if pkg-config --exists sdl2 2>/dev/null; then
+    SDL_DEF="-DHAVE_SDL2"
+else
+    info "no SDL2 -- building headless only"
+fi
+
 info "compiling boot host"
 # The loader is part of the recompiler tool, not the runtime library, so its
 # sources are compiled in here rather than linked from an archive.
-cc -O2 -std=gnu11 \
+cc -O2 -std=gnu11 $SDL_DEF \
    -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
    -c "$ROOT/host/boot.c" -o "$OUT/boot.o"
 
@@ -34,18 +49,12 @@ for src in loader container decode; do
        -c "$RECOMP_DIR/$src.c" -o "$OUT/$src.o"
 done
 
-# The presentation layer is optional at build time as well as run time: with
-# SDL2 installed the window, pad and audio exist; without it the host builds
-# and runs exactly as it did before. PSPRECOMP_WINDOW selects it at run time.
-PRESENT=""
-if pkg-config --exists sdl2 2>/dev/null; then
+if [ -n "$SDL_DEF" ]; then
     info "compiling presentation layer (SDL2)"
-    cc -O2 -std=gnu11 $(pkg-config --cflags sdl2) \
+    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2) \
        -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
        -c "$ROOT/host/present.c" -o "$OUT/present.o"
     PRESENT="$OUT/present.o $(pkg-config --libs sdl2)"
-else
-    info "no SDL2 -- building headless only"
 fi
 
 info "linking"
