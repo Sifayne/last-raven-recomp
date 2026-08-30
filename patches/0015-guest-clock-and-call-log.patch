@@ -1,9 +1,9 @@
 diff --git a/include/psprecomp/clock.h b/include/psprecomp/clock.h
 new file mode 100644
-index 0000000..6289560
+index 0000000..f90eed7
 --- /dev/null
 +++ b/include/psprecomp/clock.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,55 @@
 +/* psprecomp — the guest clock.
 + *
 + * A virtual microsecond clock, not the host's. Two reasons:
@@ -47,6 +47,12 @@ index 0000000..6289560
 +
 +/* Move the clock on by one frame. Called from the vblank handlers. */
 +void psp_clock_frame(void);
++
++/* Move the clock forward to `us` if it is not already past it. Never moves it
++ * back. The scheduler uses this when every thread is asleep: time here only
++ * advances because the guest asked it to, so a run where nothing is runnable
++ * would otherwise wait forever for a moment that cannot arrive on its own. */
++void psp_clock_advance_to(uint64_t us);
 +
 +#ifdef __cplusplus
 +}
@@ -152,10 +158,10 @@ index d0be982..220bf6b 100644
  
 diff --git a/src/hle/clock.c b/src/hle/clock.c
 new file mode 100644
-index 0000000..f0006b7
+index 0000000..c999670
 --- /dev/null
 +++ b/src/hle/clock.c
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,29 @@
 +/* psprecomp — the guest clock. See include/psprecomp/clock.h. */
 +
 +#include "psprecomp/clock.h"
@@ -183,6 +189,8 @@ index 0000000..f0006b7
 +}
 +
 +void psp_clock_frame(void) { g_us += PSP_FRAME_US; }
++
++void psp_clock_advance_to(uint64_t us) { if (us > g_us) g_us = us; }
 diff --git a/src/hle/display.c b/src/hle/display.c
 index 0a619bb..b51611a 100644
 --- a/src/hle/display.c

@@ -46,10 +46,10 @@ index e6a88df..274891a 100644
      if(PSPRECOMP_LIBM)
 diff --git a/include/psprecomp/sched.h b/include/psprecomp/sched.h
 new file mode 100644
-index 0000000..0ba31e7
+index 0000000..4d8aed5
 --- /dev/null
 +++ b/include/psprecomp/sched.h
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,157 @@
 +/* psprecomp — thread scheduling.
 + *
 + * Why host threads and not saved registers
@@ -134,10 +134,16 @@ index 0000000..0ba31e7
 +int  psp_sched_block(uint32_t uid, psp_sched_state why, const char *what);
 +void psp_sched_yield(void);
 +
-+/* Give up the CPU for one round to a thread of any priority. A yield cannot do
-+ * this: it leaves the caller READY, and the handoff picks the most urgent READY
-+ * thread, which is the caller again whenever it outranks everything else. */
-+void psp_sched_delay(void);
++/* Sleep for `usec` of guest time.
++ *
++ * A yield cannot express this: it leaves the caller READY, and the handoff picks
++ * the most urgent READY thread, which is the caller again whenever it outranks
++ * everything else. Nor is one round enough -- two threads at the same priority
++ * simply hand the CPU back and forth and anything below them still starves.
++ *
++ * Sleeping until a deadline makes the caller ineligible for as long as it asked
++ * for, which is the whole reason a game's main loop delays. */
++void psp_sched_delay(uint64_t usec);
 +
 +/* Charge the running thread one tick of its timeslice, and rotate to an equal
 + * if it has used the slice up. Called from the firmware-call path: a PSP
@@ -203,15 +209,16 @@ index 0000000..0ba31e7
 +#endif /* PSPRECOMP_SCHED_H */
 diff --git a/src/hle/sched.c b/src/hle/sched.c
 new file mode 100644
-index 0000000..8a4500f
+index 0000000..60b2c0e
 --- /dev/null
 +++ b/src/hle/sched.c
-@@ -0,0 +1,591 @@
+@@ -0,0 +1,637 @@
 +/* psprecomp — thread scheduling. See include/psprecomp/sched.h. */
 +
 +#include "psprecomp/sched.h"
 +#include "psprecomp/cpu.h"
 +#include "psprecomp/dispatch.h"
++#include "psprecomp/clock.h"
 +
 +#include <errno.h>
 +#include <pthread.h>
@@ -230,6 +237,7 @@ index 0000000..8a4500f
 +    int             priority;      /* PSP: lower number is more urgent */
 +    psp_sched_state state;
 +    const char     *waiting_on;    /* diagnostics only */
++    uint64_t        wake_at;       /* guest microseconds; 0 when not sleeping */
 +    psp_cpu_state   ctx;           /* valid whenever this slot is not running */
 +    pthread_t       host;
 +    int             started;
@@ -320,6 +328,17 @@ index 0000000..8a4500f
 +                        "uid 0x%08X are both RUNNING\n",
 +                g_slot[cur].uid, g_slot[dup].uid);
 +
++    /* Anything whose delay has expired is runnable again. Checked here rather
++     * than by a timer because there is no timer: guest time only moves when the
++     * guest moves it, so the moment to notice is the moment somebody asks who
++     * runs next. */
++    for (int i = 0; i < MAX_SCHED_THREADS; i++)
++        if (g_slot[i].used && g_slot[i].state == PSP_SCHED_SLEEPING &&
++            g_slot[i].wake_at && g_slot[i].wake_at <= psp_clock_peek()) {
++            g_slot[i].state   = PSP_SCHED_READY;
++            g_slot[i].wake_at = 0;
++        }
++
 +    int best = -1;
 +    /* Scanned starting *after* the current thread, so that among threads of
 +     * equal priority the next one round-robins in rather than the lowest slot
@@ -331,6 +350,36 @@ index 0000000..8a4500f
 +        const int i = (start + k) % MAX_SCHED_THREADS;
 +        if (!g_slot[i].used || g_slot[i].state != PSP_SCHED_READY) continue;
 +        if (best < 0 || g_slot[i].priority < g_slot[best].priority) best = i;
++    }
++
++    if (best < 0) {
++        /* Nothing is runnable, but something may be sleeping on a deadline that
++         * has not arrived. Waiting for it is not idling, it is hanging: the
++         * clock only advances because a thread advanced it, and no thread is
++         * running. So move time to the earliest deadline and let that thread go
++         * -- which is what a kernel with a real timer would do, arriving at the
++         * same instant by a different route. */
++        uint64_t soonest = 0;
++        for (int i = 0; i < MAX_SCHED_THREADS; i++)
++            if (g_slot[i].used && g_slot[i].state == PSP_SCHED_SLEEPING &&
++                g_slot[i].wake_at && (!soonest || g_slot[i].wake_at < soonest))
++                soonest = g_slot[i].wake_at;
++
++        if (soonest) {
++            psp_clock_advance_to(soonest);
++            for (int i = 0; i < MAX_SCHED_THREADS; i++)
++                if (g_slot[i].used && g_slot[i].state == PSP_SCHED_SLEEPING &&
++                    g_slot[i].wake_at && g_slot[i].wake_at <= soonest) {
++                    g_slot[i].state   = PSP_SCHED_READY;
++                    g_slot[i].wake_at = 0;
++                }
++            const int start2 = g_running >= 0 ? g_running : 0;
++            for (int k = 1; k <= MAX_SCHED_THREADS; k++) {
++                const int i = (start2 + k) % MAX_SCHED_THREADS;
++                if (!g_slot[i].used || g_slot[i].state != PSP_SCHED_READY) continue;
++                if (best < 0 || g_slot[i].priority < g_slot[best].priority) best = i;
++            }
++        }
 +    }
 +
 +    if (best < 0) {
@@ -568,22 +617,25 @@ index 0000000..8a4500f
 + * which is what lets anything below it run. There is no clock here, so the
 + * duration cannot be honoured -- but the *ineligibility* can, for one round.
 + * That is the half of the semantics that matters. */
-+void psp_sched_delay(void) {
++void psp_sched_delay(uint64_t usec) {
 +    if (!g_threading) return;
 +    pthread_mutex_lock(&g_lock);
 +    const int me = g_self;
 +
-+    g_slot[me].ctx   = psp_cpu;
-+    g_slot[me].state = PSP_SCHED_BLOCKED;      /* ineligible, so anyone can win */
++    g_slot[me].ctx     = psp_cpu;
++    g_slot[me].state   = PSP_SCHED_SLEEPING;
++    /* A zero delay is still a request to stand aside, so it gets the shortest
++     * deadline that exists rather than none -- otherwise it would never wake. */
++    g_slot[me].wake_at = psp_clock_peek() + (usec ? usec : 1);
 +
 +    if (handoff_locked() < 0) {                /* nobody else at all: carry on */
-+        g_slot[me].state = PSP_SCHED_RUNNING;
-+        g_running        = me;
++        g_slot[me].state   = PSP_SCHED_RUNNING;
++        g_slot[me].wake_at = 0;
++        g_running          = me;
 +        pthread_mutex_unlock(&g_lock);
 +        return;
 +    }
 +
-+    g_slot[me].state = PSP_SCHED_READY;        /* runnable again, but not holding */
 +    if (await_turn_locked(me) != 0) {
 +        pthread_mutex_unlock(&g_lock);
 +        if (me != MAIN_SLOT) pthread_exit(NULL);
@@ -799,7 +851,7 @@ index 0000000..8a4500f
 +    return uid;
 +}
 diff --git a/src/hle/threadman.c b/src/hle/threadman.c
-index bba5683..21f3dfa 100644
+index bba5683..d11b2b6 100644
 --- a/src/hle/threadman.c
 +++ b/src/hle/threadman.c
 @@ -5,38 +5,33 @@
@@ -1082,7 +1134,7 @@ index bba5683..21f3dfa 100644
 + * game whose main loop delays. Yielding gives the other threads the token,
 + * which is the useful half of the semantics. */
 +static void hle_DelayThread(void) {
-+    psp_sched_delay();
++    psp_sched_delay(psp_arg(0));
 +    psp_ret(SCE_KERNEL_ERROR_OK);
 +}
  
