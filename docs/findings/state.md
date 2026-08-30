@@ -147,6 +147,14 @@ something inexplicable, check what it was last told.
   `still running after 60s` line. Check the order before reading anything into
   it; stderr is unbuffered and stdout is not, so the two interleave misleadingly
   in a redirected log.
+- **Returning a clean end-of-stream from sceMpeg to end the movie.** The game
+  already ends it. `SCE_MPEG_ERROR_INVALID_VALUE` makes the AU-fetch wrapper at
+  `0x002750C0` print its own `Fatal Error!!!` and return 0; the caller's
+  `beql $v0, $zero` is then taken, sets the "movie done" flag at offset 746,
+  and proceeds into the teardown chain at `0x00273804` / `0x00273838` /
+  `0x0027394C`. `NO_DATA` would restore the fifteen-million-query spin — see
+  the header comment in `mpeg.c`, which has the guest disassembly. **The stall
+  is downstream, in the teardown, which never signals `Movie Sync`.**
 - **Skipping the intro movie with `PSPRECOMP_PAD`.** The game does read the
   pad — holding `start,cross` visibly changes which threads park where — but
   the skip path routes back into the movie subsystem rather than around it:
