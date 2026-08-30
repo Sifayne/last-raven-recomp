@@ -296,11 +296,12 @@ reports failures it does not already expect.
   already ends it. `SCE_MPEG_ERROR_INVALID_VALUE` makes the AU-fetch wrapper at
   `0x002750C0` print its own `Fatal Error!!!` and proceed into the teardown chain.
   `NO_DATA` would restore the spin — see the header comment in `mpeg.c`.
-- **A `SignalSema` on the semaphore SoundThread waits for.** `Movie Sync sema`
-  (`0x0004001C`) is **never signalled in either configuration** — confirmed
-  against the signalled-uid census, which records every uid ever passed to
-  `sceKernelSignalSema`. Statically, no instruction in the module loads offset
-  100 — where SoundThread reads it — and reaches `SignalSema`.
+- **A `SignalSema` on the semaphore SoundThread waits for.** *(Half retracted —
+  see open item 2.)* It is true that `Movie Sync sema` (`0x0004001C`) is never
+  signalled **at run time** in either configuration; the signalled-uid census
+  says so. It is **false** that nothing in the module signals it: three call
+  sites do, via offset 396 rather than offset 100. The static half of that
+  entry searched one struct's offsets and drew a conclusion about a value.
 - **A colour-conversion or decode-mode stage as the missing display step.** The
   game imports **none** of `sceMpegAvcDecodeMode`, `sceMpegAvcCsc`,
   `sceMpegAvcDecodeYCbCr`, `sceMpegAvcCopyYCbCr` or `sceMpegAvcQueryYCbCrSize`.
@@ -419,11 +420,78 @@ that produced it.
    measurement; and the GE's "unsupported format" counter summed three
    unrelated causes into one number.
 
-2. **Movie Sync has no signaller, and that is the gate both configurations hit.**
-   The frame consumer `0x40021` parks on it and never wakes; the movie therefore
-   never advances and never ends; `user_main` waits on the movie thread forever.
-   Two independent lines of evidence say nothing signals it — see the ruled-out
-   entry.
+2. **Movie Sync has three signallers. None of them runs.** The frame consumer
+   `0x40021` parks on it and never wakes; the movie never advances and never
+   ends; `user_main` waits on the movie thread forever.
+
+   ### Retracted: "nothing signals it, anywhere"
+
+   That claim rested on a static search showing no instruction loads **offset
+   100** — where SoundThread reads the uid — and reaches `SignalSema`. The
+   search was correct and the conclusion did not follow. **Which offset a value
+   sits at is an argument about one struct.** The same uid can live at two
+   offsets in two objects, and here it lives at five addresses in RAM:
+
+   ```
+   findptr: 0x0004001C stored at: ram:0x08D3EAA0 ram:0x08D3EB0C
+                                  ram:0x08EF4974 ram:0x08EF9D74 ram:0x08EFAFD4
+   ```
+
+   `0x08D3EB0C` is the MPEG context (`0x08D3E980`) **+ 396** — and 396 *is* in
+   the set of offsets feeding `sceKernelSignalSema`. Confirmed by enumerating
+   all 35 `SignalSema` call sites in the module and resolving every one's `$a0`:
+   the offsets are {0, 4, 8, 12, 20, 36, 40, 52, 96, 128, 176, 180, 184, 396,
+   668}. The initialiser stores the semaphore there itself, at `0x002733C4`:
+   `sw $s1, 396($s0)`, two instructions before it sets `flag741`.
+
+   **The lesson is the method, not the address.** A static claim of the form
+   "nothing does X" needs the value's *identity* tracked, not one of its
+   addresses. `PSPRECOMP_FINDPTR` now scans RAM and VRAM for exactly this.
+
+   ### The three signallers, and why each is silent
+
+   | signaller | where | status |
+   |---|---|---|
+   | `MovieDisplayThread` | `0x0027429C`, `0x002742C8` | **thread never created** |
+   | the drain `psp_func_00273E30` | `0x00273EA4` | never reached |
+
+   **`MovieDisplayThread` (entry `0x002741C4`) is a thread nobody knew about.**
+   It has zero `jal` sites and is stored as a word nowhere, because its address
+   is built for `sceKernelCreateThread` across a delay slot — `lui $a1, 0x27` at
+   `0x0027477C`, `addiu $a1, $a1, 16836` at `0x00274798`, with the `jal` between
+   them. Its creation is gated:
+
+   ```
+   00274770  lbu  $a0, 744($s0)
+   00274774  beq  $a0, $zero, 0x002747E4     ; zero -> skip creating it
+   00274794  jal  sceKernelCreateThread      ; MovieDisplayThread
+   ```
+
+   `flag744` is set to 1 by the initialiser at `0x002733C8` — and its only
+   caller overwrites it with 0 four instructions later, at `0x0027262C`,
+   alongside setting `flag741` from a runtime argument. **So this build asks for
+   no display thread.** That is a decision the game makes, not a fault to fix,
+   and it means the drain is the signaller that matters.
+
+   It also carries a **second decrement of `struct[168]`**, at `0x00274278` —
+   the frame-queue counter that item 3 says is decremented in exactly one place.
+   There are two.
+
+   ### What is actually left
+
+   Measured with `PSPRECOMP_REACHED`, identically in both configurations:
+
+   | block | reached |
+   |---|---|
+   | `psp_body_002729C0`, the display-side body | **yes** |
+   | `0x00272D8C`, the block holding `jal 0x00273A50` | no |
+   | `0x00273A50`, the drain's wrapper | no |
+   | `0x00273E30`, the drain | no |
+
+   `0x00272DA0` is the **only** `jal` to the wrapper in the whole module. So the
+   question is now one guard inside one function that is known to run: what in
+   `psp_body_002729C0` decides not to reach `0x00272D8C`. That is a much smaller
+   question than "who signals this semaphore", which is where this item started.
 
    The chain below it is now measured rather than inferred. `0x00275864` is the
    *audio* pump; the strings its error path prints identify `0x002E4928` as
