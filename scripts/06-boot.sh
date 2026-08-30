@@ -34,8 +34,22 @@ for src in loader container decode; do
        -c "$RECOMP_DIR/$src.c" -o "$OUT/$src.o"
 done
 
+# The presentation layer is optional at build time as well as run time: with
+# SDL2 installed the window, pad and audio exist; without it the host builds
+# and runs exactly as it did before. PSPRECOMP_WINDOW selects it at run time.
+PRESENT=""
+if pkg-config --exists sdl2 2>/dev/null; then
+    info "compiling presentation layer (SDL2)"
+    cc -O2 -std=gnu11 $(pkg-config --cflags sdl2) \
+       -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
+       -c "$ROOT/host/present.c" -o "$OUT/present.o"
+    PRESENT="$OUT/present.o $(pkg-config --libs sdl2)"
+else
+    info "no SDL2 -- building headless only"
+fi
+
 info "linking"
-cc "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" \
+cc "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT \
    "$OUT/aclr_funcs.o" "$OUT/aclr_imports.o" "$LIB" \
    -o "$OUT/boot" -lm -lpthread $HOST_LIBS
 

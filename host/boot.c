@@ -23,8 +23,10 @@
 
 #include "loader.h"
 #include "container.h"
+#include "present.h"
 
 #include "decode.h"          /* PSP_RA_INDEX */
+#include "psprecomp/clock.h"
 #include "psprecomp/cpu.h"
 #include "psprecomp/ctors.h"
 #include "psprecomp/dispatch.h"
@@ -577,6 +579,21 @@ int main(int argc, char **argv) {
     psp_hle_register(0x8F2DF740u, "ModuleMgrForUser", "StopUnloadSelfModule",
                      hle_stop_unload_self);
     printf("  [2] runtime   %u functions registered\n", psp_dispatch_count());
+
+    /* Presentation, before the module loads: the real-time clock anchors to
+     * the moment it is enabled, and that moment should be the start of the
+     * run rather than the end of the load. PSPRECOMP_WINDOW enables the SDL
+     * layer -- window, pad, audio -- and implies pacing; PSPRECOMP_REALTIME
+     * paces a headless run on its own, which is what makes a wall-clock
+     * measurement of a real scene honest. */
+    if (getenv("PSPRECOMP_WINDOW")) {
+        present_start();
+        printf("      window    on (SDL2: video, pad, audio; implies real-time pacing)\n");
+    } else if (getenv("PSPRECOMP_REALTIME")) {
+        psp_clock_realtime(1);
+        printf("      pacing    real-time (headless)\n");
+    }
+
     install_watch();
     psp_sched_set_thread_hook(install_alt_stack);
     printf("      disc      %s\n", iso ? iso : "(none -- raw umd: opens will fail)");
