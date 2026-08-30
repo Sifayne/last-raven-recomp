@@ -101,52 +101,72 @@ it runs is the whole class of bug this project keeps writing down:
    `MATCHES hardware`, `differs: N line(s)`, or `NO OUTPUT`. It removes the
    file before each run, so a test that emits nothing cannot inherit its
    predecessor's verdict.
-4. **`matrix` matches hardware exactly.** All 50 lines, byte-identical to real
-   PSP output: every `vtfm`, `vhtfm`, `vmmul`, `vmidt`, `vmscl` and transpose
-   case. That is the first end-to-end confirmation of anything in the VFPU
-   against hardware rather than against ourselves.
+4. **`matrix` matches hardware exactly**, and `gum` is four lines away.
+   All 50 of `matrix`'s lines are byte-identical to real PSP output: every
+   `vtfm`, `vhtfm`, `vmmul`, `vmidt`, `vmscl` and transpose case.
 
    | test | stopped | ours / expected |
    |---|---|---|
    | `matrix` | ExitGame | **MATCHES hardware** |
+   | `gum` | ExitGame | 45 / 45 lines, 4 differ |
    | `prefixes` | ExitGame | 26 / 26 lines, 38 differ |
    | `vregs` | ExitGame | 30 / 48 lines, 42 differ |
-   | `gum` | `mtv $a1, v52` | 2 / 45 lines |
    | `colors` | `.word 0xD480000C` | 1 / 5 lines |
    | `vavg` | `.word 0xD0470480` | no output |
-   | `convert` | budget | 1 / 108 lines, 99.3M bad accesses |
+   | `convert` | budget | 1 / 108 lines |
    | `vector` | budget | 1045 / 5329 lines |
 
-   Getting there took three bugs, each invisible to the differential oracle
-   because the oracle runs the same decoder and the same `psp_vfpu_*` helpers on
-   both sides:
+   Six bugs so far, none of which the differential oracle could see, because it
+   runs the same decoder and the same `psp_vfpu_*` helpers on both sides:
 
-   - **`lv`/`sv` decoded the wrong register field.** The arithmetic ops carry
-     `vt` as a contiguous 7 bits at 22..16; load/store cannot, because bits
-     22..21 are the top of the *base register*, so it puts `vt`'s low five bits
-     at 20..16 and its top two at 1..0. Reading it as the contiguous field mixes
-     the base register into the register number -- `lv.q R000, 0($a1)` becomes
-     0x60 instead of 0x20, the same matrix and column at row 2 instead of row 0,
-     four lanes rotated by two. Which registers were affected depended on which
-     base register the compiler happened to pick, which is why it looked erratic.
+   - **`lv`/`sv` decoded the wrong register field.** Arithmetic carries `vt` as
+     a contiguous 7 bits at 22..16; load/store cannot, because 22..21 are the
+     top of the *base register*, so it puts the low five at 20..16 and the top
+     two at 1..0. Reading the contiguous field mixes the base register into the
+     register number: `lv.q R000, 0($a1)` becomes 0x60 instead of 0x20 -- same
+     matrix and column, row 2 instead of row 0, four lanes rotated by two.
    - **A matrix register names a sub-matrix.** `M022` is the 2x2 at column 2,
-     row 2. `matrix_cols` built a synthetic register from the matrix and
-     transpose bits only, forcing both offsets to zero, so every matrix op wrote
-     the top-left corner whatever register it was given.
+     row 2; both base offsets were being forced to zero.
    - **`vmmul` and `vtfm` indexed their matrix operand transposed.** `vmmul`
-     reads its first operand transposed *twice* -- the assembler sets the
-     transpose bit in the encoding, and the hardware then indexes by
-     [output row][summation] -- and the two cancel. Honouring only the encoded
-     bit gives the product of the transpose: 7621 where hardware gives 1585.
-     `vhtfm` was not implemented at all; it has no opcode of its own, being
-     `vtfm` with the vector one element narrower than the instruction's order.
+     reads its first operand transposed *twice* -- the assembler sets the bit,
+     the hardware indexes by [output row][summation] -- and the two cancel.
+   - **`vhtfm` was not implemented.** It has no opcode of its own: it is `vtfm`
+     with the vector one element narrower than the instruction's order.
+   - **`mtv`/`mfv` were decoded but implemented nowhere.** The integer/vector
+     moves. Also split from `mtvc`/`mfvc`, which are a different register file
+     and were being folded in with them.
+   - **`vrot` bypassed the register mapping**, indexing `psp_cpu.v[]` directly
+     and stepping lanes by one. Lanes are 32 apart and the row offset in bit 6
+     was dropped, so pspgl's `glRotatef` wrote into registers nobody read.
 
-   **This was also the logo bug.** With the load/store field fixed the game's
-   `FROM SOFTWARE` logo moved 68 pixels right and is now centred (x 69..417,
+   **This was also the game's logo bug.** With the load/store field fixed the
+   `FROM SOFTWARE` logo moved 68 pixels right and is centred (x 69..417,
    midpoint 243 on a 480-wide screen). The earlier note about a 68 in `m[9]`
-   instead of `m[12]` was a symptom of lanes rotated by two, seen from the far
-   end of the chain -- which is why chasing the write that produced it never
-   reached a cause.
+   instead of `m[12]` was lanes rotated by two seen from the far end of the
+   chain, which is why chasing the write that produced it never reached a cause.
+
+5. **The user heap was a megabyte too small, and the guest did not check.**
+   `sceKernelAllocPartitionMemory` refused `gum`'s single 0x01500000 request
+   against a 0x01400000 heap. The floor was a fixed 0x08C00000, a guess meaning
+   "above the module" -- but a PRX linked at address 0, which every one of these
+   is, is not in user RAM at all, so there was nothing to step around. The
+   allocator is now told the module's real extent.
+
+   Worth keeping for the shape: the guest formatted into the null it got back,
+   over its own code at address zero, so an out-of-memory presented as a wild
+   pointer and a run that eventually executed ASCII. `gum` went from 2 lines and
+   58 bad accesses to 45 lines and none.
+
+6. **What is left in `gum` is the prefixes, and they are a deliberate gap.**
+   The last four lines are `checkGlRotate`, where pspgl builds the rotation with
+   two `vmov.p` under a `vpfxs` carrying a lane negation -- `(cos, sin)` and
+   `(-sin, cos)`. `vfpu.h` states the policy: a pending prefix makes the next
+   arithmetic op report and skip rather than compute something that ignores it.
+   That is what happens, twice, and the identity survives instead. Not an
+   oversight; the cost of the policy, visible.
+
+   `prefixes` and `vregs` report 16 such ops each. Implementing the operand
+   prefixes is the single change that would move the most tests.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a
