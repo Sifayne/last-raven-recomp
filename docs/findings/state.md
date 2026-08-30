@@ -391,56 +391,33 @@ that produced it.
    **What is left:** perspective-correct interpolation is absent (affine only,
    exact on a fullscreen quad), and there is no clipper.
 
-1. **T&L exists; the picture still does not.** *(superseded by item 0 — kept for
-   the measurements.)* Patch 0026 added the transform
-   pipeline — world and view as 4×3, projection as 4×4, the 24-bit float
-   encoding, viewport and offset, and backface culling. Patch 0025 had found
-   that **all** 2,444 declined vertices were the missing-transform case (the
-   arithmetic closed exactly: 2,958 − 2,444 = 514 = 257 sprites × 2), so the
-   611 triangle-strips the game submits are real geometry that used to be
-   dropped at `draw_prim`'s first line.
+1. **How the renderer got there.** *(Closed — kept for the measurements, which
+   are the reusable part.)*
 
-   They are now transformed and rasterized:
+   `0025` split the declined-vertex counter by cause and found **all** 2,444
+   were the missing transform, none of the other two; the arithmetic closed
+   exactly, 2,958 − 2,444 = 514 = the 257 sprites × 2.
 
-   ```
-   drawn      868 prims (was 257)      pixels 74,680,830 (was 33,423,361)
-   transformed 2444 vertices; viewport set
-     (scale 240.0,-136.0 centre 2048.0,2048.0 offset 1808.0,1912.0), cull ccw
-   matrix words: world 20881, view 15625, proj 34081
-   screen bounds: x 0.0..480.0  y 0.0..272.0        (decoder configuration)
-   ```
+   `0026` added the pipeline. The viewport it read back — scale 240,−136,
+   centre 2048,2048, offset 1808,1912 — is the textbook PSP arrangement, which
+   is what made the decode believable rather than merely non-crashing.
 
-   That viewport is the textbook PSP arrangement — 480/2, −272/2, the 2048
-   guard-band centre, offsets 2048−240 and 2048−136 — which is good evidence
-   the matrix and viewport decode is right rather than merely plausible. In the
-   decoder configuration the transformed geometry lands in **exactly** the
-   screen rectangle, so these are fullscreen backdrop quads, not scene geometry.
+   `0027` found `texture_usable()` demanding 5650 and non-swizzled where the
+   game's textures are clut8 and swizzled, so **no texture had ever sampled in
+   this game**; and `sw_tri` filling every pixel with `a->rgba`, ignoring UVs
+   entirely. Added the formats, the swizzle, barycentric interpolation, and
+   depth.
 
-   **The frame is still one flat colour** — white now rather than dark teal.
-   Three things are missing, and each is separable work:
+   `0028` found the white screen was a fade overlay — vertex alphas of 1, 3, 5
+   composited opaque — and honoured blending.
 
-   - **No depth buffer.** `psp_vertex` carries no z and the backend has no depth
-     test, so primitives land in submission order. Backface culling is honoured,
-     which removes the half of a closed mesh that would paint over the half in
-     front of it, but it is not a substitute.
-   - **No clipper.** A primitive with any vertex at or behind the eye is dropped
-     whole. Dividing anyway would project it to the wrong side of the screen and
-     smear a triangle across the frame, so dropping is the conservative choice —
-     but it is a choice, and it is counted.
-   - **Texture sampling is unvalidated on this path.** UV tracking now works —
-     see below — and reports `u -512.0..640.0 v 0.0..640.0` against a 512×64
-     texture, so coordinates are being tiled or wrapped well outside it. Whether
-     that is correct is the next question.
+   `0029` fixed the palette address, above.
 
-   **`u_lo`/`u_hi` had never been assigned.** They were declared and printed
-   from the first version of `ge.c`, so every run ever made reported
-   `u 0.0..0.0` — a fixed constant that reads as a measurement. That is the
-   thing that separates "sampled at one corner" from "sampled across the whole
-   surface", and it was answering neither. Fixed in 0026 for both paths.
-
-   Next, in order: a depth buffer (which needs `psp_vertex` and the software
-   backend to carry z), then a near-plane clipper, then validating the sampler
-   against a known texture.
+   Two instruments were found dead along the way: `u_lo`/`u_hi` had been
+   declared and printed since the file's first version and **never once
+   assigned**, so every run ever made reported `u 0.0..0.0` as though it were a
+   measurement; and the GE's "unsupported format" counter summed three
+   unrelated causes into one number.
 
 2. **Movie Sync has no signaller, and that is the gate both configurations hit.**
    The frame consumer `0x40021` parks on it and never wakes; the movie therefore
