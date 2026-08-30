@@ -65,3 +65,4 @@ compile_commands.json
 .DS_Store
 frame.ppm
 frame.ppm*
+reports/seq/
