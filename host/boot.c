@@ -283,6 +283,33 @@ static void peek(void) {
     }
 }
 
+/* PSPRECOMP_WATCHMEM=<hex> names the code that writes one word.
+ *
+ * PEEK reads memory once the run has stopped and WATCH fires on function entry;
+ * neither answers "who wrote this". The write path can, and mem.c has been able
+ * to since it was written -- psp_mem_watch_write was declared, implemented and
+ * never called, which is the third instrument in this runtime to have been
+ * finished and left unreachable.
+ *
+ * Reports the writing function from the trace ring, so it wants a
+ * PSPRECOMP_TRACE build; without one the address is right and the attribution
+ * is zero. */
+static void watch_memory(void) {
+    const char *v = getenv("PSPRECOMP_WATCHMEM");
+    if (!v || !*v) return;
+    char *end;
+    const uint32_t a = (uint32_t)strtoul(v, &end, 0);
+    if (*end == ',') {
+        const uint32_t want = (uint32_t)strtoul(end + 1, NULL, 0);
+        psp_mem_watch_write_value(a, want);
+        printf("      watchmem  0x%08X = 0x%08X only "
+               "(needs a PSPRECOMP_TRACE build to name the writer)\n", a, want);
+    } else {
+        psp_mem_watch_write(a);
+        printf("      watchmem  0x%08X (needs a PSPRECOMP_TRACE build to name the writer)\n", a);
+    }
+}
+
 enum { MAX_REACHED = 32 };
 static uint32_t g_reached[MAX_REACHED];
 static int      g_reached_n;
@@ -585,6 +612,7 @@ int main(int argc, char **argv) {
     printf("  [1] load      0x%08X + %u bytes, %d relocations\n",
            li.lo, li.hi - li.lo, li.nrelocs);
     reached_init(li.lo, li.hi);
+    watch_memory();
 
     /* 2 — registration and firmware. */
     psp_recomp_register();
