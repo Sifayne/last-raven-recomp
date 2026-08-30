@@ -259,6 +259,25 @@ on without the conversation that produced it.
    the queue is drained by a virtual method that something must dispatch, and
    nothing does.
 
+   The display side never gets far enough to dispatch it. SoundThread wakes on
+   Movie Sync and then guards on two fields before doing anything:
+
+   ```
+   0027597C  lw    $a1, 72($s1)
+   00275984  sltiu $a1, $a1, 1        struct[72] == 1 ?
+   0027598C  bne   $a1, $zero, ...    yes -> away
+   00275990  lw    $a0, 88($s1)
+   00275994  blez  $a0, 0x00275A24    depth <= 0 -> straight back to the wait
+   0027599C  jal   0x002732C8         sceKernelWaitEventFlag -- never reached
+   ```
+
+   `sceKernelWaitEventFlag` does not appear in the firmware histogram at all, so
+   that guard is what turns it back: `struct[88]`, the display queue depth, is
+   zero. **Two different counters are involved and only one of them moves.** The
+   decode loop is held up by `struct[168]` reaching `struct[172]`, while the
+   depth the display waits on is never incremented — the producer that would do
+   it, at `0x00275770`, is not being reached either.
+
 1. **The game never leaves its intro-movie state.** It is not stuck; it
    repeats — ~2.3M frame presents against 21 GE lists for the whole run. The
    blocked-thread dump now names the object, and that settles it:
