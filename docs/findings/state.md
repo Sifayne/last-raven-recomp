@@ -1142,11 +1142,28 @@ scripts/05-oracle.sh 4000
 
 ```
 attempted: 3957 functions
-compared:  3006      match: 3003      differ: 3      dispatch miss: 0
+compared:  3073      match: 3071      differ: 2      dispatch miss: 0
 ```
 
-The oracle exits 1, because divergences are the standing state. Exit 0 would
-mean the sample missed them. The three:
+**This moved again, from 3006/3003/3, and both halves of the move are
+explained.** More functions *compare* because more of the firmware they call is
+implemented, so fewer runs are abandoned part-way — the same reason patch `0023`
+moved it the last time.
+
+The two that differ are **not codegen and not the same two as before**. Both
+report `interp=00000000 recomp=FFFFFFFF` on registers and on the oracle's own
+stack window at `0x09FE0000`, which is the 0xFF fill `sceKernelStartThread`
+paints onto a fresh thread stack. `psp_sysmem_alloc(size, from_high)` hands out
+from the top of RAM and the oracle's stack sits there unreserved, so a function
+that starts a thread paints over the memory the comparison is about to read.
+
+That is the **third** place this same overlap has appeared. The interpreter's
+main context had it (fixed by taking its stack from the allocator) and so did
+the thread stacks themselves. `host/oracle_diff.c` wants the same fix and has
+not had it; until then the two divergences are an artifact of the harness, and
+the number to watch is that they stay at two.
+
+The three from the previous baseline:
 
 ```
 0001093C  stack[09FFEF70] interp=00000001 recomp=09FFEF84
