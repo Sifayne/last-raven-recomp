@@ -114,7 +114,7 @@ it runs is the whole class of bug this project keeps writing down:
    | `colors` | ExitGame | **MATCHES hardware** |
    | `vavg` | ExitGame | **MATCHES hardware** |
    | `convert` | ExitGame | **MATCHES hardware** |
-   | `vector` | ExitGame | 5329 / 5329 lines, 81 differ |
+   | `vector` | ExitGame | 5329 / 5329 lines, 61 differ |
 
    Six bugs so far, none of which the differential oracle could see, because it
    runs the same decoder and the same `psp_vfpu_*` helpers on both sides:
@@ -410,6 +410,46 @@ it runs is the whole class of bug this project keeps writing down:
     None of it is a blocker for anything: the ops all execute, and the
     differences are in the last bits of results involving infinities, NaNs and
     transcendentals.
+
+16. **The dot-product unit, reproduced rather than approximated.** Every
+    reduction in the VFPU is one circuit, and a sum of products is not it. It
+    computes all four products to 24+2 bits with round-to-odd, aligns them to
+    the largest exponent by truncation, sums those *exactly* as integers, and
+    rounds once at the end -- against a plain `a0*b0 + a1*b1 + ...` which
+    rounds four times, in a different order. Infinities are resolved before any
+    of that: `inf * 0` and `inf - inf` are NaN, and anything else containing an
+    infinity is that infinity whatever the finite terms would have contributed.
+
+    `vdot`, `vhdp`, `vdet`, `vcrsp`/`vqmul`, `vfad` and `vavg` all go through
+    it now, which is how the hardware builds them -- each is the same unit with
+    a different second operand, synthesised from a forced prefix. All twenty of
+    vector's dot-family differences went with it, and the five tests that
+    already matched still do.
+
+17. **What is left in `vector`: 61 lines, in two groups, neither a gap in the
+    instruction set.**
+
+    - **36 lines of `vsqrt`, `vrsq` and `vasin`.** The hardware's transcendental
+      approximations are table-driven -- the same class as its sine, which is
+      the one line still differing in `prefixes`. Reproducing them means
+      carrying the tables, which is a different kind of change from
+      implementing an instruction.
+    - **25 lines of `checkCompare`, which are one bit.** The test does
+      `vcmp.t EQ` and then reads condition-code bits 0..3 with four `vcmov`s.
+      A triple compare writes bits 0..2 and the any/all pair; bit 3 is not
+      written, and hardware reads it back as 1. Nothing in the test writes it
+      first -- the only `vcmp` before that point is the one inside the same
+      function -- so it is the *initial* value of the VFPU condition-code
+      register on a fresh thread, in the same way the vector registers start as
+      NaN rather than zero.
+
+      Two explanations fit that single bit equally well: the CC starts with bit
+      3 set, or `vcmp` writes all four lane bits regardless of operand width
+      with the unused ones comparing equal. Nothing else in the suite
+      distinguishes them, and inventing a whole register's reset value from one
+      observation is the kind of guess this file exists to record instead of
+      make. The bits a comparison *does* affect are now written and the rest
+      preserved, which is right under either reading.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a
