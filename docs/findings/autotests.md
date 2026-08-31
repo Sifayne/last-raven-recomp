@@ -1218,3 +1218,41 @@ faithful execution of that test.
     needs a scheduler change: `vpl`, `mbx` and `lwmutex` predate `checkpoint()`
     and carry no `[x]`/`[r]` column at all, which is 28 of the 127 reachable on
     object-type work alone.
+
+    ### `sceKernelGetThreadmanIdList`, and the census it performs on us
+
+    148 differing lines to 2. It is one call, and it is the only test that
+    walks the *whole* object table, so it doubles as an audit of every type
+    added above: `threadmanidlist` asks for each of the fourteen id types plus
+    the four thread-state pseudo-types and prints what came back.
+
+    The valid set is exactly **1–14 and 0x40–0x43**, and everything else —
+    `-1`, 0, 15–24, 0x44–0x48, 0x80, 0x100, 0x200, 0x1000, 0x100001,
+    0x80000000 — answers `0x800201BB` and leaves the caller's count word
+    untouched. Untouched is the observable part: the test seeds it with
+    `-1337` and reports only whether it changed, so a call that fails and
+    still writes zero is a differing line even though the error code matched.
+    A **negative** size is a second failure of the same shape (`0x800200D3`);
+    zero is not, and neither is a NULL buffer, and neither is a NULL count.
+
+    Two things the signature does not say:
+
+    - **The count is how many exist, not how many fitted.** The return value is
+      the number written. They differ exactly when the buffer is short, and the
+      test checks the pair against each other and against a scan of the buffer.
+    - **Type 1 counts dormant threads too.** The state pseudo-types partition
+      only the live ones; 0x43 is dormant, and a thread that has never been
+      started and a thread that has finished are both dormant.
+
+    Sleeping (0x40) and delaying (0x41) are separate types, and the scheduler
+    has one `PSP_SCHED_SLEEPING` for both — the distinction only exists at the
+    call that made it, so `psp_thread` now records which one parked it.
+
+    Rather than export five files' private tables, each module registers a
+    lister and answers for the types it owns. The count is threaded through as
+    a running total that keeps counting past the buffer, which is the same
+    total-versus-written split the call itself reports.
+
+    The two lines left are one `[x]`/`[r]`: the rescheduler thread happens to
+    run during the 45-line type sweep. Two consecutive runs are byte-identical,
+    so it is a fixed offset in our interleaving rather than a race.

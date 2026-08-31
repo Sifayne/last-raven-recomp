@@ -1,0 +1,342 @@
+diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
+index 6ed6ddc..f271e0c 100644
+--- a/include/psprecomp/hle.h
++++ b/include/psprecomp/hle.h
+@@ -145,6 +145,8 @@ const char *psp_str(uint32_t addr, char *dst, size_t cap);
+ /* A thread priority outside 0x08..0x77. Zero is not in that range and is not
+  * an error either -- it means "the priority I am running at". */
+ #define SCE_KERNEL_ERROR_ILLEGAL_PRIORITY 0x80020193
++/* A sceKernelGetThreadmanIdList type outside 1..14 and 0x40..0x43. */
++#define SCE_KERNEL_ERROR_ILLEGAL_TYPE     0x800201BB
+ #define SCE_KERNEL_ERROR_SUSPEND         0x800201A3
+ #define SCE_KERNEL_ERROR_NOT_SUSPEND     0x800201A5
+ /* A poll that would have blocked. Distinct from an error: it is the ordinary
+@@ -366,6 +368,32 @@ uint32_t psp_threadman_current_priority(void);
+ /* Shared with the other kernel object types: one uid space, and one way of
+  * writing a name into a SceKernel*Info block. */
+ uint32_t psp_threadman_next_uid(void);
++
++/* ---- enumerating live kernel objects --------------------------------------
++ *
++ * sceKernelGetThreadmanIdList asks for every uid of one type, and the objects
++ * are spread over four files with their tables private to each. Rather than
++ * export the tables, each module registers a lister and answers for the types
++ * it owns: `count` is the running total across all of them and keeps counting
++ * past `max`, because the call reports how many *exist* while filling only as
++ * much of the buffer as it was given. */
++/* `out` is a *guest* address, or 0 for a caller that wants only the count. */
++typedef void (*psp_uid_lister)(int type, uint32_t out, int max, int *count);
++void psp_threadman_add_lister(psp_uid_lister fn);
++
++/* The types the kernel knows. 1..14 are object kinds; 0x40..0x43 select
++ * threads by what they are doing. Anything else is ILLEGAL_TYPE -- measured,
++ * threads/threadmanidlist sweeps 0, 15..24, 0x44..0x48 and a spread of large
++ * values and refuses every one. */
++enum {
++    PSP_TMID_THREAD = 1, PSP_TMID_SEMA = 2, PSP_TMID_EVENTFLAG = 3,
++    PSP_TMID_MBX = 4, PSP_TMID_VPL = 5, PSP_TMID_FPL = 6, PSP_TMID_MSGPIPE = 7,
++    PSP_TMID_CALLBACK = 8, PSP_TMID_THREVENT = 9, PSP_TMID_UNUSED10 = 10,
++    PSP_TMID_ALARM = 11, PSP_TMID_VTIMER = 12, PSP_TMID_MUTEX = 13,
++    PSP_TMID_TLSPL = 14,
++    PSP_TMID_SLEEPING = 0x40, PSP_TMID_DELAYING = 0x41,
++    PSP_TMID_SUSPENDED = 0x42, PSP_TMID_DORMANT = 0x43,
++};
+ void     psp_threadman_write_name(uint32_t dst, const char *name);
+ 
+ void psp_kernlock_register(void);
+diff --git a/src/hle/kernlock.c b/src/hle/kernlock.c
+index a068b2a..ca79b7d 100644
+--- a/src/hle/kernlock.c
++++ b/src/hle/kernlock.c
+@@ -256,7 +256,17 @@ static void hle_ReferMutexStatus(void) {
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
++static void mutex_list(int type, uint32_t out, int max, int *count) {
++    if (type != PSP_TMID_MUTEX) return;
++    for (int i = 0; i < MAX_MUTEXES; i++) {
++        if (!g_mutex[i].used) continue;
++        if (out && *count < max) psp_write32(out + (uint32_t)*count * 4, g_mutex[i].uid);
++        (*count)++;
++    }
++}
++
+ void psp_kernlock_register(void) {
++    psp_threadman_add_lister(mutex_list);
+     psp_hle_register(0xB7D098C6, "ThreadManForUser", "sceKernelCreateMutex",      hle_CreateMutex);
+     psp_hle_register(0xF8170FBE, "ThreadManForUser", "sceKernelDeleteMutex",      hle_DeleteMutex);
+     psp_hle_register(0xB011B11F, "ThreadManForUser", "sceKernelLockMutex",        hle_LockMutex);
+diff --git a/src/hle/kernobj.c b/src/hle/kernobj.c
+index 529f26a..7d75aa3 100644
+--- a/src/hle/kernobj.c
++++ b/src/hle/kernobj.c
+@@ -457,7 +457,17 @@ void psp_kernobj_reset(void) {
+     tls_reset();
+ }
+ 
++static void vpl_list(int type, uint32_t out, int max, int *count) {
++    if (type != PSP_TMID_VPL) return;
++    for (int i = 0; i < MAX_VPLS; i++) {
++        if (!g_vpl[i].used) continue;
++        if (out && *count < max) psp_write32(out + (uint32_t)*count * 4, g_vpl[i].uid);
++        (*count)++;
++    }
++}
++
+ void psp_kernobj_register(void) {
++    psp_threadman_add_lister(vpl_list);
+     psp_hle_register(0x56C039B5, "ThreadManForUser", "sceKernelCreateVpl",      hle_CreateVpl);
+     psp_hle_register(0x89B3D48C, "ThreadManForUser", "sceKernelDeleteVpl",      hle_DeleteVpl);
+     psp_hle_register(0xBED27435, "ThreadManForUser", "sceKernelAllocateVpl",    hle_AllocateVpl);
+@@ -743,7 +753,17 @@ static void hle_ReferMsgPipeStatus(void) {
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
++static void mpp_list(int type, uint32_t out, int max, int *count) {
++    if (type != PSP_TMID_MSGPIPE) return;
++    for (int i = 0; i < MAX_PIPES; i++) {
++        if (!g_pipe[i].alive) continue;
++        if (out && *count < max) psp_write32(out + (uint32_t)*count * 4, g_pipe[i].uid);
++        (*count)++;
++    }
++}
++
+ void psp_kernobj_register_mpp(void) {
++    psp_threadman_add_lister(mpp_list);
+     psp_hle_register(0x7C0DC2A0, "ThreadManForUser", "sceKernelCreateMsgPipe",     hle_CreateMsgPipe);
+     psp_hle_register(0xF0B7DA1C, "ThreadManForUser", "sceKernelDeleteMsgPipe",     hle_DeleteMsgPipe);
+     psp_hle_register(0x876DBFAD, "ThreadManForUser", "sceKernelSendMsgPipe",       hle_SendMsgPipe);
+@@ -974,7 +994,17 @@ static void hle_ReferMbxStatus(void) {
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
++static void mbx_list(int type, uint32_t out, int max, int *count) {
++    if (type != PSP_TMID_MBX) return;
++    for (int i = 0; i < MAX_MBXES; i++) {
++        if (!g_mbx[i].alive) continue;
++        if (out && *count < max) psp_write32(out + (uint32_t)*count * 4, g_mbx[i].uid);
++        (*count)++;
++    }
++}
++
+ void psp_kernobj_register_mbx(void) {
++    psp_threadman_add_lister(mbx_list);
+     psp_hle_register(0x8125221D, "ThreadManForUser", "sceKernelCreateMbx",        hle_CreateMbx);
+     psp_hle_register(0x86255ADA, "ThreadManForUser", "sceKernelDeleteMbx",        hle_DeleteMbx);
+     psp_hle_register(0xE9B3061E, "ThreadManForUser", "sceKernelSendMbx",          hle_SendMbx);
+@@ -1231,7 +1261,17 @@ static void hle_ReferFplStatus(void) {
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
++static void fpl_list(int type, uint32_t out, int max, int *count) {
++    if (type != PSP_TMID_FPL) return;
++    for (int i = 0; i < MAX_FPLS; i++) {
++        if (!g_fpl[i].alive) continue;
++        if (out && *count < max) psp_write32(out + (uint32_t)*count * 4, g_fpl[i].uid);
++        (*count)++;
++    }
++}
++
+ void psp_kernobj_register_fpl(void) {
++    psp_threadman_add_lister(fpl_list);
+     psp_hle_register(0xC07BB470, "ThreadManForUser", "sceKernelCreateFpl",      hle_CreateFpl);
+     psp_hle_register(0xED1410E0, "ThreadManForUser", "sceKernelDeleteFpl",      hle_DeleteFpl);
+     psp_hle_register(0xD979E9BF, "ThreadManForUser", "sceKernelAllocateFpl",    hle_AllocateFpl);
+@@ -1384,7 +1424,17 @@ static void hle_ReferTlsplStatus(void) {
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
++static void tls_list(int type, uint32_t out, int max, int *count) {
++    if (type != PSP_TMID_TLSPL) return;
++    for (int i = 0; i < MAX_TLSPLS; i++) {
++        if (!g_tls[i].alive) continue;
++        if (out && *count < max) psp_write32(out + (uint32_t)*count * 4, g_tls[i].uid);
++        (*count)++;
++    }
++}
++
+ void psp_kernobj_register_tls(void) {
++    psp_threadman_add_lister(tls_list);
+     psp_hle_register(0x8DAFF657, "ThreadManForUser", "sceKernelCreateTlspl",      hle_CreateTlspl);
+     psp_hle_register(0x32BF938E, "ThreadManForUser", "sceKernelDeleteTlspl",      hle_DeleteTlspl);
+     psp_hle_register(0xFA835CDE, "ThreadManForUser", "sceKernelGetTlsAddr",       hle_GetTlsAddr);
+diff --git a/src/hle/ktimer.c b/src/hle/ktimer.c
+index 2c16f46..d9f3589 100644
+--- a/src/hle/ktimer.c
++++ b/src/hle/ktimer.c
+@@ -170,7 +170,17 @@ void psp_ktimer_tick(void) {
+     vtimer_tick();
+ }
+ 
++static void alarm_list(int type, uint32_t out, int max, int *count) {
++    if (type != PSP_TMID_ALARM) return;
++    for (int i = 0; i < MAX_ALARMS; i++) {
++        if (!g_alarm[i].alive) continue;
++        if (out && *count < max) psp_write32(out + (uint32_t)*count * 4, g_alarm[i].uid);
++        (*count)++;
++    }
++}
++
+ void psp_ktimer_register(void) {
++    psp_threadman_add_lister(alarm_list);
+     psp_hle_register(0x6652B8CA, "ThreadManForUser", "sceKernelSetAlarm",         hle_SetAlarm);
+     psp_hle_register(0xB2C25152, "ThreadManForUser", "sceKernelSetSysClockAlarm", hle_SetSysClockAlarm);
+     psp_hle_register(0x7E65B999, "ThreadManForUser", "sceKernelCancelAlarm",      hle_CancelAlarm);
+@@ -408,7 +418,17 @@ static void vtimer_tick(void) {
+     }
+ }
+ 
++static void vtimer_list(int type, uint32_t out, int max, int *count) {
++    if (type != PSP_TMID_VTIMER) return;
++    for (int i = 0; i < MAX_VTIMERS; i++) {
++        if (!g_vtimer[i].alive) continue;
++        if (out && *count < max) psp_write32(out + (uint32_t)*count * 4, g_vtimer[i].uid);
++        (*count)++;
++    }
++}
++
+ void psp_ktimer_register_vtimer(void) {
++    psp_threadman_add_lister(vtimer_list);
+     psp_hle_register(0x20FFF560, "ThreadManForUser", "sceKernelCreateVTimer",        hle_CreateVTimer);
+     psp_hle_register(0x328F9E52, "ThreadManForUser", "sceKernelDeleteVTimer",        hle_DeleteVTimer);
+     psp_hle_register(0xC68D9437, "ThreadManForUser", "sceKernelStartVTimer",         hle_StartVTimer);
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index 482bcdf..98b1c6e 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -43,6 +43,7 @@
+ #define UID_BASE    0x00040000u
+ 
+ enum { TH_DORMANT = 0, TH_READY, TH_RUNNING, TH_SUSPENDED };
++enum { WAIT_NONE = 0, WAIT_SLEEP, WAIT_DELAY };
+ 
+ /* What sceKernelReferThreadStatus reports in its `status` field. These are the
+  * kernel's own values, not this file's TH_* -- a created thread reports 16. */
+@@ -73,6 +74,11 @@ typedef struct {
+     /* Whether it has ever been started. A thread that has not is *dormant*,
+      * and that is a different answer from one that has run and stopped. */
+     int      ever_started;
++    /* Which call parked it. The scheduler has one SLEEPING state for both a
++     * sceKernelSleepThread and a sceKernelDelayThread, and the id list reports
++     * them as different types -- so the distinction has to be kept here, where
++     * the difference was made. */
++    int      wait_kind;
+     /* Threads parked in sceKernelWaitThreadEnd on this one. */
+     uint32_t enders[MAX_SEMA_WAITERS];
+     int      nenders;
+@@ -378,7 +384,11 @@ static void hle_DeleteThread(void) {
+  * which is the useful half of the semantics. */
+ static void hle_DelayThread(void) {
+     if (!psp_sched_can_wait()) { psp_ret(SCE_KERNEL_ERROR_CAN_NOT_WAIT); return; }
++    psp_thread *me = current_thread();
++    if (me) me->wait_kind = WAIT_DELAY;
+     psp_sched_delay(psp_arg(0));
++    me = current_thread();
++    if (me) me->wait_kind = WAIT_NONE;
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
+@@ -570,13 +580,16 @@ static void hle_SleepThread(void) {
+     if (!t) { psp_ret(SCE_KERNEL_ERROR_OK); return; }
+     if (t->wakeup_count > 0) { t->wakeup_count--; psp_ret(SCE_KERNEL_ERROR_OK); return; }
+ 
++    t->wait_kind = WAIT_SLEEP;
+     if (psp_sched_block(t->uid, PSP_SCHED_SLEEPING, "sceKernelSleepThread") != 0) {
++        t->wait_kind = WAIT_NONE;
+         wait_deadlock("sceKernelSleepThread");
+         psp_ret(SCE_KERNEL_ERROR_OK);
+         return;
+     }
+     /* Woken by name, so the wakeup this consumed is spent. */
+     t = current_thread();
++    if (t) t->wait_kind = WAIT_NONE;
+     if (t && t->wakeup_count > 0) t->wakeup_count--;
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+@@ -1342,6 +1355,78 @@ static void hle_ReferThreadStatus(void) {
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
++/* ---- sceKernelGetThreadmanIdList ------------------------------------------ */
++
++#define MAX_LISTERS 8
++static psp_uid_lister g_lister[MAX_LISTERS];
++static int            g_listers;
++
++void psp_threadman_add_lister(psp_uid_lister fn) {
++    if (g_listers < MAX_LISTERS) g_lister[g_listers++] = fn;
++}
++
++/* Append one uid, counting it whether or not there was room for it. */
++static void list_add(uint32_t uid, uint32_t out, int max, int *count) {
++    if (out && *count < max) psp_write32(out + (uint32_t)*count * 4, uid);
++    (*count)++;
++}
++
++static int thread_matches(const psp_thread *t, int type) {
++    const int dormant = !t->ever_started || t->state == TH_DORMANT;
++    switch (type) {
++        case PSP_TMID_THREAD:    return 1;
++        case PSP_TMID_DORMANT:   return dormant;
++        case PSP_TMID_SUSPENDED: return !dormant && t->state == TH_SUSPENDED;
++        case PSP_TMID_SLEEPING:  return !dormant && t->wait_kind == WAIT_SLEEP;
++        case PSP_TMID_DELAYING:  return !dormant && t->wait_kind == WAIT_DELAY;
++        default:                 return 0;
++    }
++}
++
++static void threadman_list(int type, uint32_t out, int max, int *count) {
++    if (type == PSP_TMID_THREAD || (type >= PSP_TMID_SLEEPING && type <= PSP_TMID_DORMANT)) {
++        for (int i = 0; i < MAX_THREADS; i++)
++            if (g_thread[i].used && thread_matches(&g_thread[i], type))
++                list_add(g_thread[i].uid, out, max, count);
++        return;
++    }
++    if (type == PSP_TMID_SEMA)
++        for (int i = 0; i < MAX_SEMAS; i++)
++            if (g_sema[i].used) list_add(g_sema[i].uid, out, max, count);
++    if (type == PSP_TMID_EVENTFLAG)
++        for (int i = 0; i < MAX_FLAGS; i++)
++            if (g_flag[i].used) list_add(g_flag[i].uid, out, max, count);
++    if (type == PSP_TMID_CALLBACK)
++        for (int i = 0; i < MAX_CBS; i++)
++            if (g_cb[i].used) list_add(g_cb[i].uid, out, max, count);
++}
++
++/* (type, buffer, entries, countOut)
++ *
++ * The count it writes is how many objects *exist*, not how many fitted -- the
++ * two differ whenever the buffer is short, and the return value is the number
++ * actually written. threads/threadmanidlist checks all three against each
++ * other, and separately that a bad type or a negative size leaves the caller's
++ * count word alone entirely. */
++static void hle_GetThreadmanIdList(void) {
++    const int      type = (int)psp_arg(0);
++    const uint32_t buf  = psp_arg(1);
++    const int32_t  max  = (int32_t)psp_arg(2);
++    const uint32_t nout = psp_arg(3);
++
++    const int valid = (type >= PSP_TMID_THREAD && type <= PSP_TMID_TLSPL) ||
++                      (type >= PSP_TMID_SLEEPING && type <= PSP_TMID_DORMANT);
++    if (!valid) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_TYPE); return; }
++    if (max < 0) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_SIZE); return; }
++
++    int count = 0;
++    threadman_list(type, buf, max, &count);
++    for (int i = 0; i < g_listers; i++) g_lister[i](type, buf, max, &count);
++
++    if (nout) psp_write32(nout, (uint32_t)count);
++    psp_ret((uint32_t)(count < max ? count : max));
++}
++
+ static void hle_CreateCallback(void) {
+     if (!name_ok(psp_arg(0))) { psp_ret(SCE_KERNEL_ERROR_ERROR); return; }
+     psp_callback *c = NULL;
+@@ -1403,6 +1488,7 @@ void psp_threadman_register(void) {
+     psp_hle_register(0x3AD58B8C, "ThreadManForUser", "sceKernelSuspendDispatchThread",   hle_SuspendDispatchThread);
+     psp_hle_register(0x27E22EC2, "ThreadManForUser", "sceKernelResumeDispatchThread",    hle_ResumeDispatchThread);
+     psp_hle_register(0x17C1684E, "ThreadManForUser", "sceKernelReferThreadStatus",       hle_ReferThreadStatus);
++    psp_hle_register(0x94416130, "ThreadManForUser", "sceKernelGetThreadmanIdList",      hle_GetThreadmanIdList);
+ 
+     psp_hle_register(0xD6DA4BA1, "ThreadManForUser", "sceKernelCreateSema",              hle_CreateSema);
+     psp_hle_register(0x28B6489C, "ThreadManForUser", "sceKernelDeleteSema",              hle_DeleteSema);
