@@ -1256,3 +1256,23 @@ faithful execution of that test.
     The two lines left are one `[x]`/`[r]`: the rescheduler thread happens to
     run during the 45-line type sweep. Two consecutive runs are byte-identical,
     so it is a fixed offset in our interleaving rather than a race.
+
+    The audit found one absence, and it is the reason the id list is worth
+    having: `sceKernelTerminateDeleteThread` was not registered. The test
+    creates a thread in each of four states and cleans it up with that call
+    between sections, so the counts climbed 1, 2, 3, 4 across a file whose
+    every expected line reads 1. An unimplemented call returns zero, which
+    reads as success, so nothing said the cleanup had not happened — the id
+    list is what made a leak visible at all.
+
+    It is not terminate followed by delete. `threads/terminate` runs the same
+    ten cases through both and they part on the dormant ones:
+
+    ```
+    sceKernelTerminateThread        Created: 800201a2   Finished: 800201a2
+    sceKernelTerminateDeleteThread  Created: 00000000   Finished: 00000000
+    ```
+
+    There is nothing to stop but there is still something to free. The id
+    checks are terminate's, including the one that forbids a thread from
+    ending itself.
