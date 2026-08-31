@@ -444,6 +444,7 @@ it runs is the whole class of bug this project keeps writing down:
     already agreed to the last bit; only the edges did not.
 
 18. **What is left in `vector`: 33 lines, and neither group is an instruction.**
+    (25 of them closed by 19; the 8 below are all that remain.)
 
     - **8 lines of `vasin`, at two inputs out of 256.** For x = ±0.828125 the
       exact answer is 0.621184528, which correctly rounds to 0.621185 -- what
@@ -466,8 +467,7 @@ it runs is the whole class of bug this project keeps writing down:
       `vrcp`, `vexp2` and `vlog2` will stay a unit or so off the hardware on
       some inputs, and any test that prints their bits will show it. Nothing
       that consumes them as geometry will notice.
-    - **25 lines of `checkCompare`, which are one bit** -- see above. Still the
-      initial VFPU condition-code state, still two readings that fit it equally.
+    - **25 lines of `checkCompare`, which are one bit** -- resolved; see 19.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a
@@ -481,3 +481,36 @@ faithful execution of that test.
   (the differential oracle ran the same module both ways), but running them
   interpreted comes first: if a test cannot execute, recompiling it proves
   nothing about the environment.
+
+19. **The VFPU condition codes come up set, not clear.** The last group in
+    `vector` was 25 lines that all had the same shape: `checkCompare` runs one
+    `vcmp.t`, then reads condition bits 0..3 with four `vcmovt.s`. A triple
+    compare writes bits 0, 1, 2 and the any/all pair -- it does not touch bit
+    3 -- and hardware reads bit 3 back as 1 having never written it.
+
+    Two readings fitted that equally and the note above said so: either the
+    initial state is non-zero, or `vcmp` writes all four lane bits regardless
+    of size. They are distinguishable, and the tie was broken by the reset
+    value rather than by picking one. The condition codes power on at `0x3F`
+    -- all six bits set -- so bit 3 is simply never written by this test and
+    reads its initial 1. The other reading would have required `vcmp.t` to
+    write a lane that does not exist.
+
+    The prediction was falsifiable and was checked before the doc was written:
+    exactly the 25 `checkCompare` lines, and nothing else in the suite. That
+    is what happened -- `vector` went 33 -> 8 and the other seven tests did
+    not move. `checkCompare2`, which clears the codes with `mtvc` before
+    comparing, was unaffected, which it must be.
+
+    Set in `psp_cpu_reset_fp` because that is the hook every host path already
+    calls at thread start; `psp_vfpu_reset` reaches only the unit tests. The
+    control registers next door got their documented power-on values at the
+    same time -- revision `0x7772CEAB`, and the eight `RCX` words the
+    random-number generator seeds from. Nothing reads those yet. They are set
+    because the register beside them turned out to be observable and there is
+    no reason to assume these are not.
+
+    Worth noting what this was not: not an instruction, not arithmetic. Every
+    VFPU instruction involved was already correct. The bug was one register's
+    value at the moment before any of them ran, and no amount of looking at
+    `vcmp` or `vcmov` would have found it.

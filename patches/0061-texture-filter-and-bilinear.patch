@@ -1,0 +1,297 @@
+diff --git a/include/psprecomp/render.h b/include/psprecomp/render.h
+index e3e798f..d9b304a 100644
+--- a/include/psprecomp/render.h
++++ b/include/psprecomp/render.h
+@@ -134,6 +134,11 @@ uint64_t psp_render_flat_pixels(void);
+ uint64_t psp_render_zfail_pixels(void);
+ uint64_t psp_render_blended_pixels(void);
+ uint64_t psp_render_alphakill_pixels(void);
++/* Primitives whose minification and magnification filters select *differently*
++ * -- not merely differ, since the mipmap variants encode the same in-level
++ * choice. The backend uses the magnification one, having no scale factor to
++ * choose with; a non-zero count is the evidence that computing one is worth it. */
++uint64_t psp_render_filter_split(void);
+ void     psp_render_reset_pixels(void);
+ 
+ /* Return the depth buffer to its start-of-run contents. The game clears depth
+diff --git a/src/hle/ge.c b/src/hle/ge.c
+index 534e000..24d995c 100644
+--- a/src/hle/ge.c
++++ b/src/hle/ge.c
+@@ -314,10 +314,17 @@ void psp_ge_dump_stats(FILE *out) {
+             static const char *const FI[8] = {
+                 "nearest","linear","?","?",
+                 "near/mip-near","lin/mip-near","near/mip-lin","lin/mip-lin" };
+-            fprintf(out, "    sampling   filter min %s mag %s, wrap s %s t %s\n",
++            fprintf(out, "    sampling   filter min %s mag %s, wrap s %s t %s",
+                     FI[g_ge.tex_filter & 7], FI[(g_ge.tex_filter >> 8) & 7],
+                     (g_ge.tex_wrap & 1) ? "clamp" : "repeat",
+                     ((g_ge.tex_wrap >> 8) & 1) ? "clamp" : "repeat");
++            /* The backend samples with the magnification filter, having no
++             * scale factor to choose with. This is how many primitives that
++             * choice was actually visible on. */
++            if (psp_render_filter_split())
++                fprintf(out, "  (%llu prims where min/mag differ)",
++                        (unsigned long long)psp_render_filter_split());
++            fprintf(out, "\n");
+         }
+     }
+     if (g_ge.drawn_prims)
+diff --git a/src/render.c b/src/render.c
+index f6ac137..257b88b 100644
+--- a/src/render.c
++++ b/src/render.c
+@@ -30,8 +30,10 @@ uint64_t psp_render_flat_pixels(void) { return g_px_flat; }
+ uint64_t psp_render_zfail_pixels(void) { return g_px_zfail; }
+ 
+ uint64_t psp_render_pixels(void) { return g_pixels; }
++static uint64_t g_filter_split;
+ void     psp_render_reset_pixels(void) {
+     g_pixels = g_px_tex = g_px_flat = g_px_zfail = g_px_blend = g_px_atest = 0;
++    g_filter_split = 0;
+ }
+ 
+ /* ---- software backend ---------------------------------------------------- */
+@@ -53,12 +55,11 @@ static void sw_target(uint32_t addr, uint32_t stride, int fmt) {
+  * format arriving that is not handled shows up as flat colour rather than as
+  * plausible-looking wrong pixels.
+  *
+- * Nearest sampling, taken at pixel centres. The claim that used to stand here
+- * -- that a 1:1 blit "samples texel centres either way", so the filter state
+- * did not matter -- was exactly backwards: at 1:1 a corner sample lands on the
+- * texel *boundary*, which is the one place a few ULP of interpolation error
+- * changes the answer. See sw_tri. Honouring GE_TEXFILTER is still owed; this
+- * game asks for linear. */
++ * Sampled at pixel centres, nearest or bilinear as GE_TEXFILTER asks. The claim
++ * that used to stand here -- that a 1:1 blit "samples texel centres either
++ * way", so the filter state did not matter -- was exactly backwards: at 1:1 a
++ * corner sample lands on the texel *boundary*, which is the one place a few ULP
++ * of interpolation error changes the answer. See sw_tri. */
+ static psp_tex_state g_tex;
+ 
+ /* PSPRECOMP_TEXDUMP=<path> writes each distinct texture the game binds, decoded
+@@ -251,6 +252,79 @@ static void dump_texture(void) {
+     g_dumped_n++;
+ }
+ 
++/* ---- filtering -----------------------------------------------------------
++ *
++ * GE_TEXFILTER was parsed into the GE's state from the beginning and read by
++ * nothing: set_texture had no filter parameter, so the state could not reach a
++ * backend even in principle. This game asks for linear on both fields.
++ *
++ * Values are GU_NEAREST 0 and GU_LINEAR 1, then 4..7 for the mipmap variants
++ * (2 and 3 are not legal). Bit 0 selects linear *within* the level across all
++ * six, so the mip chain -- which nothing here builds -- does not have to exist
++ * for the in-level choice to be right. */
++
++uint64_t psp_render_filter_split(void) { return g_filter_split; }
++
++static int filter_is_linear(void) {
++    /* Magnification, unconditionally. Choosing properly needs the
++     * pixel-to-texel scale, which needs derivatives this rasterizer does not
++     * compute, and there would be no mip chain to select from if it did. Mag is
++     * the honest default -- it is the one that applies at the scale a UI layer
++     * draws at, and it is what a scale factor of 1 selects anyway.
++     *
++     * The counter asks whether that choice ever *matters*, which is not the
++     * same as whether the two fields differ. This game sets min 5 and mag 1 --
++     * different values that both mean linear within the level -- so comparing
++     * them raw would fire on every primitive and measure nothing. Comparing the
++     * bit that selects the filter is the question actually being asked, and a
++     * non-zero count is the evidence that a per-primitive scale factor is worth
++     * the division it would cost. */
++    if ((g_tex.min_filter & 1) != (g_tex.mag_filter & 1)) g_filter_split++;
++    return g_tex.mag_filter & 1;
++}
++
++/* Bilinear, with the half-texel that makes it agree with nearest at 1:1.
++ *
++ * Texel k covers [k, k+1), so its centre is at k + 0.5 and the four taps belong
++ * around u - 0.5. Dropping that offset is the usual way to get this wrong: it
++ * averages every texel with its neighbour during a 1:1 blit and softens a UI
++ * layer that the hardware leaves sharp. With it, a 1:1 blit lands on frac 0,
++ * puts all the weight on one tap, and comes out bit-identical to nearest.
++ *
++ * All four channels, alpha included. This game's logo is an alpha mask -- white
++ * throughout, the letterforms entirely in the alpha channel -- so filtering
++ * only RGB and taking alpha from a single tap would leave the edges exactly as
++ * hard as nearest and look like the filter had never been implemented. */
++static uint32_t sample_bilinear(float u, float v) {
++    const float fu = u - 0.5f, fv = v - 0.5f;
++    const int   u0 = ifloor(fu), v0 = ifloor(fv);
++    const float au = fu - (float)u0, av = fv - (float)v0;
++
++    const uint32_t t00 = sample_texel(u0,     v0);
++    const uint32_t t10 = sample_texel(u0 + 1, v0);
++    const uint32_t t01 = sample_texel(u0,     v0 + 1);
++    const uint32_t t11 = sample_texel(u0 + 1, v0 + 1);
++
++    const float w00 = (1.0f - au) * (1.0f - av), w10 = au * (1.0f - av);
++    const float w01 = (1.0f - au) * av,          w11 = au * av;
++
++    uint32_t out = 0;
++    for (int i = 0; i < 4; i++) {
++        const float s = w00 * (float)((t00 >> (i * 8)) & 0xFF)
++                      + w10 * (float)((t10 >> (i * 8)) & 0xFF)
++                      + w01 * (float)((t01 >> (i * 8)) & 0xFF)
++                      + w11 * (float)((t11 >> (i * 8)) & 0xFF);
++        const int q = (int)(s + 0.5f);
++        out |= (uint32_t)(q < 0 ? 0 : (q > 255 ? 255 : q)) << (i * 8);
++    }
++    return out;
++}
++
++/* The sampler the rasterizer calls: one texel, filtered as the game asked. */
++static uint32_t sample_filtered(float u, float v, int linear) {
++    return linear ? sample_bilinear(u, v) : sample_texel(ifloor(u), ifloor(v));
++}
++
+ /* Modulate: texel times vertex colour, per channel. */
+ static uint32_t modulate(uint32_t tex, uint32_t col) {
+     uint32_t out = 0;
+@@ -506,6 +580,7 @@ static void sw_tri(const psp_vertex *a, const psp_vertex *b, const psp_vertex *c
+      * one it skews the texture. */
+     const float inv = 1.0f / (float)((int64_t)SUBPX * area);
+     const int textured = texture_usable();
++    const int linear = textured && filter_is_linear();
+ 
+     for (int y = miny; y <= maxy; y++) {
+         int64_t w0 = row0, w1 = row1, w2 = row2;
+@@ -529,7 +604,7 @@ static void sw_tri(const psp_vertex *a, const psp_vertex *b, const psp_vertex *c
+                 if (textured) {
+                     const float u = l0 * a->u + l1 * b->u + l2 * c->u;
+                     const float v = l0 * a->v + l1 * b->v + l2 * c->v;
+-                    col = modulate(sample_texel(ifloor(u), ifloor(v)), col);
++                    col = modulate(sample_filtered(u, v, linear), col);
+                     g_px_tex++;
+                 } else g_px_flat++;
+                 shade_pixel(x, y, z, col);
+@@ -553,6 +628,7 @@ static void sw_sprite(const psp_vertex *a, const psp_vertex *b) {
+     if (x1 <= x0 || y1 <= y0) return;
+ 
+     const int textured = texture_usable();
++    const int linear = textured && filter_is_linear();
+     /* Against the vertices as submitted, not against the sorted corners. The
+      * ramp used to be built from x1 - x0, which is positive by construction, so
+      * a sprite whose second corner is left of or above its first mapped its
+@@ -571,7 +647,7 @@ static void sw_sprite(const psp_vertex *a, const psp_vertex *b) {
+             const float tu = a->u + du * ((float)x + 0.5f - (float)a->x);
+             g_px_tex++;
+             shade_pixel(x, y, a->z,
+-                        modulate(sample_texel(ifloor(tu), ifloor(tv)), b->rgba));
++                        modulate(sample_filtered(tu, tv, linear), b->rgba));
+         }
+     }
+ }
+diff --git a/tests/test_raster.c b/tests/test_raster.c
+index 1a23967..c0a7e58 100644
+--- a/tests/test_raster.c
++++ b/tests/test_raster.c
+@@ -439,6 +439,96 @@ static void test_texture_wrap(void) {
+     CHECK(pixel(52, 40) == ramp_texel(0, 10), "clamp at (12,10): 0x%08X", pixel(52, 40));
+ }
+ 
++/* A 2x1 texture magnified 2x across a 4-pixel span, which puts the four pixel
++ * centres at u = 0.25, 0.75, 1.25, 1.75. Taps are taken around u - 0.5, so the
++ * weights run 0.75/0.25 clamped at the left, then 0.25/0.75, then 0.75/0.25,
++ * then clamped at the right -- four distinct values that pin the tap offset,
++ * the weights and the edge behaviour in one row.
++ *
++ * `lo` and `hi` are the two texels; the caller says which channel to read back,
++ * because the case that matters for this game is alpha rather than colour. */
++static void bilinear_row(uint32_t lo, uint32_t hi, int filter, int wrap_clamp,
++                         uint32_t out[4]) {
++    psp_ge_reset();
++    clear_fb();
++    psp_write32(TEX,     lo);
++    psp_write32(TEX + 4, hi);
++
++    begin_list_vtype(VTYPE_2D_TEX);
++    texture_state(TEX, 2, 1 /* w=2 */, 0 /* h=1 */, 3, 0, filter);
++    cmd(0xC7, wrap_clamp ? (1u | (1u << 8)) : 0u);
++    vertex_uv(0, 40, 30, 0, 0, 0xFFFFFFFFu);
++    vertex_uv(1, 44, 30, 2, 0, 0xFFFFFFFFu);
++    vertex_uv(2, 40, 34, 0, 1, 0xFFFFFFFFu);
++    vertex_uv(3, 44, 34, 2, 1, 0xFFFFFFFFu);
++    cmd(0x04, (4u << 16) | 4);
++    end_list();
++
++    for (int k = 0; k < 4; k++) out[k] = pixel(40 + k, 30);
++}
++
++static void test_texture_bilinear_midpoint(void) {
++    uint32_t row[4];
++
++    /* Colour first: black to red. Clamped at both ends, ramping between. */
++    bilinear_row(0xFF000000u, 0xFF0000FFu, 1, 1, row);
++    static const uint32_t want_r[4] = { 0, 64, 191, 255 };
++    for (int k = 0; k < 4; k++)
++        CHECK((row[k] & 0xFF) == want_r[k],
++              "bilinear red at %d: got %u want %u", k, row[k] & 0xFF, want_r[k]);
++
++    /* Then the shape this game's letterforms actually have: white throughout,
++     * the mask entirely in alpha. Filtering RGB and taking alpha from one tap
++     * passes the check above and fails this one, while leaving every glyph edge
++     * exactly as hard as nearest. */
++    bilinear_row(0x00FFFFFFu, 0xFFFFFFFFu, 1, 1, row);
++    for (int k = 0; k < 4; k++)
++        CHECK(((row[k] >> 24) & 0xFF) == want_r[k],
++              "bilinear alpha at %d: got %u want %u",
++              k, (row[k] >> 24) & 0xFF, want_r[k]);
++}
++
++/* The filter state must be obeyed in both directions. Bilinear applied
++ * unconditionally would pass the test above and blur every UI layer the game
++ * asked to be sharp. */
++static void test_texture_filter_is_honoured(void) {
++    uint32_t row[4];
++    bilinear_row(0xFF000000u, 0xFF0000FFu, 0 /* nearest */, 1, row);
++    static const uint32_t want_r[4] = { 0, 0, 255, 255 };
++    for (int k = 0; k < 4; k++)
++        CHECK((row[k] & 0xFF) == want_r[k],
++              "nearest red at %d: got %u want %u", k, row[k] & 0xFF, want_r[k]);
++}
++
++/* At exactly 1:1 the fractional part is zero, all the weight lands on one tap,
++ * and linear must come out bit-identical to nearest. This is the property that
++ * keeps a UI layer sharp, and it is exact rather than approximate. */
++static void test_bilinear_equals_nearest_at_1to1(void) {
++    psp_ge_reset();
++    clear_fb();
++    upload_ramp_texture(16, 16);
++
++    begin_list_vtype(VTYPE_2D_TEX);
++    texture_state(TEX, 16, 4, 4, 3, 0, 1 /* linear */);
++    vertex_uv(0, 40, 30,  0,  0, 0xFFFFFFFFu);
++    vertex_uv(1, 53, 30, 13,  0, 0xFFFFFFFFu);
++    vertex_uv(2, 40, 41,  0, 11, 0xFFFFFFFFu);
++    vertex_uv(3, 53, 41, 13, 11, 0xFFFFFFFFu);
++    cmd(0x04, (4u << 16) | 4);
++    end_list();
++
++    int bad = 0;
++    for (int j = 0; j < 11 && bad < 4; j++)
++        for (int k = 0; k < 13 && bad < 4; k++) {
++            const uint32_t got = pixel(40 + k, 30 + j);
++            if (got != ramp_texel(k, j)) {
++                bad++;
++                CHECK(0, "linear at 1:1 must equal nearest at (%d,%d):"
++                         " got 0x%08X want 0x%08X", k, j, got, ramp_texel(k, j));
++            }
++        }
++}
++
+ /* Depth commands, and a vertex carrying a z. The 16-bit position slot has one
+  * and the plain `vertex` helper leaves it at zero, which is invisible until a
+  * test actually turns the depth test on. */
+@@ -628,6 +718,9 @@ int main(void) {
+     test_texture_minified_samples_centre();
+     test_sprite_texture_samples_centre();
+     test_texture_wrap();
++    test_texture_bilinear_midpoint();
++    test_texture_filter_is_honoured();
++    test_bilinear_equals_nearest_at_1to1();
+     test_clear_mode_clears_depth();
+     test_depth_test_still_rejects();
+     test_ge_reset_clears_depth();
