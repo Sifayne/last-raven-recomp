@@ -626,12 +626,7 @@ faithful execution of that test.
     cpu/fpu/fcr    36 -> 12
     ```
 
-    **What is left in both is one thing, and it is the interesting half.**
-    FCR31 currently *stores* state without *affecting* anything. Hardware gives
-    four different `mul.s` results for the four rounding modes, and flushes
-    denormal results to zero when FS is set. Neither is modelled. That is a
-    real piece of work — it means the arithmetic path has to consult the
-    control register — and it is what the remaining lines of both tests are.
+    **Both now match hardware exactly** — see 24, which closed the rest.
 
 22. **One missing firmware call was worth nineteen tests.**
     `sceDisplayGetFrameBuf` was not implemented, and an unregistered firmware
@@ -663,3 +658,64 @@ faithful execution of that test.
     Recorded so the next reader does not spend the afternoon on them. The
     ranking that surfaced them is still the right ranking; it just needs the
     top of the list read with judgement.
+
+24. **FCR31 made to *do* something, and `cpu/fpu` finished.** The register was
+    storing state that changed nothing. Three things read it now, and both
+    tests go to zero differing lines: `fpu` 342 -> **0**, `fcr` 36 -> **0**.
+
+    **The rounding mode reaches the arithmetic.** One `mul.s` gives four
+    different answers under the four modes, and only round-to-nearest was
+    implemented — as the host's default, silently.
+
+    Not via `fesetround()`. Honouring it requires `#pragma STDC FENV_ACCESS
+    ON`, which GCC does not implement, so an optimiser is free to hoist
+    arithmetic across the mode change and the generated C is built at -O2. A
+    wrong answer from a compiler reordering is worse than slightly slower
+    arithmetic. Instead the operation is computed in double and rounded once,
+    in the requested direction, by stepping one ULP when the nearest result
+    landed on the wrong side.
+
+    That is exact, and not by luck: binary64 is wide enough to hold a binary32
+    add, subtract or multiply with nothing lost, and for division it carries 53
+    bits against the 2p+2 = 50 needed to decide a binary32 quotient. So none of
+    the four suffers a double-rounding error. Overflow then needs no special
+    case either — an exact value past FLT_MAX rounds to +inf under RN, and one
+    ULP down from +inf is FLT_MAX, which is what RZ and RM are meant to give.
+
+    **Flush-to-zero (FS, bit 24)** turns a denormal result into zero with the
+    sign kept.
+
+    **The exception flags.** FCR31 carries the same five bits twice — Cause at
+    12..16, rewritten every operation, and Flags at 2..6, sticky until software
+    clears them — which is why the update is one shift each. The encoding was
+    measured rather than assumed; `fcr`'s four situations pin it exactly:
+
+    | situation | fcr31 | reads as |
+    |---|---|---|
+    | `sqrt(-1)`, `0/0`, `NaN*NaN` | `0x00010040` | V |
+    | `FLT_MAX * FLT_MAX` | `0x00005014` | O and I |
+    | `1.0 / FLT_MAX` | `0x0000300C` | U and I |
+    | `1.0 / 3.0` | `0x00001004` | I |
+
+    Two of the rules are worth stating because the obvious version is wrong.
+    An infinite result is only *overflow* if the operands were finite, and the
+    double distinguishes them — it holds `FLT_MAX * FLT_MAX` without
+    overflowing. And a denormal result is only *underflow* if it is also
+    inexact; one that is exactly representable has lost nothing.
+
+    `sqrt.s` got its own path, since `psp_fsqrt` is shared with the rasteriser
+    and answers 0 for a negative — right there, wrong here. Its exactness is
+    decidable without an exact square root: the correctly rounded `r` makes
+    `r*r` a 24x24-bit product, exact in a double, so if that reproduces the
+    operand nothing was lost.
+
+    **It costs nothing measurable**, which was not obvious in advance — every
+    FP operation now goes through a double and a store to a global. Checked
+    rather than assumed: the game is bit-identical (633 GE lists, 106,108
+    commands, 93,354,668 pixels) and the decoder path is 11,240 lists against
+    11,222 before, which is noise. The rasteriser uses host floats directly and
+    never touches this path, and the game's own maths is mostly VFPU.
+
+    Left undone, deliberately: the rounding mode does not reach `psp_fsqrt`'s
+    iteration, and the conversion ops do not raise flags. No test covers
+    either, and inventing untested behaviour is worse than a stated gap.
