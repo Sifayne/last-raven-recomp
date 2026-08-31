@@ -232,12 +232,18 @@ it runs is the whole class of bug this project keeps writing down:
    different builds.** Both differences were chased to the committed test data,
    and our execution of the `.prx` is exactly right.
 
-   - The four lines containing `inf` come from `funNumbers[10]`, which is
-     `1e+07` in `vregs.prx` and `100.0f` in `vregs.cpp`. The test converts its
-     fill values to half-precision at run time, and `float_to_half_fast3` quite
-     correctly clamps 1e7 to half-infinity -- we execute that conversion right,
-     instruction for instruction. Patch that one word in a copy of the binary
-     and all 30 lines we emit match hardware byte for byte.
+   - The eight lines containing `inf` -- four of `Upgrade`, four of `Combine`
+     -- come from one fill value that is `1e+07` in `vregs.prx` and `100.0f` in
+     `vregs.cpp`. The test converts its fill values to half-precision at run
+     time, and `float_to_half_fast3` quite correctly clamps 1e7 to
+     half-infinity, which comes back as `inf` and poisons everything computed
+     from it. We execute that conversion right, instruction for instruction.
+
+     It is *index 8 of two* 16-float arrays, at file offsets 0x19F20 and
+     0x19F60 -- the second array being the variant seeded with infinities and
+     NaNs. Set both to 100.0f in a copy of the binary and re-run: all 30 lines
+     we emit match hardware byte for byte, zero differing. That is the whole of
+     our side of this test.
    - The 18 missing lines are three sections that the binary does not contain.
      `main` at 0x17D0 makes exactly five calls -- FillAllVectorRegs, TestDouble,
      TestDoubleSwizzle, TestUpgrade, TestCombine -- and returns. `TestVscl`,
@@ -249,6 +255,12 @@ it runs is the whole class of bug this project keeps writing down:
    data, not about this project. Left in the table as measured rather than
    suppressed -- a hand-maintained exclusion list would hide a real regression
    the first time one landed -- but it should not be read as work outstanding.
+
+   Both halves were re-measured after the condition-code work, on the chance
+   that something since had changed what was left. Neither moved: `main` still
+   makes exactly five `jal`s, and the patched binary still matches on all 30
+   lines. Re-running a closed finding is cheap; assuming it is still true is
+   how a stale conclusion survives.
 
    Worth keeping as method: the same two moves settled this and the gum bugs.
    Replay the sequence in isolation and see whether it agrees with hardware,
