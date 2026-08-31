@@ -794,8 +794,8 @@ faithful execution of that test.
     mattered would have been worse than not writing it.
 
 
-26. **`threads`: waits block, and the suite opens.** 0 of 127 to **30**, and
-    8,057 differing lines to **3,319** — and **no test in the suite is silent
+26. **`threads`: waits block, and the suite opens.** 0 of 127 to **33**, and
+    8,057 differing lines to **3,034** — and **no test in the suite is silent
     any more**. Across all 432 the oracle went 35 to **66** matching and 80,466
     to 74,228 differing lines. What follows is the part that is reusable — the
     numbers are in the commits.
@@ -943,7 +943,7 @@ faithful execution of that test.
     | `mbx` | 671 | **127** | 2 of 9 match |
     | `tls` | 453 | **186** | 1 of 6 match |
     | `msgpipe` | 1001 | **193** | 2 of 10 match |
-    | `vpl` | 1138 | 555 | 2 of 11 match; see below |
+    | `vpl` | 1138 | **269** | 5 of 11 match; see below |
     | `scheduling` | 734 | 461 | dispatch suspend/resume |
     | `events` | 300 | 214 | |
     | `threads` | 1178 | 1093 | |
@@ -952,12 +952,35 @@ faithful execution of that test.
     accuracy rather than absence, and it is concentrated: `threads`, `vpl`,
     `scheduling` and `events` are two thirds of the remainder.
 
-    **`vpl/order` is 278 of vpl's remaining 555 and is a different kind of
-    work.** It walks the pool's free list *in guest memory* — `VPL bottom
-    block: at 00000018, next->000000f8, 000000e0` — so the kernel's node layout
-    and placement are observable, not just the totals. The allocator here keeps
-    its bookkeeping host-side and writes nothing into the pool. That is the one
-    remaining piece with a known shape.
+    ### `vpl/order` is done, and it said what the 32 bytes were
+
+    That test does not check totals. It casts a pointer into the pool and walks
+    the kernel's own structures, printing every node's address, `next` and size
+    at each step — so the layout, the placement and the order of operations are
+    all observable. Its own header declares them, and the 32-byte
+    `VplAccounting` at the base of the allocation **is** the 32 bytes of pool
+    overhead the create test reports. The two were measured a week apart and
+    are the same fact.
+
+    Everything else fell out of reading the expected output as a *sequence*
+    rather than as lines. Allocation carves from the **top** of the first free
+    block that fits; an allocated block's `next` is the pool's `start`, which
+    is what a free uses to tell the two apart; a free coalesces both ways and
+    leaves the head at the node preceding the returned block; and the pool is
+    allocated from the **high** end, which is the only way the test's
+    `addr3 + 0x18` reaches the middle of three pools.
+
+    The bug that survived the first pass is the reusable part: the free list is
+    ascending **and circular**, so the predecessor of a block below every free
+    node is the *terminator*, where the list wraps. Searching only for a node
+    below the freed address — what a non-circular list wants — put every such
+    block in the wrong place and left 57 lines that read as a coalescing fault.
+
+    278 differing lines to zero. **And the barge rule was re-measured rather
+    than carried over**: it had been established against the old host-side
+    allocator, so it was A/B'd again against this one — 269 differing lines
+    with it, 331 without. It still wins, and `vpl/priority`'s remaining 230 is
+    a wait-and-wake ordering difference rather than that rule.
 
     ### Eight object types, seven attribute masks
 
