@@ -795,7 +795,7 @@ faithful execution of that test.
 
 
 26. **`threads`: waits block, and the suite opens.** 0 of 127 to **33**, and
-    8,057 differing lines to **3,034** — and **no test in the suite is silent
+    8,057 differing lines to **2,965** — and **no test in the suite is silent
     any more**. Across all 432 the oracle went 35 to **66** matching and 80,466
     to 74,228 differing lines. What follows is the part that is reusable — the
     numbers are in the commits.
@@ -944,13 +944,48 @@ faithful execution of that test.
     | `tls` | 453 | **186** | 1 of 6 match |
     | `msgpipe` | 1001 | **193** | 2 of 10 match |
     | `vpl` | 1138 | **269** | 5 of 11 match; see below |
-    | `scheduling` | 734 | 461 | dispatch suspend/resume |
+    | `scheduling` | 734 | 436 | dispatch suspend/resume |
     | `events` | 300 | 214 | |
-    | `threads` | 1178 | 1093 | |
+    | `threads` | 1178 | 1046 | 4 of 16 match |
 
     **Every object type the suite exercises now exists.** What is left is
     accuracy rather than absence, and it is concentrated: `threads`, `vpl`,
     `scheduling` and `events` are two thirds of the remainder.
+
+    ### Dispatch suspended is a stronger rule than it looks
+
+    threads/scheduling/dispatch is an entire test of one thing, and the rule is
+    not "a call that would block fails". It is that **every potentially
+    blocking call is refused outright** while dispatch is suspended: a
+    semaphore that has just been signalled is refused, and so is a wait whose
+    count is illegal, which would otherwise report ILLEGAL_COUNT. The check
+    therefore sits above argument validation, in all eleven blocking entry
+    points.
+
+    Suspend and resume do **not** nest — suspending an already-suspended
+    dispatcher is an error, and so is resuming with anything that is not a
+    state a suspend returned. The test's own `dispatchCheckpoint` reads the
+    current state by suspending and immediately resuming, which only works
+    because both halves fail cleanly when it is already off.
+
+    ### `sceKernelReferThreadStatus` was wrong in five fields at once
+
+    Worth listing because four of the five would each have looked like a
+    plausible implementation:
+
+    - **`attr` is not what the caller passed.** Hardware ORs in `0x800000FF`.
+    - **`status` is the kernel's enumeration**, not the thread manager's own; a
+      created thread reports 16.
+    - **`exitStatus` is never zero.** DORMANT for a thread never started,
+      NOT_DORMANT for one still running — it has not exited, so there is
+      nothing to report — and its real status only once it has finished.
+    - **`currentPriority` is the initial one until the scheduler has a slot.**
+      Reporting the "no slot" sort-last sentinel put `0x7FFFFFFF` there, and a
+      sentinel is not a priority.
+    - It writes **as many bytes as the caller says it has room for**, which is
+      the third object to want that rule after the alarm and the mutex.
+
+    threads/create 258 → **0**.
 
     ### `vpl/order` is done, and it said what the 32 bytes were
 
