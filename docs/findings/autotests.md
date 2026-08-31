@@ -452,10 +452,20 @@ it runs is the whole class of bug this project keeps writing down:
       out, and we are right by accident of being exact. Every formulation of
       the real maths gives our answer; reproducing hardware's means carrying
       its tables, which for asin alone are about 1.3 million entries. They are
-      an exhaustive characterisation of the silicon, not something derivable,
-      and vendoring several megabytes of another project's generated data is a
-      decision worth making deliberately rather than as the tail of a bug hunt.
-      The same applies to the sine behind the one remaining line of `prefixes`.
+      an exhaustive characterisation of the silicon, not something derivable.
+
+      **Decided, not open: the tables are not coming in.** They are PPSSPP's
+      generated output and PPSSPP is GPL-2.0-or-later, so carrying them puts a
+      licence question over this tree -- for nine lines total, on inputs where
+      our answer is the *more* correct one. The same goes for the sine behind
+      the last line of `prefixes`. If it ever needs revisiting, the way in is
+      to characterise the hardware independently, not to copy the result of
+      someone else having done it.
+
+      What that costs is worth stating plainly: `vsin`, `vcos`, `vasin`,
+      `vrcp`, `vexp2` and `vlog2` will stay a unit or so off the hardware on
+      some inputs, and any test that prints their bits will show it. Nothing
+      that consumes them as geometry will notice.
     - **25 lines of `checkCompare`, which are one bit** -- see above. Still the
       initial VFPU condition-code state, still two readings that fit it equally.
 
