@@ -952,6 +952,46 @@ faithful execution of that test.
     accuracy rather than absence, and it is concentrated: `threads`, `vpl`,
     `scheduling` and `events` are two thirds of the remainder.
 
+    ### The suite was not reproducible, and most of these numbers were samples
+
+    **Read this before trusting a threads number from earlier in this item.**
+    Three identical runs of `threads/refer` gave 59, 56 and 64 differing lines,
+    with outputs of 67, 72 and 26 lines. Every threads total quoted above was
+    one sample of a varying quantity, and the ones that read as exact — a test
+    "matching hardware" on a single run — were the luckiest sample of several.
+    Two full sweeps now agree byte for byte.
+
+    The cause is worth the space because nothing in the design permits it. The
+    token serialises execution, selection is priority-then-round-robin, and the
+    clock is virtual; the *game* run is bit-identical across runs and always
+    was. What broke it was `sceKernelTerminateThread` calling only
+    `psp_sched_cancel_spawn` — which reaches a hook installed **only for the
+    model without real threads**, so under the scheduler the call did nothing
+    at all. pspautotests' `checkpoint` terminates and restarts one thread on
+    every line, so each restart spawned another host thread for the same uid, a
+    few hundred checkpoints ran the 130-slot table out, and *which* spawns
+    failed depended on how many earlier host threads had happened to exit.
+
+    **Reusing a dead slot is the obvious companion fix and is unsafe.** The dead
+    thread's pthread may still be parked in `await_turn_locked`, which refuses
+    to proceed only while the slot reads DEAD; hand that slot to a new thread
+    and the old one's wait *succeeds*, so two host threads run guest code at
+    once against the single global `psp_cpu`. `threads/create` went to
+    **131,929,071 bad memory accesses** the moment reuse was allowed. Making it
+    safe needs the slot to carry its pthread to a join, and **that is the
+    largest single thing left in the suite** — the leak it would fix is what
+    silences `threads/terminate` today.
+
+    Two process notes from the same afternoon, both of which produced a number
+    that was believed before it was checked:
+
+    - **A scripted text replacement silently did nothing.** An earlier commit
+      had renamed the function it was searching for, so the edit was a no-op
+      that reported success, and the measurement that followed described code
+      that did not exist. Grep for the *new* text after any scripted edit.
+    - **A single run of a nondeterministic test was reported as exact.** The
+      fix is the same as everywhere else in this file: measure twice.
+
     ### Dispatch suspended is a stronger rule than it looks
 
     threads/scheduling/dispatch is an entire test of one thing, and the rule is
