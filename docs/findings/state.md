@@ -928,7 +928,30 @@ next step and the most behind it.
    `sceKernelWaitThreadEnd` and three fresh movie threads are alive, so the
    game is in its next-attract/loop state, unverified past that.
 
-   ### The pad cannot skip the intro, because nothing reads the pad
+   ### ~~The pad cannot skip the intro, because nothing reads the pad~~ — WRONG
+
+   > **Retracted.** The game reads the pad constantly, the intro *is*
+   > skippable, and pressing circle skips it. This entry was written from the
+   > top-12 call histogram, which is the trap two sections above this one —
+   > "absence from a top-N list is not absence".
+   >
+   > The game polls with **`sceCtrlPeekBufferPositive`**, not
+   > `ReadBufferPositive`. Both NIDs have always routed to the same handler
+   > (`src/hle/misc.c`), so the input path was working the whole time; Peek
+   > simply landed 12th-and-a-bit and never made the printed list.
+   >
+   > The summary now prints a `polls:` line unconditionally, so this cannot
+   > recur: **209 polls** in the default configuration, **2494** in a
+   > 40-second decoder run. Never zero.
+   >
+   > What actually failed was the *timing*: `PSPRECOMP_PAD_PRESS` slept out a
+   > wall-clock delay on a detached pthread, so where the press landed in the
+   > guest's instruction stream depended on host speed. It is now evaluated at
+   > the read point against guest time (patch `0076`), and a full input
+   > sequence can be scripted and replayed (patch `0077`,
+   > `scenarios/README.md`).
+   >
+   > The original text is kept below because the reasoning is instructive.
 
    `PSPRECOMP_PAD_PRESS` (patch `0052`) presses a button at a wall-clock
    moment — the held variant cannot, because a game reads *pressed* as a
