@@ -31,6 +31,29 @@ FUNCLIST="$REPORTS/05-funclist.txt"
 
 [ -f "$GEN_OBJ/aclr_funcs.o" ] || die "no recompiled objects — run scripts/04-emit-build.sh first"
 
+# Existence is not freshness, and the difference cost a wrong conclusion.
+#
+# The oracle compares this checkout's *interpreter*, rebuilt on every run,
+# against generated C that was emitted whenever 04-emit-build.sh last ran. Edit
+# the emitter and re-run only this script and the two sides are no longer the
+# same program: the interpreter has the change and the recompiled side does
+# not. It reports that as `differ`, which reads exactly like a codegen bug and
+# is not one -- a COP1 conversion fix produced precisely this, one function
+# diverging in $v0/hi/lo, and it took a detour through the harness to find
+# that the artifact was 54 minutes older than the emitter.
+#
+# So: refuse, rather than warn. A warning in a 300-line log is a warning that
+# gets read after the wrong conclusion has already been drawn.
+for src in "$ROOT/tools/psprecomp/tools/allegrexrecomp/emit.c" \
+           "$ROOT/tools/psprecomp/tools/allegrexrecomp/decode.c" \
+           "$AR"; do
+    [ -e "$src" ] || continue
+    [ "$src" -nt "$GEN_OBJ/aclr_funcs.o" ] && die \
+        "$(basename "$src") is newer than the recompiled objects — the emitted C
+     predates it, so a 'differ' here would be a stale artifact rather than a
+     codegen bug. Run scripts/04-emit-build.sh first."
+done
+
 info "building oracle_diff"
 cc -c -O1 -I "$ROOT/tools/psprecomp/include" \
          -I "$ROOT/tools/psprecomp/tools/allegrexrecomp" \
