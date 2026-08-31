@@ -1399,3 +1399,56 @@ faithful execution of that test.
     `sceKernelChangeThreadPriority(sceKernelGetThreadId(), 0x20)` on a thread
     already at 0x20 -- and hardware tags the first `[x]` and the second `[r]`.
     No rule about that call can produce two different answers to it.
+
+    ### `threads/start` matches hardware, and the held-back rule is released
+
+    53 differing lines to 0. Four things, and the third is the one this file
+    has been carrying an apology for.
+
+    **The kernel writes four words of its own into every thread stack** -- the
+    k0 area at the top plus one at the bottom -- and the test checks them by
+    hand after reading the stack address back out of
+    `sceKernelReferThreadStatus`:
+
+    ```
+    stack[0]         == thread id
+    stackEnd[-16]    == thread id
+    stackEnd[-14]    == stack base
+    stackEnd[-2..-1] == 0xFFFFFFFF
+    ```
+
+    The last pair look like the 0xFF fill and are not, which is how the test
+    separates them: it creates a thread with `PSP_THREAD_ATTR_NO_FILLSTACK` and
+    finds them still there. The top **0x100 bytes** are reserved for that area.
+
+    **Three stack attributes are acted on, not merely recorded** -- `0x100000`
+    no-fill, `0x200000` clear-on-delete, `0x400000` low-stack -- and each is
+    measured by scribbling a known pattern over the memory first and reporting
+    what survived. An attribute that was stored and ignored shows up as a
+    *missing* line rather than a wrong one, which is the kind of absence this
+    file keeps finding.
+
+    **The argument block copy is no longer held back.** It was declined with a
+    measurement -- 633 GE lists to 3 -- and the note guessed at the reason:
+    "that points at something else being wrong upstream rather than at the
+    rule." The guess was right. The game starts three workers in a row from one
+    shared argument slot, rewriting the word between each; with the original
+    pointer all three read the last value, with copies each reads its own. The
+    upstream fault was the missing preemption ordering: those workers are
+    started *above* their starter's priority, so each now runs at its start,
+    before the slot is rewritten. Each reads its own value either way, and the
+    game survives the correct behaviour because the scheduler became right.
+
+    Where the copy lands is measured rather than chosen: `top - 0x100 -
+    roundup(len, 16)`, and the 0x100 is the k0 area above, so the two
+    measurements confirm each other.
+
+    **A thread stack is the size that was asked for.** We raised anything under
+    0x1000 to 0x1000, which is observable twice: `ReferThreadStatus` reports the
+    size back verbatim, and the argument-block offsets are measured from the
+    stack *base*, so a stack 0x800 too big moves every one of them by 0x800.
+
+    Suite: 2,321 differing lines to 2,252, 36 matching.
+    `semaphores/semaphores` -- which measures the copy alongside the two
+    argument rules already implemented -- goes to 0 with it, and
+    `scheduling/scheduling` 46 to 36.
