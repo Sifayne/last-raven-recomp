@@ -1,0 +1,65 @@
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index 8719530..d50719f 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -410,11 +410,29 @@ static void hle_StartThread(void) {
+     }
+ 
+     uint32_t arglen = psp_arg(1);
+-    const uint32_t argp = start_arg_block(&arglen, psp_arg(2));
++    uint32_t argp   = start_arg_block(&arglen, psp_arg(2));
+ 
+-    /* Stack pointer starts at the top of the allocation, 16-byte aligned, with
+-     * a little headroom so a callee storing below $sp cannot run off the end. */
+-    const uint32_t sp = (t->stack_base + t->stack_size - 64) & ~15u;
++    /* The block is *copied* onto the thread's own stack, and the thread is
++     * handed the copy. threads/start measures where it lands, for a 0x800
++     * stack:
++     *
++     *     1..8 bytes  -> stack+0x6f0      80 bytes -> stack+0x6b0
++     *     90 bytes    -> stack+0x6a0      0x600    -> stack+0x100
++     *
++     * which is `top - 0x100 - roundup(len, 16)` in every case. The 0x100 is the
++     * k0 area reserved above, so the two measurements agree with each other.
++     *
++     * $sp then starts below the copy rather than at a fixed offset from the top
++     * -- the argument block is on the stack, so it has to be out of reach of
++     * the frames. */
++    const uint32_t stack_top = t->stack_base + t->stack_size - 0x100u;
++    uint32_t sp = stack_top;
++    if (arglen) {
++        sp = stack_top - ((arglen + 15u) & ~15u);
++        void *dst = psp_mem_ptr(sp, arglen);
++        void *src = psp_mem_ptr(argp, arglen);
++        if (dst && src) { memcpy(dst, src, arglen); argp = sp; }
++    }
+ 
+     /* The thread becomes runnable; it does not run here.
+      *
+diff --git a/tests/test_hle.c b/tests/test_hle.c
+index b06dc3f..096ba8f 100644
+--- a/tests/test_hle.c
++++ b/tests/test_hle.c
+@@ -387,6 +387,22 @@ static void test_thread_argument_block(void) {
+               cases[i].what, g_thread_argp, cases[i].want_argp ? "non-NULL" : "NULL");
+     }
+ 
++    /* The block is copied onto the thread's own stack and the thread is handed
++     * the copy, so the pointer it sees is not the one the caller passed and the
++     * bytes behind it are the same. Held back until now because it took the
++     * game from 633 GE lists to 3; see the comment in threadman.c. */
++    psp_write32(SRC, 0x00004567);
++    const uint32_t cid = call5(CREATE, guest_name("copy"), ENTRY, 32, 0x4000, 0);
++    g_thread_argp = 0xDEAD;
++    CHECK(call(START, cid, 4, SRC, 0) == 0, "copy: start");
++    call(WAITEND, cid, 0, 0, 0);
++    CHECK(g_thread_argp != SRC && g_thread_argp != 0,
++          "the thread is handed a copy, not the caller's pointer (0x%08X)",
++          g_thread_argp);
++    CHECK(psp_read32(g_thread_argp) == 0x00004567,
++          "the copy holds the caller's bytes, got 0x%08X",
++          psp_read32(g_thread_argp));
++
+     /* And the stack the thread ran on is 0xFF, not whatever was there. Read
+      * below the thread's own $sp, which it never wrote. */
+     CHECK(psp_read32(g_thread_sp - 64) == 0xFFFFFFFFu,
