@@ -793,3 +793,177 @@ faithful execution of that test.
     and untestable until waits block. Shipping it with a comment claiming it
     mattered would have been worse than not writing it.
 
+
+26. **`threads`: waits block, and the suite opens.** 0 of 127 to **4**, and
+    8,057 differing lines to **7,298**. Across all 432 the oracle went 35 to
+    **40** matching and 80,466 to 78,185 differing lines. What follows is the
+    part that is reusable — the numbers are in the commits.
+
+    ### The architecture question 25 left open, and why it was forced
+
+    25 ended by naming two pieces of work: make waits block, and implement five
+    object types. It did not say that the first one has a prerequisite, and it
+    does: **the two thread models are exclusive, not alternatives.**
+
+    `interp.c`'s `spawn_hook` runs a started thread nested to completion inside
+    its starter's frame, so a thread that blocks has no context to be resumed
+    into. `psp_sched_block` then finds nothing runnable and the wait must fail.
+    Making waits block while keeping that model turns every one of them into a
+    deadlock report — which is exactly why the drain-on-block hook 25 records
+    measured as byte-identical. It was correct and unreachable.
+
+    So: real threads. And the interpreter is not a special case for `sched.c`,
+    it is *the* case `sched.c` was built for. Its register file **is** `psp_cpu`
+    — the same global the scheduler saves into a slot and restores on a switch —
+    and its control flow is its host C stack, which is the invariant `sched.h`
+    says host threads exist to hold. `thread_main` already builds a thread's
+    register file and calls `psp_dispatch(entry)`, and `psp_dispatch` consults
+    the dispatch hook *before* the lookup table, so **`sched.c` needed no change
+    at all**. `run_thread_now` turned out to be a re-implementation of
+    `thread_main` minus the ability to stop.
+
+    The oracle's baseline is protected by construction rather than by
+    measurement: `psp_interp_service_dispatch` still installs only the dispatch
+    hook, and the new `psp_interp_service_threads` decides what happens to a
+    *spawn*. `oracle_diff` never calls the second one.
+
+    ### The third cause 25 did not know about, and it was the load-bearing one
+
+    pspautotests' `checkpoint` prints `[x]` or `[r]` on **every line** depending
+    on whether the kernel rescheduled during the operation just performed —
+    about 2,900 lines across the suite. Where a switch happens is therefore
+    measured directly, one character at a time, and two things put it in the
+    wrong place:
+
+    - **The timeslice counted somebody else's calls.** One global counter of
+      firmware calls, so a switch happened every 64 calls made by *anybody*.
+      Now guest microseconds, stamped per thread by the handoff.
+    - **A firmware call cost 100µs of guest time.** The clock had one constant
+      serving two questions. The *read* tick is sized against a loop counting
+      microseconds and is right at 100µs; the tick charged to every other call
+      exists only so time cannot stop, and its size had never been asked about
+      separately. 100µs is two orders of magnitude more than a kernel call
+      costs, and `threads/semaphores/fifo` asks for a 200µs timeout and then
+      makes three kernel calls — so the timeout expired between a line's text
+      and its newline. At 1µs the checkpoint finishes first, which is what
+      hardware does.
+
+    `fifo` also settles a question no amount of reasoning would have: **a later
+    caller does not take a count a parked waiter is ahead of it for.** With a
+    count of 1, a thread asking for 5 parks; a second asking for 1 parks behind
+    it rather than taking what is sitting there; and only when the first times
+    out and *leaves the queue* does the second get it. Eight lines, both rules.
+
+    ### Two correct rules the game does not survive
+
+    Both are measured, neither is shipped, and the pattern is the finding.
+
+    - **The argument block is copied onto the thread's stack.** A one-byte start
+      of the global `0x4567` reads back on hardware as `0xFFFFFF67` — one byte
+      of data with the stack's 0xFF fill above it — which no reading of the
+      original address can produce. Implementing it takes Armored Core from 633
+      GE lists to **3**. Narrowed: performing the copy is harmless, handing the
+      thread the copy's *address* is what breaks it, and copying 256 bytes
+      instead of four does not help. The game starts three workers in a row from
+      one shared slot, rewriting the word between each — so with the original
+      pointer all three read the last value and with copies each reads its own,
+      and the correct behaviour is the one it does not survive.
+    - **A thread's priority change reaching the scheduler** did the same thing,
+      *and that one had a findable cause.* `sceAudioOutputPannedBlocking` paid
+      its playback backlog only when a host audio sink was registered; headless,
+      a call with "Blocking" in its name returned instantly and the audio thread
+      had been spinning since audio was implemented — 11 million outputs in 60
+      seconds against the ~2,600 a paced thread makes. Survivable only while it
+      shared a priority with everything else. The game lowers its main thread
+      from 16 to 40 on its second firmware call; the moment that took effect the
+      audio thread outranked it, and **a yield cannot give way to a lower
+      priority**. A blocking output now waits the time its samples take whether
+      or not anything is listening, and the priority change ships.
+
+    **A spinning thread is not harmless because nothing has outranked it yet.**
+    That is the reusable half. The argument-block case is still open and is the
+    same shape: something upstream is wrong, and correctness elsewhere exposes
+    it rather than causing it.
+
+    ### Three instruments that lied, and one that did not exist
+
+    - **`scripts/06-boot.sh` did not build the runtime library.** It compiled
+      the boot host, linked, and printed a fresh set of numbers — measuring the
+      *previous* library whenever the caller had not run cmake first. It cost
+      two wrong attributions in one afternoon: the same change declared harmless
+      and then harmful, on runs that had neither. Fixed; it builds now.
+    - **`test_hle.c`'s `call5` wrote the fifth argument to `$sp+16`.** That is
+      plain o32 and not what a PSP stub does — `hle.h` has carried the
+      disassembly and the allocator bug that established `$t0` for a long time.
+      Every `call5` had been putting the argument somewhere `psp_arg(4)` does
+      not read, invisible because the only value ever passed was 0 and `$t0`
+      also starts at 0.
+    - **The interpreter's own guest stack was inside the allocator's heap.** Top
+      of RAM, and the allocator's high end is also top of RAM, so the first
+      `sceKernelCreateThread` returned a stack containing it. Invisible until
+      `StartThread` began painting fresh stacks with 0xFF, at which point 125 of
+      the 127 threads tests went from "returned" to "invalid instruction" in one
+      step.
+    - **`sceKernelSuspendDispatchThread` did not exist**, and
+      `threads/scheduling/dispatch` is an entire test of it. Its NID was found
+      the way the rest should be: hash the candidate names from the pspautotests
+      sources and match them against the NIDs the run reports as unimplemented.
+
+    ### What the attribute check cost, and the rule behind it
+
+    `b8da5c8` added an attribute range check to `sceKernelCreateSema`,
+    correctly, and applied the same predicate to `sceKernelCreateEventFlag`,
+    where it is false. Hardware refuses bit `0x100` for an event flag and
+    accepts bit `0x200` — `PSP_EVENT_WAITMULTIPLE` — which is the exact
+    opposite of the semaphore. Armored Core creates one with attribute `0x200`,
+    was told `ILLEGAL_ATTR`, used the error code as a uid, and the run went to
+    **0 GE lists and 123,606 bad memory accesses**.
+
+    Two things about it are worth keeping. **It was already broken at session
+    start**, and was attributed to the scheduler work until reverse-applying
+    both patches reproduced 123,606 exactly — the rule state.md already states,
+    which cost a run anyway. And the instrument that found it is also
+    state.md's: grep an `HLE_LOG` capture for every return of the form `= 0x8…`.
+    Six calls in 22 million lines return an error and `CreateEventFlag` is two
+    of them; nothing else pointed at it, because the failure surfaced 200
+    instructions later as a write to `0xAFB10028`, which is the instruction word
+    `sw $s1,0x28($sp)` being used as an address.
+
+    ### Where the suite stands, and what to do next
+
+    | subsystem | before | after | |
+    |---|---|---|---|
+    | `scheduling` | 734 | 485 | dispatch suspend/resume |
+    | `semaphores` | 210 | **76** | 4 of 10 match |
+    | `events` | 300 | 214 | |
+    | `threads` | 1178 | 1093 | |
+    | `msgpipe` | 1001 | 914 | *not implemented* |
+    | `vpl` | 1138 | 1077 | *not implemented* |
+    | `lwmutex` | 922 | 922 | *not implemented* |
+    | `mutex` | 419 | 419 | *not implemented* |
+    | `mbx` | 671 | 680 | *not implemented* |
+
+    The four biggest remaining blocks are object types that do not exist, and
+    the census is wider than the five 25 names — `mutex` (10 tests), `vtimers`
+    (12), `tls` (6) and `alarm` (4) are absent too. `threads/fpl/allocate` is
+    the only test in the suite still emitting nothing, and it is waiting on a
+    pool that was never created.
+
+    Three of them have observable internals and will not be guessed into place:
+
+    - **`lwmutex` state lives in guest memory** — a 32-byte workarea
+      `{count, thread, attr, numWaitThreads, uid, pad[3]}` that the tests dump
+      raw, including the three pad words, and cross-check between
+      `ReferLwMutexStatus` and `ReferLwMutexStatusByID` with a `memcmp`.
+    - **`vpl` tests probe the allocator's layout** — a 0x1000 pool reports
+      `poolSize=00000FE0`, so 32 bytes of overhead, with an 8-byte header per
+      allocation and exact `freeSize` after every operation.
+    - **`mbx` threads its queue through a guest-owned `SceKernelMsgPacket`**,
+      poisoned with `0xDEADBEEF` before sending so that the test can classify
+      what the kernel wrote as `NULL`/`DEAD`/`ITSELF`/`FIRST`/`OTHER`. The
+      pointer topology is part of the contract.
+
+    All three are readable straight out of the `.expected` files. None of them
+    needs a scheduler change: `vpl`, `mbx` and `lwmutex` predate `checkpoint()`
+    and carry no `[x]`/`[r]` column at all, which is 28 of the 127 reachable on
+    object-type work alone.

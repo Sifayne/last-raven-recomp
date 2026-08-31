@@ -25,7 +25,19 @@ It boots. Constructors run, `module_start` returns, the disc is read through
 async I/O, and the frame loop runs. Both configurations stall at the same gate
 by different routes.
 
-### default — the failure path, force-stopped
+### default — the failure path
+
+> **The ending changed, and the picture did not.** This section described a run
+> that `wait_deadlock` force-stopped. Since the threads work it reaches the
+> 60-second drain with threads alive instead, and everything else is
+> bit-identical — 633 lists, 106,108 commands, 93,354,668 pixels, 0 bad
+> accesses, 1,912,832 bytes read. The reason is that the audio thread now
+> *sleeps* rather than spinning (see the item below), so no wait is provably
+> unsatisfiable any more. The force-stop was a true report and its absence is
+> also a true report; the numbers below stand, the `threads:` line does not.
+>
+> The pixel count in the block below is older still and predates the renderer
+> work; the run reports 93,354,668 today.
 
 `sceMpegGetAvcAu` refuses and the game prints its own diagnosis:
 
@@ -1080,6 +1092,21 @@ next step and the most behind it.
   missing from both sides and so agrees perfectly. The GE queue bug is the proof:
   the oracle held at 3110/3108/2 throughout, because both sides called the same
   broken runtime.
+
+  **It has now found three game bugs the differential oracle cannot see**, which
+  is the point of it existing. Two are recorded in autotests.md item 26 —
+  `sceKernelCreateEventFlag` refusing a legal attribute (633 GE lists to 0), and
+  `sceAudioOutputPannedBlocking` returning instantly so its thread spun. The
+  third is `$gp`: a scheduler-spawned thread started with it zeroed, in a second
+  place, and Armored Core is built `-G0` so nothing it does could ever have
+  exposed it.
+
+- **A spinning thread is not harmless because nothing has outranked it yet.**
+  The audio thread had been running flat out since audio was implemented and
+  cost nothing measurable, because it shared a priority with everything else and
+  the timeslice rotated between equals. It starved the whole game the moment
+  `sceKernelChangeThreadPriority` became real. Worth applying to the other
+  never-blocking calls before priorities are trusted anywhere else.
 
 ## The patch series
 
