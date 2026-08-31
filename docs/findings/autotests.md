@@ -794,9 +794,9 @@ faithful execution of that test.
     mattered would have been worse than not writing it.
 
 
-26. **`threads`: waits block, and the suite opens.** 0 of 127 to **4**, and
-    8,057 differing lines to **7,298**. Across all 432 the oracle went 35 to
-    **40** matching and 80,466 to 78,185 differing lines. What follows is the
+26. **`threads`: waits block, and the suite opens.** 0 of 127 to **7**, and
+    8,057 differing lines to **6,931**. Across all 432 the oracle went 35 to
+    **43** matching and 80,466 to 77,818 differing lines. What follows is the
     part that is reusable — the numbers are in the commits.
 
     ### The architecture question 25 left open, and why it was forced
@@ -935,19 +935,37 @@ faithful execution of that test.
     |---|---|---|---|
     | `scheduling` | 734 | 485 | dispatch suspend/resume |
     | `semaphores` | 210 | **76** | 4 of 10 match |
+    | `mutex` | 419 | **68** | 3 of 10 match — implemented |
     | `events` | 300 | 214 | |
     | `threads` | 1178 | 1093 | |
     | `msgpipe` | 1001 | 914 | *not implemented* |
     | `vpl` | 1138 | 1077 | *not implemented* |
     | `lwmutex` | 922 | 922 | *not implemented* |
-    | `mutex` | 419 | 419 | *not implemented* |
     | `mbx` | 671 | 680 | *not implemented* |
 
-    The four biggest remaining blocks are object types that do not exist, and
-    the census is wider than the five 25 names — `mutex` (10 tests), `vtimers`
-    (12), `tls` (6) and `alarm` (4) are absent too. `threads/fpl/allocate` is
-    the only test in the suite still emitting nothing, and it is waiting on a
-    pool that was never created.
+    The remaining blocks are object types that do not exist, and the census is
+    wider than the five 25 names — `vtimers` (12 tests), `tls` (6) and `alarm`
+    (4) are absent too. `threads/fpl/allocate` is the only test in the suite
+    still emitting nothing, and it is waiting on a pool that was never created.
+
+    ### `mutex` is done, and it says what the next one will cost
+
+    419 differing lines to 68 in one file, `src/hle/kernlock.c`, with three
+    tests matching exactly. Nothing about it needed a scheduler change; it needed
+    the captures read carefully, and two of its rules are not what a mutex
+    usually is.
+
+    **Its attribute mask is `0xBFF`** — bit 10 refused where bit 11 is accepted.
+    That is now three object types with three different attribute rules
+    (semaphores take the low nine bits, event flags refuse `0x100` and accept
+    `0x200`), and the one time this project assumed two of them shared a rule it
+    cost the game 633 GE lists. **Read the capture for the type you are
+    implementing.**
+
+    Two corrections fell out that were invisible with only one object type to
+    look at, and both are now shared: a *zero* timeout is a deadline that has
+    already arrived rather than the shortest future one, and a `Refer*Status`
+    call offering zero bytes gets zero back and nothing written.
 
     Three of them have observable internals and will not be guessed into place:
 
