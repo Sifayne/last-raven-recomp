@@ -1361,3 +1361,41 @@ faithful execution of that test.
     and `tls/free` went 23 to 26, which is a reshuffle rather than a new fault:
     threads now run at different points, so different lines of a test that has
     real tls bugs in it line up.
+
+    ### `threads/change` finished: one attribute bit, and a scheduling rule
+
+    140 differing lines to 2, in two changes that have nothing to do with each
+    other beyond the file that found them.
+
+    **`sceKernelChangeCurrentThreadAttr` owns exactly one bit.** Ours applied
+    whatever it was handed. The test sweeps all thirty-two bits through both
+    arguments, twice, and gets `80020191` for thirty-one of them in each
+    direction -- only `PSP_THREAD_ATTR_VFPU` (`0x4000`) is the thread's own
+    business. The attribute readback on the next line is what makes the sweep
+    airtight: it holds still across every refused call, so a refusal that
+    quietly applied the change would show. 128 of the 140 lines.
+
+    **A displaced thread is not a finished one.** The remaining lines were
+    `[x]`/`[r]`, which this file has repeatedly declined to chase -- and four of
+    the five turned out to be a real rule rather than the clock. A PSP puts a
+    thread that was preempted at the *head* of its priority queue; it never
+    stopped being the one that should run at that priority. A thread that yields
+    goes to the tail. `psp_sched_yield` served both, so a starter displaced by
+    the thread it had just made more urgent came back *behind* an
+    equal-priority thread that was merely waiting -- which is pspautotests'
+    rescheduler thread, and which tags the checkpoint `[r]`.
+
+    Splitting the two -- one flag on the slot, one tie-break in the handoff --
+    took `threads/change` to 2 and fourteen tests with it, none regressed:
+    `scheduling/scheduling` 58 to 46, `msgpipe/data` 67 to 55, all five
+    `callbacks` tests, `threadend` 24 to 18, `scheduling/dispatch` 369 to 363.
+    Suite: 2,515 differing lines to 2,321. The game is unchanged at 633 GE
+    lists, which is the check that mattered: `sched.c` says the slice is what
+    stops Armored Core's disc-read poster starving its equal-priority workers,
+    and this changes who wins exactly that race.
+
+    The one line left is the evidence that the rest of the column really is the
+    timer. The test makes the *same call twice in a row* --
+    `sceKernelChangeThreadPriority(sceKernelGetThreadId(), 0x20)` on a thread
+    already at 0x20 -- and hardware tags the first `[x]` and the second `[r]`.
+    No rule about that call can produce two different answers to it.
