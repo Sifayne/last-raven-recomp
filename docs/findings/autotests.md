@@ -114,7 +114,7 @@ it runs is the whole class of bug this project keeps writing down:
    | `colors` | ExitGame | **MATCHES hardware** |
    | `vavg` | ExitGame | **MATCHES hardware** |
    | `convert` | ExitGame | **MATCHES hardware** |
-   | `vector` | unimplemented op | 1313 / 5329 lines |
+   | `vector` | ExitGame | 5329 / 5329 lines, 81 differ |
 
    Six bugs so far, none of which the differential oracle could see, because it
    runs the same decoder and the same `psp_vfpu_*` helpers on both sides:
@@ -352,6 +352,64 @@ it runs is the whole class of bug this project keeps writing down:
     reported as "instruction budget exhausted" when the real answer was an
     instruction we do not implement. A misleading reason is worse than a slow
     run, because it sends you to look at the wrong thing.
+
+14. **All eight tests now run to completion, and `vector` is 98.5% of the way.**
+    It emits all 5329 of its lines with 81 differing, from 1313 emitted and a
+    trap. Everything it needed, in the order it asked:
+
+    - `vrexp2` -- decoded, with a runtime entry, and never listed in either
+      dispatch table.
+    - `vsbn`, and the VFPU9 family (`vsrt1`-`vsrt4`, `vbfy1`/`vbfy2`, `vocp`,
+      `vsgn`), which combine a vector with a swizzled copy of itself.
+    - `vsge`, `vslt`, `vscmp` -- comparisons that write 1.0/0.0 into a register
+      rather than into the condition codes. Decoded since forever, implemented
+      nowhere.
+    - `vhdp`, `vcrs`, `vdet`, and `vcrsp.t`/`vqmul.q` -- one encoding whose
+      meaning is chosen by operand width.
+    - `vwbn`, which occupies eight consecutive rs values because the exponent
+      it applies lives in rt.
+    - `vcmov`, which the differential oracle had been reporting against the
+      *game* as an unimplemented op for as long as there has been a report.
+    - `mfvc`/`mtvc`, and with them a control-register file. The prefixes and
+      the condition codes stay where the rest of vfpu.c keeps them rather than
+      being copied into an array, so a prefix written through `mtvc` is the
+      same prefix the next instruction consumes -- which is exactly what the
+      test does.
+    - **Eight of `vcmp`'s sixteen conditions were missing.** The upper half test
+      the first operand's *class* -- zero, NaN, infinity, and their negations --
+      rather than comparing two values, and they had all been falling into a
+      `default` that answered 0. That alone was 576 of vector's lines.
+    - `vcst` took its constant index from the wrong field: `vs` where the
+      hardware uses `rt`. It read past the end of the table and returned 0 for
+      every constant in it.
+    - `vcrsp` flushes infinities to zero before computing its third lane, and
+      only that lane. It looks arbitrary; `inf * 0` in the dot would be a NaN
+      and the hardware answers with the finite part.
+
+    **`vector.expected` is CRLF where every other `.expected` in the directory
+    is LF.** Left alone that decided the whole test: all 5329 lines "differed",
+    every one of them by a byte the guest never emitted. The comparison strips
+    CR from both sides now.
+
+15. **What is left in `vector`, and why it stops here.** 81 lines in three
+    groups:
+
+    - **26 lines of `vsqrt`, `vrsq` and `vasin`** -- the hardware's
+      transcendental approximations, which are table-driven and not reproducible
+      from libm. The same class as the VFPU's sine, which is the one line still
+      differing in `prefixes`.
+    - **20 lines across `vdot`, `vhdp`, `vdet`, `vcrsp`, `vfad`, `vavg`** -- all
+      of them the dot-product unit's own arithmetic. The hardware accumulates in
+      extra precision with a shared exponent and round-to-odd, and has explicit
+      rules for infinities and NaNs; a plain sum of products differs on exactly
+      those inputs. This is a self-contained piece of work worth doing on its
+      own terms rather than as a footnote.
+    - **25 lines of `checkCompare`**, which look like one more condition-code
+      case rather than a family.
+
+    None of it is a blocker for anything: the ops all execute, and the
+    differences are in the last bits of results involving infinities, NaNs and
+    transcendentals.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a

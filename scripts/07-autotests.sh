@@ -91,16 +91,27 @@ for f in "${ELFS[@]}"; do
     if [ -f "$exp" ]; then
         got="$REPORTS/07-${name%.*}.got"
         [ -f "$HOSTOUT" ] && cp "$HOSTOUT" "$got" || : > "$got"
+        # Compare with CR stripped from both sides.
+        #
+        # cpu/vfpu/vector.expected is CRLF and every other .expected in the
+        # same directory is LF -- an artifact of whichever machine captured it,
+        # not something the PSP printed. Left alone it decides that test's
+        # verdict entirely: all 5329 lines "differ", every one of them by a
+        # byte the guest never emitted.
+        expc="$REPORTS/07-${name%.*}.exp"
+        gotc="$REPORTS/07-${name%.*}.cmp"
+        tr -d '\r' < "$exp" > "$expc"
+        tr -d '\r' < "$got" > "$gotc"
         if [ ! -s "$got" ]; then
             verdict="NO OUTPUT (test ran but printed nothing)"
-        elif diff -q "$got" "$exp" >/dev/null 2>&1; then
+        elif diff -q "$gotc" "$expc" >/dev/null 2>&1; then
             verdict="MATCHES hardware"
         else
             # `|| true` because diff exits 1 when the files differ, pipefail
             # promotes that to the whole substitution, and set -e then ends the
             # run on the first test that differs. Latent until now: while every
             # test emitted nothing this branch was unreachable.
-            ndiff="$(diff "$got" "$exp" | grep -c '^[<>]' || true)"
+            ndiff="$(diff "$gotc" "$expc" | grep -c '^[<>]' || true)"
             verdict="differs: $ndiff line(s)"
         fi
     fi
