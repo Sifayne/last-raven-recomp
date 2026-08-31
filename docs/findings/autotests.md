@@ -795,7 +795,7 @@ faithful execution of that test.
 
 
 26. **`threads`: waits block, and the suite opens.** 0 of 127 to **33**, and
-    8,057 differing lines to **2,965** — and **no test in the suite is silent
+    8,057 differing lines to **2,861** — and **no test in the suite is silent
     any more**. Across all 432 the oracle went 35 to **66** matching and 80,466
     to 74,228 differing lines. What follows is the part that is reusable — the
     numbers are in the commits.
@@ -972,15 +972,33 @@ faithful execution of that test.
     few hundred checkpoints ran the 130-slot table out, and *which* spawns
     failed depended on how many earlier host threads had happened to exit.
 
-    **Reusing a dead slot is the obvious companion fix and is unsafe.** The dead
-    thread's pthread may still be parked in `await_turn_locked`, which refuses
-    to proceed only while the slot reads DEAD; hand that slot to a new thread
-    and the old one's wait *succeeds*, so two host threads run guest code at
-    once against the single global `psp_cpu`. `threads/create` went to
-    **131,929,071 bad memory accesses** the moment reuse was allowed. Making it
-    safe needs the slot to carry its pthread to a join, and **that is the
-    largest single thing left in the suite** — the leak it would fix is what
-    silences `threads/terminate` today.
+    **Reusing a dead slot naively is unsafe.** The dead thread's pthread may
+    still be parked in `await_turn_locked`, which refuses to proceed only while
+    the slot reads DEAD; hand that slot to a new thread and the old one's wait
+    *succeeds*, so two host threads run guest code at once against the single
+    global `psp_cpu`. `threads/create` went to **131,929,071 bad memory
+    accesses** the moment reuse was allowed on the state alone.
+
+    ### Retracted: slot exhaustion was not what silenced `threads/terminate`
+
+    This section previously named safe slot reuse as the largest remaining
+    piece and said the leak was what silenced that test. Both were wrong, and
+    what settled it was building the thing rather than arguing about it: reuse
+    *was* implemented safely — an `exited` barrier set under the lock
+    immediately before each host thread's final unlock, on all eight paths a
+    guest thread leaves by, with a `pthread_join` before the slot is handed
+    out — and `threads/terminate` stayed exactly as silent while ten differing
+    lines appeared elsewhere. Reverted.
+
+    The real cause was one line of the test: **a thread cannot terminate
+    itself**, `Current: 80020197`, exactly as it cannot suspend itself. The
+    test does that once per block, and once terminate actually worked, obeying
+    it killed the thread that was going to flush the checkpoint buffer. A rule
+    that reads like a nicety, silencing a whole file.
+
+    The slot leak is still real and is still worth fixing eventually. It is
+    simply not what anything is blocked on, and a plausible cause that survives
+    only because nobody tested it is the thing this file exists to prevent.
 
     Two process notes from the same afternoon, both of which produced a number
     that was believed before it was checked:
