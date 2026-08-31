@@ -113,8 +113,8 @@ it runs is the whole class of bug this project keeps writing down:
    | `vregs` | ExitGame | 30 / 48 lines — stale test data, see 9 |
    | `colors` | ExitGame | **MATCHES hardware** |
    | `vavg` | ExitGame | **MATCHES hardware** |
-   | `convert` | budget | 1 / 108 lines |
-   | `vector` | budget | 1045 / 5329 lines |
+   | `convert` | ExitGame | **MATCHES hardware** |
+   | `vector` | unimplemented op | 1313 / 5329 lines |
 
    Six bugs so far, none of which the differential oracle could see, because it
    runs the same decoder and the same `psp_vfpu_*` helpers on both sides:
@@ -293,6 +293,65 @@ it runs is the whole class of bug this project keeps writing down:
     happening to 0x34. Choosing that example by what the dispatch actually
     leaves unmapped, rather than by what happened to be missing on the day,
     would have avoided both.
+
+11. **`convert` matches hardware; `vector` is a long tail.** Five of the eight
+    now match. What convert needed:
+
+    - **The packed-integer conversions** (VFPU4 rs=1): `vuc2i`/`vc2i`/`vus2i`/
+      `vs2i` unpack narrow integers to 32-bit, `vi2uc`/`vi2c`/`vi2us`/`vi2s`
+      pack back down, and `vf2h`/`vh2f` do the same for half floats. Each
+      changes the *width* of the vector as a function of the input width and
+      the variant, not of the instruction's own size field.
+    - **`vf2i` and `vi2f` carry a scale exponent**, and the versions we had
+      ignored it. They were entries in the unary table -- `f2iz` and `i2f` --
+      which multiply by nothing, so they were right for the scale of 0 a plain
+      cast emits and silently wrong for every other. They also lacked the four
+      rounding modes, the INT_MIN/INT_MAX saturation, and NaN going to INT_MAX.
+    - **Round-half-to-even.** `vf2in` uses C's `round` nowhere: hardware turns
+      0.5 into 0 and 2.5 into 2, and `round` gives 1 and 3.
+    - **Two half-float edge cases**, both pinned by hardware output. Expanding
+      a half whose exponent is all ones does *not* shift the mantissa up --
+      `vh2f` of 0x7F80 gives 0x7F800380, not 0x7FF00000. And narrowing a NaN
+      saturates the mantissa to 0x7FFF rather than producing the 0x7E00 the
+      software algorithm gives.
+
+    The half conversions now live in recomp_rt.h with one copy, because the
+    decoder needs them for `vfim`'s immediate and the runtime needs them for
+    `vh2f`, and two copies of a float conversion is exactly what the oracle
+    cannot see -- it runs the same helper on both sides.
+
+12. **`vdiv` is VFPU0 sub-opcode 7, and we had it at 4.** Found by `vector`,
+    which stops on a sub-opcode 7 we decoded as unknown.
+
+    This one had been "corrected" the wrong way once already: an earlier commit
+    moved the decoder *and* its test from 7 to 4 together, reasoning that the
+    test had been agreeing with a wrong decoder rather than catching it. The
+    reasoning was right in shape and wrong in direction, and changing both in
+    one commit is what let it stand -- a test edited alongside the code it
+    checks has stopped being evidence.
+
+    The evidence this time is outside both: Armored Core's `.text` contains
+    VFPU0 sub-opcodes 0, 1 and 7 and no 4 at all; `vector.prx` contains 0, 1, 2
+    and 7 and no 4; and the published table has 3..6 invalid. So the game has
+    had seven `vdiv` instructions decoding as unknown-VFPU for its whole life.
+
+    Fixing it changes the picture: the logo's letter edges go from speckled to
+    clean and 940 more pixels are drawn, with the same 633 GE lists and 0 bad
+    accesses. The oracle does not move -- 312 compared, 0 differ -- because
+    both sides read the same decoder, which is why a *test* had to find it.
+
+13. **What `vector` still needs.** It reaches 180M instructions and stops on an
+    unimplemented op rather than on the budget, having emitted 1313 of 5329
+    lines. Implemented on the way: `vsbn`, the VFPU9 family (`vsrt1`-`vsrt4`,
+    `vbfy1`/`vbfy2`, `vocp`, `vsgn`) and `vrexp2`, which was decoded and had a
+    runtime entry but had never been listed in either dispatch table. What is
+    left is a genuine tail across several families, not one blocker.
+
+    The suite's budget went from 100M to 800M for this. It is a cap and not a
+    cost -- a test that finishes stops on its own -- and at 100M vector was
+    reported as "instruction budget exhausted" when the real answer was an
+    instruction we do not implement. A misleading reason is worse than a slow
+    run, because it sends you to look at the wrong thing.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a

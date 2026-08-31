@@ -27,7 +27,12 @@
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 DIR="${1:-$GAME_DIR/pspautotests/tests/cpu/vfpu}"
-BUDGET="${BUDGET:-100000000}"
+# A cap, not a cost: a test that finishes stops on its own, so raising this
+# only changes what happens to the ones that do not. At 100M, cpu/vfpu/vector
+# was reported as "instruction budget exhausted" when what it actually does is
+# run 180M instructions and then hit an instruction we do not implement -- a
+# misleading reason, and the wrong thing to go and investigate.
+BUDGET="${BUDGET:-800000000}"
 [ -d "$DIR" ] || die "no autotest directory at $DIR — build pspautotests and point this at it"
 
 shopt -s nullglob
