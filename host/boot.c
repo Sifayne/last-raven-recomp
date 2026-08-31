@@ -33,6 +33,7 @@
 #include "psprecomp/sched.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
+#include "psprecomp/vfpu.h"
 
 #include <setjmp.h>
 #include <signal.h>
@@ -63,23 +64,43 @@ void psp_recomp_register(void);
  * here -- the whole point is to see how far the boot gets before it stops. */
 
 static sigjmp_buf g_abort;
+static volatile sig_atomic_t g_abort_valid;
 static int        g_reason;         /* 1 trap, 2 timeout, 3 fault, 4 dispatch miss */
 static uint32_t   g_reason_addr;
 static const char *g_reason_what;
 
+/* Jumping into a frame that has already returned is undefined, and in practice
+ * it is an infinite loop: the jump lands in guarded_call's failure path, which
+ * prints, returns onto a stack that is no longer there, faults again, and
+ * jumps again. It does not stop and it does not crash -- it writes. One such
+ * loop produced seven gigabytes of stderr from a single null dereference in
+ * the end-of-run summary, and the size of the log was the only symptom.
+ *
+ * Guest threads keep running through the summary, so any of these can still
+ * fire after the entry call has returned. Once there is no frame to unwind to,
+ * say which fault it was and stop. */
+static void abort_to_main(void) {
+    if (g_abort_valid) siglongjmp(g_abort, 1);
+    fprintf(stderr, "\npsprecomp: %s at 0x%08X after the entry call returned -- "
+                    "no frame to unwind to, stopping here\n",
+            g_reason_what ? g_reason_what : "fault", g_reason_addr);
+    fflush(NULL);
+    _exit(3);
+}
+
 void psp_unimplemented(uint32_t addr, const char *what) {
     g_reason = 1; g_reason_addr = addr; g_reason_what = what;
-    siglongjmp(g_abort, 1);
+    abort_to_main();
 }
 
 void psp_syscall(uint32_t id) {
     g_reason = 1; g_reason_addr = id; g_reason_what = "syscall";
-    siglongjmp(g_abort, 1);
+    abort_to_main();
 }
 
 static void on_miss(uint32_t addr) {
     g_reason = 4; g_reason_addr = addr; g_reason_what = "dispatch miss";
-    siglongjmp(g_abort, 1);
+    abort_to_main();
 }
 
 /* The guest's exit path.
@@ -118,7 +139,7 @@ static void hle_stop_unload_self(void) {
         psp_sched_stop_all("sceKernelExitGame");   /* does not return */
         return;
     }
-    siglongjmp(g_abort, 1);
+    abort_to_main();
 }
 
 /* PSPRECOMP_WATCH=<hex address> prints the argument registers on entry to that
@@ -131,15 +152,29 @@ static void hle_stop_unload_self(void) {
 static void watch_hit(uint32_t addr) {
     fprintf(stderr, "watch: psp_func_%08X(a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X)\n",
             addr, psp_arg(0), psp_arg(1), psp_arg(2), psp_arg(3));
-    for (int i = 0; i < 4; i++) {
-        const uint32_t v = psp_arg(i);
-        if (v < PSP_RAM_BASE || v >= PSP_RAM_BASE + PSP_RAM_SIZE) continue;
-        const uint32_t deref = psp_read32(v);
-        fprintf(stderr, "         a%d -> 0x%08X", i, deref);
-        if (deref >= PSP_RAM_BASE && deref < PSP_RAM_BASE + PSP_RAM_SIZE)
-            fprintf(stderr, "  -> first bytes %02X %02X %02X %02X",
-                    psp_read8(deref), psp_read8(deref + 1),
-                    psp_read8(deref + 2), psp_read8(deref + 3));
+    /* Eight registers, not four.
+     *
+     * This module is not compiled o32: its calls pass arguments in $a0-$a3 AND
+     * $t0-$t3, then on the stack from sp+0 with no home area -- see the call
+     * into psp_func_0002E1D8 at 0x00032AE8, which sets all eight and three
+     * stack slots. Printing only a0-a3 and calling them "the arguments" hides
+     * half of every call, and the half it hid was where a garbage vertex-type
+     * word was being passed. */
+    static const int ARGR[8] = { PSP_REG_A0, PSP_REG_A1, PSP_REG_A2, PSP_REG_A3,
+                                 PSP_REG_T0, PSP_REG_T1, PSP_REG_T2, PSP_REG_T3 };
+    static const char *ARGN[8] = { "a0","a1","a2","a3","t0","t1","t2","t3" };
+    fprintf(stderr, "         t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X\n",
+            psp_cpu.r[PSP_REG_T0], psp_cpu.r[PSP_REG_T1],
+            psp_cpu.r[PSP_REG_T2], psp_cpu.r[PSP_REG_T3]);
+    for (int i = 0; i < 8; i++) {
+        const uint32_t v = psp_cpu.r[ARGR[i]];
+        if (v < PSP_RAM_BASE || v + 32 >= PSP_RAM_BASE + PSP_RAM_SIZE) continue;
+        /* A window, not one word. "What does this pointer point at" is almost
+         * never answered by offset zero -- the field that matters here lives
+         * at +4 -- and a second run to see +4 costs more than eight words. */
+        fprintf(stderr, "         %s ->", ARGN[i]);
+        for (int k = 0; k < 8; k++)
+            fprintf(stderr, " %08X", psp_read32(v + (uint32_t)k * 4));
         fprintf(stderr, "\n");
     }
     /* The object `this` points at, when it is one.
@@ -452,6 +487,88 @@ static void install_watch(void) {
     printf("      watch     psp_func_%08X (needs a PSPRECOMP_TRACE build)\n", addr);
 }
 
+/* ---- bad memory access: capture, then stop or trap ------------------------
+ *
+ * A run that faults keeps running, because a bad read returns 0 and 0 is a
+ * legal value. That is the right default -- an early fault in an initialiser
+ * is often survivable and the run past it is still informative -- but it
+ * means the interesting moment is a billion accesses in the past by the time
+ * anyone reads the summary. Two things fix that, and both are opt-in. */
+static char   *g_bad_snapshot;
+static size_t  g_bad_snapshot_n;
+static int     g_bad_top = 16;
+static uint64_t g_bad_stop_at, g_bad_trap_at;
+
+static void on_bad_access(uint64_t nth, uint32_t addr, int write, int width) {
+    if (nth == 1 && !g_bad_snapshot) {
+        /* Into a buffer rather than straight to stderr: this belongs next to
+         * the register dump in the summary, and stderr at this moment is
+         * whatever the guest is spewing. */
+        FILE *m = open_memstream(&g_bad_snapshot, &g_bad_snapshot_n);
+        if (m) {
+            psp_hle_dump_recent(m);
+            /* The VFPU condition codes decide branches, and a branch taken on
+             * the wrong bit is how a loop writes one element too many. Both
+             * halves are destroyed by what runs next, so both are taken here. */
+            fprintf(m, "  vfpu cc at the fault: 0x%02X\n", psp_cpu.vfpu_cc);
+            psp_vfpu_dump_cmps(m);
+            fclose(m);
+        }
+    }
+    if (g_bad_trap_at && nth == g_bad_trap_at) {
+        fprintf(stderr, "psprecomp: bad access #%llu (%s%d at 0x%08X) -- trapping\n",
+                (unsigned long long)nth, write ? "write" : "read", width * 8, addr);
+        /* SIGTRAP, not abort(): boot.c handles SIGABRT, and on_signal would
+         * report a deliberate stop as "host fault (SIGSEGV/SIGBUS)" and
+         * _exit(2). SIGTRAP is unhandled here, so gdb stops with the
+         * recompiled frame still live and `bt` names the guest function.
+         * Without a debugger attached this kills the process and there is no
+         * summary -- which is the trade, and why it is not the default. */
+        raise(SIGTRAP);
+    }
+    if (g_bad_stop_at && nth == g_bad_stop_at) {
+        static char why[96];
+        snprintf(why, sizeof why, "bad access #%llu at 0x%08X",
+                 (unsigned long long)nth, addr);
+        /* The same path a closed window takes, so the end-of-run summary --
+         * the census, the frame dumps, the histogram -- still prints. */
+        psp_sched_stop_all(why);
+    }
+}
+
+static void install_bad_hook(void) {
+    const char *stop   = getenv("PSPRECOMP_BAD_STOP");
+    const char *trap   = getenv("PSPRECOMP_BAD_TRAP");
+    const char *sample = getenv("PSPRECOMP_BAD_SAMPLE");
+    const char *top    = getenv("PSPRECOMP_BAD_TOP");
+
+    if (sample) psp_mem_set_bad_sample(strtoull(sample, NULL, 0));
+    if (top)    g_bad_top = atoi(top);
+
+    /* Off by default: psp_vcmp runs per clipped vertex per plane, and a ring
+     * write on that path is paid for by every frame of every run. */
+    if (getenv("PSPRECOMP_VCMP_RING")) {
+        psp_vfpu_cmp_record(1);
+        printf("      vfpu      recording recent comparisons (PSPRECOMP_VCMP_RING)\n");
+    }
+
+    if (stop) g_bad_stop_at = strtoull(stop, NULL, 0);
+    if (trap) g_bad_trap_at = strtoull(trap, NULL, 0);
+    if (trap && !*trap) g_bad_trap_at = 1;
+
+    /* Armed at 1 even with neither set: the hook fires at the first access
+     * regardless, and that is what captures the firmware snapshot. */
+    uint64_t at = g_bad_stop_at ? g_bad_stop_at : g_bad_trap_at;
+    psp_mem_set_bad_hook(at, on_bad_access);
+    if (g_bad_stop_at)
+        printf("      bad mem   stop at access #%llu (PSPRECOMP_BAD_STOP)\n",
+               (unsigned long long)g_bad_stop_at);
+    if (g_bad_trap_at)
+        printf("      bad mem   SIGTRAP at access #%llu (PSPRECOMP_BAD_TRAP; "
+               "run under gdb or the process just dies)\n",
+               (unsigned long long)g_bad_trap_at);
+}
+
 #define ALT_STACK_SIZE ((size_t)(SIGSTKSZ < 65536 ? 65536 : SIGSTKSZ))
 
 /* Each thread needs its own: sigaltstack is per-thread, and the fault most
@@ -494,7 +611,7 @@ static void on_signal(int sig) {
         fflush(NULL);
         _exit(2);
     }
-    siglongjmp(g_abort, 1);
+    abort_to_main();
 }
 
 static const char *reason_str(void) {
@@ -528,12 +645,15 @@ static void install_handlers(void) {
 static int guarded_call(uint32_t addr, unsigned timeout_s, const char *what) {
     g_reason = 0;
     if (sigsetjmp(g_abort, 1) == 0) {
+        g_abort_valid = 1;
         alarm(timeout_s);
         psp_dispatch(addr);
         alarm(0);
+        g_abort_valid = 0;
         return 0;
     }
     alarm(0);
+    g_abort_valid = 0;
     printf("    %-28s stopped: %s", what, reason_str());
     if (g_reason == 1 || g_reason == 4) printf(" at 0x%08X", g_reason_addr);
     if (g_reason == 5) printf("(%u)", g_exit_status);
@@ -643,6 +763,7 @@ int main(int argc, char **argv) {
     }
 
     install_watch();
+    install_bad_hook();
     psp_sched_set_thread_hook(install_alt_stack);
     printf("      disc      %s\n", iso ? iso : "(none -- raw umd: opens will fail)");
 
@@ -708,8 +829,22 @@ int main(int argc, char **argv) {
         drain_s = atoi(getenv("PSPRECOMP_DRAIN"));
         if (drain_s <= 0) drain_s = 60;
         printf("      drain     %ds (PSPRECOMP_DRAIN)\n", drain_s);
+    } else if (psp_ctrl_replay_drain() > 0) {
+        /* A scenario knows how long it needs to run -- reaching a menu three
+         * screens in takes longer than the 60s bring-up default -- so it
+         * carries that with it. Ending early looks exactly like a scenario
+         * that does not work: the events past the cut are simply never
+         * delivered. PSPRECOMP_DRAIN still wins, so a run can be shortened. */
+        drain_s = psp_ctrl_replay_drain();
+        printf("      drain     %ds (from the scenario)\n", drain_s);
     }
     if (live > 0) live = psp_sched_drain(drain_s);
+
+    /* Disarm before the summary. Everything below reads guest memory --
+     * dump_framebuffer, survey_vram, find_pointer -- and a trap armed for the
+     * guest firing inside the report would kill the process while printing
+     * the thing it was armed to explain. */
+    psp_mem_set_bad_hook(0, NULL);
 
     printf("---\n");
     printf("ctors:    %s\n", ctors_ok == 0 ? "ok" : "incomplete");
@@ -726,6 +861,19 @@ int main(int argc, char **argv) {
         printf("threads:  %s\n",
                live == 0 ? "all finished" : "still alive (see the deadlock report above)");
     printf("bad mem:  %llu accesses\n", (unsigned long long)psp_mem_bad_access);
+    psp_mem_dump_bad(stdout, g_bad_top);
+    if (g_bad_snapshot && g_bad_snapshot[0]) {
+        /* Taken at the first bad access rather than read here. The HLE's
+         * zero-return ring is sixteen deep, and a cascade of a billion
+         * accesses scrolls the calls that mattered out of it long before this
+         * line runs -- which is exactly the window where an unimplemented
+         * call returning 0 == SCE_KERNEL_ERROR_OK would be visible. */
+        printf("  firmware calls that had returned zero, at the first bad access:\n%s",
+               g_bad_snapshot);
+    }
+    printf("polls:    %u pad poll(s), %u sample(s) written\n",
+           psp_ctrl_polls(), psp_ctrl_samples());
+    psp_ctrl_replay_finish(stdout);
     printf("disc read: %llu bytes\n", (unsigned long long)psp_io_bytes_read());
     printf("pixels:   %llu drawn by the rasterizer\n",
            (unsigned long long)psp_ge_pixels());
