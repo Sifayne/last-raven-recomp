@@ -190,6 +190,16 @@ All are off by default and cost nothing when off.
 | `PSPRECOMP_MPEG_DUMP=<path>` | The demuxed elementary stream, once it exceeds 1 MB. For checking against a decoder that is not ours. |
 | `PSPRECOMP_MPEG_FRAME=<path>`, `PSPRECOMP_MPEG_FRAME_NO=<n>` | One decoded frame as a PPM. |
 | `TRACE=1 ./scripts/04-emit-build.sh` | Rebuilds the generated C with tracing, into `build/host-trace` so it no longer destroys the plain build. `TRACE=1 ./scripts/06-boot.sh` runs it. |
+| `scripts/07-autotests.sh <dir>` | One pspautotests directory at the real instruction budget, against recorded hardware output. What you work a suite with. |
+| `scripts/08-autotest-sweep.sh` | All 432 tests, reduced budget and a per-test wall timeout, into `reports/08-sweep.tsv`. A map, not a verdict: the reduced budget truncates tests that legitimately run long. Rank by the differing-line column — one line away is one bug, five hundred is an unimplemented library. |
+
+**`scripts/05-oracle.sh` now refuses to run against stale generated C.** It
+rebuilds the interpreter every time but links C emitted whenever
+`04-emit-build.sh` last ran, so editing the emitter and re-running only the
+oracle compares two different programs and reports it as `differ` — which reads
+exactly like a codegen regression. It cost one this session. Run
+`scripts/04-emit-build.sh` after touching `emit.c`, `decode.c`, `decode.h` or
+`recomp_rt.h`.
 
 The boot summary also reports, without any flag: the firmware-call histogram,
 the GE state, a VRAM survey, and the live thread list with what each is parked
@@ -361,6 +371,10 @@ reports failures it does not already expect.
 **This list is the source of truth.** Anything worth picking up next session goes
 here, in the repository, with enough context to act on without the conversation
 that produced it.
+
+**Start at item 8.** The numbering is chronological, not a priority order — 1
+and 3 are closed and 0 is a status entry — and 8 is the piece with the clearest
+next step and the most behind it.
 
 0. **There is a picture.** The FromSoftware logo renders — 13,156 of 130,560
    pixels varying, 28 distinct colours, in a 360×48 band across the middle of
@@ -966,6 +980,64 @@ that produced it.
 
 7. **`$k0` thread control block and reent.** Bring-up completeness, not a live
    blocker — only twelve sites in the whole module read `r_k0`.
+
+8. **Make kernel waits block, then implement the five missing object types.**
+   This is the next substantial piece, and the diagnosis is already done — do
+   not re-derive it.
+
+   `threads` is **0 of 127** matching hardware. Four real gaps were closed
+   getting there (see [autotests.md](autotests.md) item 25: the entry thread's
+   priority, NULL-name and attribute validation, the three `Refer*Status`
+   calls, `sceKernelTerminateThread`) and the aggregate moved from 8,870
+   differing lines to 8,057 — but **not one test crossed to a match**, because
+   none of those were the blocker.
+
+   The blocker is one line of behaviour. `hle_WaitEventFlag`, in
+   `tools/psprecomp/src/hle/threadman.c`, ends an unsatisfiable wait with
+
+   ```c
+   psp_ret(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+   ```
+
+   rather than blocking, and only `WaitSema` and `WaitThreadEnd` call
+   `psp_sched_block` at all. The threads suite is largely a test of blocking
+   and wakeup **ordering**, and there is nothing here to order. On top of that
+   `fpl`, `vpl`, `mbx`, `msgpipe` and `lwmutex` have no implementation
+   whatsoever — `grep -c MsgPipe` over threadman.c returns 0.
+
+   ### Settle the architecture before writing code
+
+   The autotest path does not use the real scheduler, and there are two ways
+   forward. The facts needed to choose are established:
+
+   - `sched.c` runs each guest thread on a **host thread** with a handoff
+     token, saving and restoring `psp_cpu` across switches, precisely because
+     a blocked thread's control flow *is* its C stack. That reasoning applies
+     to the interpreter unchanged.
+   - `thread_main` calls `psp_dispatch(t->entry)`, and `interp.c` already
+     installs a dispatch hook. So an interpreted thread could run inside a
+     scheduler host thread with no new mechanism — but `g_active` and `g_nest`
+     in interp.c are plain globals and would have to become thread-local, and
+     `dispatch_hook` would have to *start* a run when there is no active one
+     instead of declining.
+   - The alternative is what is there now: `interp.c`'s `spawn_hook` parks
+     threads that do not outrank their starter and drains them when the
+     top-level run ends. It models "runnable is not running", which is real and
+     measurable, but it cannot interleave — so it cannot satisfy a test that
+     waits.
+
+   ### Two things to carry forward
+
+   `threads/events/events` regressed 16 → 22 differing lines under the parked
+   model, and it *is* implemented, so that one is a genuine debt rather than
+   churn in an unimplemented subsystem.
+
+   A drain-on-block hook was written for exactly that case and then **removed**:
+   measured across all 432 tests it changed nothing, byte for byte, because no
+   wait path reaches `psp_sched_block` to trigger it. It becomes the right
+   thing the moment waits block — but it was dead and untestable until then,
+   and shipping it with a comment claiming otherwise would have been worse than
+   not writing it. Expect to want it back as part of this item.
 
 ### Two measurements worth taking before building further
 
