@@ -1,0 +1,9 @@
+# Nothing at all. For recording a fresh session:
+#
+#   scripts/09-replay.sh --window --decode --record scenarios/mine.pad \
+#                        scenarios/empty.pad
+#
+# The player has no events, so the pad reads whatever you press, and the
+# recorder writes it down in the timebase the player consumes.
+
+drain 300

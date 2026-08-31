@@ -1,0 +1,58 @@
+# The reported crash: skip the intro, START, then cross on NEW GAME.
+#
+# Reproduces, exactly, the register state from the original hand-played
+# session:
+#
+#   first bad access: read32 at 0x461CC570
+#   a0=0x461CC578 a1=0x00000046 a2=0x4612ED37 a3=0x461CC570 ra=0x0002E2F8
+#
+# ra 0x0002E2F8 is psp_func_0002E1D8's call to psp_func_0002E790, a vertex
+# decoder; a2 is a vertex-type word that arrived holding the float 9403.30.
+# Two sibling call sites in the same function fault too -- 0x0002E318 and
+# 0x0002E288 -- so the whole clipper is being fed garbage, not one call.
+#
+# Pair every run of this with scenarios/title-idle.pad. Without a run that
+# goes the same distance and presses nothing, this proves nothing.
+#
+#   scripts/09-replay.sh --decode --stop 1 scenarios/new-game.pad
+
+drain 300
+minhold 4
+
+  mark "circle: skip the intro movie"
+  @50 tap circle
+  @150 tap circle
+  @250 tap circle
+  @350 tap circle
+  @450 tap circle
+  @550 tap circle
+  @650 tap circle
+  @750 tap circle
+  @850 tap circle
+  @950 tap circle
+  @1050 tap circle
+  @1150 tap circle
+  @1250 tap circle
+  @1350 tap circle
+  @1500 mark "start: title screen -> main menu"
+  @1550 tap start
+  @1650 tap start
+  @1750 tap start
+  @1850 tap start
+  @1950 tap start
+  @2050 tap start
+  @2150 tap start
+  @2250 tap start
+  @2350 tap start
+  @2500 mark "cross: NEW GAME -- the fault follows within ~70 polls"
+  @2550 tap cross
+  @2700 tap cross
+  @2850 tap cross
+  @3000 tap cross
+  @3150 tap cross
+  @3300 tap cross
+  @3450 tap cross
+  @3600 tap cross
+  @3750 tap cross
+  @3900 tap cross
+  @6000 stop

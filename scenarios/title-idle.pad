@@ -1,0 +1,12 @@
+# The control. Reach wherever the game gets to on its own, press nothing, stop.
+#
+# This is not optional. Without a run that goes the same distance and touches
+# no buttons, "New Game causes the fault" and "anything past forty seconds
+# causes the fault" produce identical evidence. Run it whenever new-game.pad
+# reproduces something, and expect `bad mem: 0`.
+
+drain 300
+
+  mark "idle: no input will be delivered in this run"
+  @900  mark "still idle"
+  @1800 stop

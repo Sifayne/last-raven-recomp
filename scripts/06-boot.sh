@@ -75,6 +75,14 @@ cc "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT \
    "$OUT/aclr_funcs.o" "$OUT/aclr_imports.o" "$LIB" \
    -o "$OUT/boot" -lm -lpthread $HOST_LIBS
 
+# Build without running, so 09-replay.sh reuses this recipe instead of copying
+# it. The recipe is worth not duplicating: it probes SDL2 *before* compiling
+# boot.c (see above), and a second copy would drift out of that ordering.
+if [ -n "${BOOT_NO_RUN:-}" ]; then
+    info "built $OUT/boot"
+    exit 0
+fi
+
 info "booting"
 # The ISO is optional: without it the raw UMD device has nothing behind it and
 # reads fail, which is worth being able to run deliberately.
