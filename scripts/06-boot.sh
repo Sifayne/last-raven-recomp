@@ -22,6 +22,19 @@ LIB="$ROOT/build/psprecomp/libpsprecomp.a"
 [ -f "$LIB" ] || die "no runtime library; run scripts/build-tools.sh first"
 [ -f "$OUT/aclr_funcs.o" ] || die "no emitted module; run scripts/04-emit-build.sh first"
 
+# Rebuild the runtime library before linking against it.
+#
+# This script compiles the boot host and links; it did not build the library,
+# so an edit to src/hle or src/render was linked in only if the caller happened
+# to run cmake first. It looks like a full build -- "compiling boot host",
+# "linking", a fresh set of numbers -- and silently measures the previous
+# library. It cost two wrong attributions in one afternoon: a change was
+# declared harmless, then declared harmful, on runs that had neither.
+#
+# Cheap when nothing changed: ninja says "no work to do".
+info "building runtime library"
+cmake --build "$ROOT/build/psprecomp" -j"$(nproc)" >/dev/null
+
 # The presentation layer is optional at build time as well as run time: with
 # SDL2 installed the window, pad and audio exist; without it the host builds
 # and runs exactly as it did before. PSPRECOMP_WINDOW selects it at run time.
