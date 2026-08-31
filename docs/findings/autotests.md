@@ -105,16 +105,21 @@ it runs is the whole class of bug this project keeps writing down:
    All 50 of `matrix`'s lines are byte-identical to real PSP output: every
    `vtfm`, `vhtfm`, `vmmul`, `vmidt`, `vmscl` and transpose case.
 
+   Where `cpu/vfpu` finished. Every remaining difference is closed — two are
+   the transcendental tables ruled out on licence grounds (18), one is
+   upstream's own committed data (9) — so there is no open VFPU gap that is
+   ours:
+
    | test | stopped | ours / expected |
    |---|---|---|
    | `matrix` | ExitGame | **MATCHES hardware** |
    | `gum` | ExitGame | **MATCHES hardware** |
-   | `prefixes` | ExitGame | 26 / 26 lines, **1** differs |
-   | `vregs` | ExitGame | 30 / 48 lines — stale test data, see 9 |
    | `colors` | ExitGame | **MATCHES hardware** |
    | `vavg` | ExitGame | **MATCHES hardware** |
    | `convert` | ExitGame | **MATCHES hardware** |
-   | `vector` | ExitGame | 5329 / 5329 lines, 33 differ |
+   | `vector` | ExitGame | 5329 / 5329 lines, **8** differ — `vasin` ULP, closed |
+   | `prefixes` | ExitGame | 26 / 26 lines, **1** differs — `vsin` ULP, closed |
+   | `vregs` | ExitGame | 30 / 48 lines — stale test data, see 9 |
 
    Six bugs so far, none of which the differential oracle could see, because it
    runs the same decoder and the same `psp_vfpu_*` helpers on both sides:
@@ -526,3 +531,135 @@ faithful execution of that test.
     VFPU instruction involved was already correct. The bug was one register's
     value at the moment before any of them ran, and no amount of looking at
     `vcmp` or `vcmov` would have found it.
+
+20. **Past `cpu/vfpu`: the whole suite, surveyed.** `cpu/vfpu` is eight tests.
+    The tree has **432 with recorded hardware output**, and nothing had ever
+    looked at the other 424.
+
+    `scripts/08-autotest-sweep.sh` runs all of them: same comparison as
+    07, but with a per-test wall timeout and a reduced budget, writing a TSV
+    instead of a report. That split is deliberate — 07 is for working a suite
+    at the real budget, and a survey where an unknown fraction of the tests
+    exercise unimplemented subsystems needs a timeout more than it needs
+    precision. **Read the sweep as a map, not a verdict**: the reduced budget
+    truncates tests that legitimately run long, and `cpu/vfpu/vector` reports
+    3281 differing lines there against 8 at the full budget. Anything
+    interesting gets re-run through 07 before a line of code is written.
+
+    The useful column is the third one. A test differing by one line is one bug
+    away; a test differing by five hundred is an unimplemented library. Ranking
+    by it is what turned 400+ failures into a short list worth reading.
+
+    What the survey says, and it is better news than the headline: **384 of 432
+    run to completion** and call `sceKernelExitGame`, with 44 stopped only by
+    the sweep's reduced budget. Exactly **two** hit an invalid instruction and
+    none hit an unimplemented VFPU op, so decode coverage is essentially done.
+    Almost everything that differs, differs because a firmware library is
+    missing, not because the CPU is wrong.
+
+    Where it stands after the fixes in 21 and 22 — **32 of 432**, up from 14:
+
+    | | matching | of |
+    |---|---|---|
+    | `gpu` | **22** | 88 |
+    | `cpu` | 8 | 16 |
+    | `misc`, `string` | 2 | 8 |
+    | `threads` | 0 | 127 |
+    | `audio` | 0 | 58 |
+    | `video` | 0 | 30 |
+    | everything else | 0 | 105 |
+
+    `threads` is the largest untouched block and the one the seam list at the
+    top of this file already predicts will not do well: threads run to
+    completion at their start point, which is sequential semantics rather than
+    scheduling. That is a real limit of the harness, not 127 separate bugs, and
+    it will not move until the interpreter runs on the boot host's scheduler.
+
+    **The sweep's first version scored its own fixes as failures.** It reported
+    `NOOUTPUT` for an empty result *before* comparing — but several `gpu` tests
+    check a framebuffer rather than text and their `.expected` is empty, so
+    silence is the correct answer. Nineteen tests went from wrong to right and
+    the tally did not move, because the classifier called the correct answer a
+    failure. `07-autotests.sh` had the same ordering and the same latent bug;
+    every `.expected` in `cpu/vfpu` is non-empty, which is the only reason it
+    never showed. Compare first, then interpret emptiness.
+
+21. **The COP1 conversion family, and the FPU control registers.** `cpu/fpu`
+    was the first thing the survey turned up, and it stopped dead on an
+    unimplemented instruction.
+
+    Three of the five float-to-integer ops were decoded and implemented
+    nowhere — `round.w.s`, `ceil.w.s`, `floor.w.s`. They differ from
+    `trunc.w.s` only in rounding mode, so all five now share one helper that
+    takes the mode explicitly.
+
+    `cvt.w.s` was aliased to `trunc.w.s`, which is right only when FCR31's RM
+    field happens to say round-toward-zero. **The PSP comes up in
+    round-to-nearest**, so the alias was wrong by default rather than in a
+    corner.
+
+    The saturation was wrong too, and silently: a C cast of an out-of-range
+    float to `int` is undefined, and on x86 yields `0x80000000` for
+    *everything* out of range, including large positives where MIPS answers
+    `0x7FFFFFFF`. The range check is done in float against 2^31 so that it does
+    not depend on the conversion it is guarding.
+
+    `sqrt.s(+inf)` answered NaN. `psp_fsqrt` is a general helper that returns
+    NaN for an infinity — correct for a rasteriser — so the rule went into the
+    COP1 path rather than into the helper, the same split the VFPU square roots
+    got in 17.
+
+    Separately: **the FPU control registers were one variable.** All 32
+    addresses aliased to `fcr31`, so `cfc1 $t, $0` returned whatever had last
+    been written to the status register. There are two real ones — `fcr0` is a
+    read-only revision word reading `0x00003351`, and `fcr31` is the
+    control/status; everything else, including 25..28 which MIPS32 defines as
+    FCCR/FEXR/FENR, reads zero and ignores writes.
+
+    FCR31 is not fully writable either, and `cpu/fpu/fcr` measures exactly
+    which bits are: RM, flags, enables, cause, FCC and FS are kept; FO, FN,
+    FCC1-7 and `0x001C0000` read back as zero. Mask `0x0181FFFF`, nothing
+    preserved outside it, reset `0x00000E00`.
+
+    ```
+    cpu/fpu/fpu   342 -> 6 differing lines   (and now runs to completion)
+    cpu/fpu/fcr    36 -> 12
+    ```
+
+    **What is left in both is one thing, and it is the interesting half.**
+    FCR31 currently *stores* state without *affecting* anything. Hardware gives
+    four different `mul.s` results for the four rounding modes, and flushes
+    denormal results to zero when FS is set. Neither is modelled. That is a
+    real piece of work — it means the arithmetic path has to consult the
+    control register — and it is what the remaining lines of both tests are.
+
+22. **One missing firmware call was worth nineteen tests.**
+    `sceDisplayGetFrameBuf` was not implemented, and an unregistered firmware
+    call returns without touching its out-parameters, so the caller reads back
+    whatever its stack held. pspautotests' screenshot helper asks for the pixel
+    format, gets stack garbage, and prints `ERROR: Invalid format 2928` once
+    per scanline where hardware prints nothing.
+
+    This is the failure state.md names as the shape of most bugs here — a call
+    that looks like it succeeded while writing nothing — and it is worth
+    recording how cheap the fix was against how it presented: nineteen `gpu`
+    tests, each differing from hardware by one enormous line, all of it one
+    absent function.
+
+23. **The near misses that are not bugs.** Three `cpu` tests differ by one or
+    two lines and none of the three is worth fixing as stated:
+
+    - `cpu/cpu_alu/cpu_branch` prints `jalr: non-ra: 00000420` where hardware
+      prints `08804420`. That is the **module load address**, not `jalr`: we
+      load test modules at 0 and hardware at `0x08800000`. Every PC-relative
+      behaviour in the test agrees; this is the one line that prints an
+      absolute address.
+    - `cpu/icache/icache` differs only in that hardware's `.expected` has no
+      trailing newline. A capture artifact, like the CRLF in `vector`.
+    - `cpu/lsu/lsu` emits one extra blank line at the very end. Per-test, not
+      systemic — `cpu/vfpu/matrix` ends byte-exact — so it is one stray
+      separator, not our stdout adding a newline.
+
+    Recorded so the next reader does not spend the afternoon on them. The
+    ranking that surfaced them is still the right ranking; it just needs the
+    top of the list read with judgement.

@@ -102,10 +102,19 @@ for f in "${ELFS[@]}"; do
         gotc="$REPORTS/07-${name%.*}.cmp"
         tr -d '\r' < "$exp" > "$expc"
         tr -d '\r' < "$got" > "$gotc"
-        if [ ! -s "$got" ]; then
-            verdict="NO OUTPUT (test ran but printed nothing)"
-        elif diff -q "$gotc" "$expc" >/dev/null 2>&1; then
+        # Compare *before* concluding anything from an empty file.
+        #
+        # "printed nothing" is only a failure when hardware printed something.
+        # Several gpu tests check a framebuffer rather than text and their
+        # .expected is empty, so silence is the correct answer -- and reporting
+        # it as NO OUTPUT hid the fix that produced it. Implementing
+        # sceDisplayGetFrameBuf turned nineteen of them from a flood of
+        # "ERROR: Invalid format" into exactly the silence hardware produces,
+        # and this branch called every one of them a failure.
+        if diff -q "$gotc" "$expc" >/dev/null 2>&1; then
             verdict="MATCHES hardware"
+        elif [ ! -s "$got" ]; then
+            verdict="NO OUTPUT (test ran but printed nothing)"
         else
             # `|| true` because diff exits 1 when the files differ, pipefail
             # promotes that to the whole substitution, and set -e then ends the
