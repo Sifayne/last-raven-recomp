@@ -108,8 +108,8 @@ it runs is the whole class of bug this project keeps writing down:
    | test | stopped | ours / expected |
    |---|---|---|
    | `matrix` | ExitGame | **MATCHES hardware** |
+   | `gum` | ExitGame | **MATCHES hardware** |
    | `prefixes` | ExitGame | 26 / 26 lines, **1** differs |
-   | `gum` | ExitGame | 45 / 45 lines, 8 differ |
    | `vregs` | ExitGame | 30 / 48 lines, 34 differ |
    | `colors` | `.word 0xD480000C` | 1 / 5 lines |
    | `vavg` | `.word 0xD0470480` | no output |
@@ -201,11 +201,32 @@ it runs is the whole class of bug this project keeps writing down:
    anywhere, and indistinguishable from the prefix gap above until that one was
    closed.
 
-8. **What is left in `gum` is a layout, not a value.** With both of the above,
-   `checkGlRotate` computes the right rotation -- `-1.0` and `0.000767`, the
-   hardware figures -- but places it transposed and two columns over. Eight
-   lines, all of them present and correct in the wrong slot. That is a separate
-   bug from anything above and has not been chased yet.
+8. **`gum` matches hardware too.** Two more fields read from the wrong bits,
+   both in the decoder and both silent.
+
+   - **A quad load/store takes one bit for the register, not two.** The single
+     forms (`lv.s`/`sv.s`) put the top two bits of `vt` at 1..0; the quad forms
+     put *one* there, because a quad always starts at row 0 and has no use for
+     the row bit -- bit 1 is a cache write-through hint. Reading it as part of
+     the register makes `sv.q C700` store from row 2, so pspgl's `glGetFloatv`
+     returned a matrix with every value correct, transposed and rotated by two.
+   - **`vrot`'s control field was overwritten after decoding.** It is a 5-bit
+     field at bits 20..16, not an immediate, and the decoder sets it correctly
+     inside the opcode switch -- then a `default:` arm after the switch assigns
+     `SIMM16(word)` to the same place. For `glRotatef` (0xF3A434B4) that turned
+     0x04 into 0x14, and bit 4 is "negate the sine". The rotation came out with
+     the right magnitude and the wrong handedness.
+
+   The second was found with a new instrument rather than by reasoning.
+   `PSPRECOMP_VDUMP=<hex pc>` prints the VFPU register file when execution
+   reaches an address; `--regs` covers the GPRs and nothing else, and three
+   rounds of deducing a matrix backwards from what a run eventually printed had
+   produced two confident wrong answers. Reading the file at the instruction
+   showed `vrot` writing a correctly-sized, wrongly-signed sine in one step.
+
+   A replay harness disagreeing with the real run is what pointed at the
+   decoder at all: calling the same ops in the same order from C produced the
+   hardware answer, so the ops were right and the *operands* were not.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a
