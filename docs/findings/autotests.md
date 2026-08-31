@@ -114,7 +114,7 @@ it runs is the whole class of bug this project keeps writing down:
    | `colors` | ExitGame | **MATCHES hardware** |
    | `vavg` | ExitGame | **MATCHES hardware** |
    | `convert` | ExitGame | **MATCHES hardware** |
-   | `vector` | ExitGame | 5329 / 5329 lines, 61 differ |
+   | `vector` | ExitGame | 5329 / 5329 lines, 33 differ |
 
    Six bugs so far, none of which the differential oracle could see, because it
    runs the same decoder and the same `psp_vfpu_*` helpers on both sides:
@@ -426,30 +426,38 @@ it runs is the whole class of bug this project keeps writing down:
     vector's dot-family differences went with it, and the five tests that
     already matched still do.
 
-17. **What is left in `vector`: 61 lines, in two groups, neither a gap in the
-    instruction set.**
+17. **The square roots were edge cases, not precision.** 28 of the 36
+    "transcendental" lines turned out to need no table at all. `vsqrt` and
+    `vrsq` classify their argument before computing anything, and the classes
+    are not what a C library does:
 
-    - **36 lines of `vsqrt`, `vrsq` and `vasin`.** The hardware's transcendental
-      approximations are table-driven -- the same class as its sine, which is
-      the one line still differing in `prefixes`. Reproducing them means
-      carrying the tables, which is a different kind of change from
-      implementing an instruction.
-    - **25 lines of `checkCompare`, which are one bit.** The test does
-      `vcmp.t EQ` and then reads condition-code bits 0..3 with four `vcmov`s.
-      A triple compare writes bits 0..2 and the any/all pair; bit 3 is not
-      written, and hardware reads it back as 1. Nothing in the test writes it
-      first -- the only `vcmp` before that point is the one inside the same
-      function -- so it is the *initial* value of the VFPU condition-code
-      register on a fresh thread, in the same way the vector registers start as
-      NaN rather than zero.
+    | input | `vsqrt` | `vrsq` |
+    |---|---|---|
+    | zero or denormal, either sign | +0 | ±inf, sign preserved |
+    | negative | NaN | *negative* NaN |
+    | +inf | +inf | +0 |
+    | NaN | NaN | NaN |
 
-      Two explanations fit that single bit equally well: the CC starts with bit
-      3 set, or `vcmp` writes all four lane bits regardless of operand width
-      with the unused ones comparing equal. Nothing else in the suite
-      distinguishes them, and inventing a whole register's reset value from one
-      observation is the kind of guess this file exists to record instead of
-      make. The bits a comparison *does* affect are now written and the rest
-      preserved, which is right under either reading.
+    `psp_fsqrt` is a general helper -- it answers 0 for a negative and NaN for
+    an infinity, which is right for a rasteriser and wrong for this unit -- so
+    the rules went into the VFPU path rather than into it. Ordinary values
+    already agreed to the last bit; only the edges did not.
+
+18. **What is left in `vector`: 33 lines, and neither group is an instruction.**
+
+    - **8 lines of `vasin`, at two inputs out of 256.** For x = ±0.828125 the
+      exact answer is 0.621184528, which correctly rounds to 0.621185 -- what
+      we print. Hardware prints 0.621184, so its result is the float *below*
+      the correctly-rounded one: the approximation is a unit in the last place
+      out, and we are right by accident of being exact. Every formulation of
+      the real maths gives our answer; reproducing hardware's means carrying
+      its tables, which for asin alone are about 1.3 million entries. They are
+      an exhaustive characterisation of the silicon, not something derivable,
+      and vendoring several megabytes of another project's generated data is a
+      decision worth making deliberately rather than as the tail of a bug hunt.
+      The same applies to the sine behind the one remaining line of `prefixes`.
+    - **25 lines of `checkCompare`, which are one bit** -- see above. Still the
+      initial VFPU condition-code state, still two readings that fit it equally.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a
