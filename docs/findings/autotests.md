@@ -1452,3 +1452,55 @@ faithful execution of that test.
     `semaphores/semaphores` -- which measures the copy alongside the two
     argument rules already implemented -- goes to 0 with it, and
     `scheduling/scheduling` 46 to 36.
+
+    ### `threads/threadend`, and the callbacks that were never delivered
+
+    18 differing lines to 2. Two small corrections and one absent feature.
+
+    **`sceKernelWaitThreadEnd` refuses three ids it accepted.** Zero does not
+    mean "the current thread" here the way it does for a priority change, and a
+    thread cannot wait for itself -- both `80020197`, where an id naming nothing
+    is `80020198`. And a thread that was *never started* will never end, so the
+    wait is refused outright with `800201a2` rather than timing out. A thread
+    that has *finished* is dormant too and returns its exit status, so the test
+    is "was it ever started", which the very next line of the file checks.
+
+    **A thread's status comes from the scheduler.** `ReferThreadStatus` built it
+    out of threadman's own field, which records that a thread was started and
+    never that it parked, so a thread inside `sceKernelSleepThread` read back
+    READY. The test isolates it to one line by printing the same thread twice
+    with nothing between but a start -- `before start status=00000010`,
+    `after start status=00000004` -- on a thread whose whole body is a sleep.
+
+    **Callbacks were registered and never delivered.** The old comment was
+    honest about it and wrong about the consequence: it argued that reporting
+    zero from `sceKernelCheckCallback` was "accurate rather than a stub" because
+    nothing here raises a callback. `sceKernelNotifyCallback` raises one, and it
+    was not registered at all.
+
+    The handler's three arguments are pinned by a single line of
+    `callbacks/notify`, which fires it 10002 times:
+
+    ```
+     * cbFunc hit: 00002712, 00000001, 00000000
+    ```
+
+    0x2712 is 10002 -- the accumulated count, entered *once* -- then the *last*
+    notify argument and the common pointer given at create. The intermediate
+    arguments are not kept. Two more rules come free with it: a callback is
+    delivered only to the thread that created it, and `sceKernelCheckCallback`
+    reports *whether* anything ran rather than how many (`With 2 pending:
+    00000001` after two handlers).
+
+    `sceKernelDeleteCallback` answered OK and deleted nothing, which is the kind
+    of stub that stays invisible until something downstream starts working:
+    with notify implemented, a notify on a deleted callback succeeded.
+
+    Suite: 2,252 differing lines to 2,195. Six tests improved, none regressed --
+    `threadend` 18 to 2, `callbacks/count` 22 to 10, `notify` 28 to 18,
+    `check` 13 to 6, `delete` 12 to 6, `cancel` 9 to 3. `cancel` first went
+    *up* by two, which was an accidental match lost rather than a fault: it
+    reads the notify count back, and a count that was always zero happened to
+    agree until it became real.
+
+    The two lines left are one `[x]`/`[r]`.
