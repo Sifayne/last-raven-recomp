@@ -110,7 +110,7 @@ it runs is the whole class of bug this project keeps writing down:
    | `matrix` | ExitGame | **MATCHES hardware** |
    | `gum` | ExitGame | **MATCHES hardware** |
    | `prefixes` | ExitGame | 26 / 26 lines, **1** differs |
-   | `vregs` | ExitGame | 30 / 48 lines, 34 differ |
+   | `vregs` | ExitGame | 30 / 48 lines — stale test data, see 9 |
    | `colors` | `.word 0xD480000C` | 1 / 5 lines |
    | `vavg` | `.word 0xD0470480` | no output |
    | `convert` | budget | 1 / 108 lines |
@@ -227,6 +227,35 @@ it runs is the whole class of bug this project keeps writing down:
    A replay harness disagreeing with the real run is what pointed at the
    decoder at all: calling the same ops in the same order from C produced the
    hardware answer, so the ops were right and the *operands* were not.
+
+9. **`vregs` is not ours to fix: the binary and the expected output are from
+   different builds.** Both differences were chased to the committed test data,
+   and our execution of the `.prx` is exactly right.
+
+   - The four lines containing `inf` come from `funNumbers[10]`, which is
+     `1e+07` in `vregs.prx` and `100.0f` in `vregs.cpp`. The test converts its
+     fill values to half-precision at run time, and `float_to_half_fast3` quite
+     correctly clamps 1e7 to half-infinity -- we execute that conversion right,
+     instruction for instruction. Patch that one word in a copy of the binary
+     and all 30 lines we emit match hardware byte for byte.
+   - The 18 missing lines are three sections that the binary does not contain.
+     `main` at 0x17D0 makes exactly five calls -- FillAllVectorRegs, TestDouble,
+     TestDoubleSwizzle, TestUpgrade, TestCombine -- and returns. `TestVscl`,
+     `TestReuse` and `TestSwizzle2` are in the source and in the `.expected`,
+     and not in the `.prx`. Nothing we emit builds a `vscl` word into the code
+     buffer because nothing in the binary asks for one.
+
+   So `differs: 34 line(s)` for vregs is a statement about upstream's committed
+   data, not about this project. Left in the table as measured rather than
+   suppressed -- a hand-maintained exclusion list would hide a real regression
+   the first time one landed -- but it should not be read as work outstanding.
+
+   Worth keeping as method: the same two moves settled this and the gum bugs.
+   Replay the sequence in isolation and see whether it agrees with hardware,
+   which separates "this function is wrong" from "this function is being told
+   the wrong thing"; and where the disagreement is in the data, patch the datum
+   in a copy of the binary and re-run, which turns a hypothesis into a
+   measurement.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a
