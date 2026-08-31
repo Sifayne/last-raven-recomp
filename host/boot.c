@@ -650,6 +650,7 @@ int main(int argc, char **argv) {
      *     reaches through it for the reent structure, so it has to be real
      *     before any allocation, not just before the first C++ object. */
     memset(&psp_cpu, 0, sizeof psp_cpu);
+    psp_cpu_reset_fp();      /* a fresh thread's float/vector registers are NaN */
 
     /* The stack is *allocated*, not just pointed at the top of RAM.
      *
