@@ -794,9 +794,9 @@ faithful execution of that test.
     mattered would have been worse than not writing it.
 
 
-26. **`threads`: waits block, and the suite opens.** 0 of 127 to **7**, and
-    8,057 differing lines to **6,931**. Across all 432 the oracle went 35 to
-    **43** matching and 80,466 to 77,818 differing lines. What follows is the
+26. **`threads`: waits block, and the suite opens.** 0 of 127 to **21**, and
+    8,057 differing lines to **4,219**. Across all 432 the oracle went 35 to
+    **57** matching and 80,466 to 75,118 differing lines. What follows is the
     part that is reusable — the numbers are in the commits.
 
     ### The architecture question 25 left open, and why it was forced
@@ -933,22 +933,94 @@ faithful execution of that test.
 
     | subsystem | before | after | |
     |---|---|---|---|
-    | `scheduling` | 734 | 485 | dispatch suspend/resume |
+    | `lwmutex` | 922 | **0** | all 8 match |
+    | `mutex` | 419 | **68** | 3 of 10 match |
     | `semaphores` | 210 | **76** | 4 of 10 match |
-    | `mutex` | 419 | **68** | 3 of 10 match — implemented |
+    | `mbx` | 671 | **127** | 2 of 9 match |
+    | `msgpipe` | 1001 | **193** | 2 of 10 match |
+    | `vpl` | 1138 | 569 | 2 of 11 match; see below |
+    | `scheduling` | 734 | 461 | dispatch suspend/resume |
     | `events` | 300 | 214 | |
-    | `threads` | 1178 | 1093 | |
-    | `msgpipe` | 1001 | 914 | *not implemented* |
-    | `vpl` | 1138 | 1077 | *not implemented* |
-    | `lwmutex` | 922 | 922 | *not implemented* |
-    | `mbx` | 671 | 680 | *not implemented* |
+    | `threads` | 1178 | 1097 | |
+    | `tls` | 453 | 441 | *not implemented* |
+    | `fpl` | 404 | 393 | *not implemented* |
+    | `vtimers` | 306 | 306 | *not implemented* |
+    | `alarm` | 90 | 99 | *not implemented* |
 
-    The remaining blocks are object types that do not exist, and the census is
-    wider than the five 25 names — `vtimers` (12 tests), `tls` (6) and `alarm`
-    (4) are absent too. `threads/fpl/allocate` is the only test in the suite
-    still emitting nothing, and it is waiting on a pool that was never created.
+    Four types still absent — `fpl`, `vtimers`, `tls`, `alarm` — and they are
+    the census 25 missed, not the five it named. `threads/fpl/allocate` is the
+    only test in the suite still emitting nothing, and it is waiting on a pool
+    that was never created.
 
-    ### `mutex` is done, and it says what the next one will cost
+    **`vpl/order` is 278 of vpl's remaining 569 and is a different kind of
+    work.** It walks the pool's free list *in guest memory* — `VPL bottom
+    block: at 00000018, next->000000f8, 000000e0` — so the kernel's node layout
+    and placement are observable, not just the totals. The allocator here keeps
+    its bookkeeping host-side and writes nothing into the pool. That is the one
+    remaining piece with a known shape.
+
+    ### Six object types, six attribute masks, no two the same
+
+    | type | legal attribute bits |
+    |---|---|
+    | semaphore | `0x1FF` |
+    | event flag | `0x2FF` minus `0x100` |
+    | mutex | `0xBFF` |
+    | lwmutex | `0x3FF` |
+    | vpl | `0x43FF` |
+    | mbx | `0x5FF` |
+
+    Every one measured from its own capture, and every pair disagrees. The
+    mutex refuses bit 10 and accepts bit 11; mbx does the reverse. An event
+    flag refuses bit 8 where every other type accepts it. **Read the capture
+    for the type you are implementing, not the one next to it** — the one time
+    this project assumed two objects shared a rule it took the game from 633 GE
+    lists to 0.
+
+    ### What the four types cost, and the three shapes they came in
+
+    Roughly a file each, no scheduler changes, and the work was reading rather
+    than designing. What made each hard was different:
+
+    - **`lwmutex` — state the guest owns.** All eight tests match. The count,
+      owner and attributes live in a 32-byte workarea and the uncontended lock
+      is arithmetic on guest memory with no kernel involvement. The tests prove
+      it by running every case twice, once against a hand-forged workarea with
+      a zero uid, which locks and unlocks perfectly while `Refer` on it answers
+      NOT_FOUND. Three consequences that had to be separated: a uid of **zero**
+      is a legal user-space lwmutex while a **non-zero uid that resolves to
+      nothing** is a deleted one; a memcpy of a live workarea can be *locked*
+      but not *deleted*; and the pre-6.00 `sceKernelTryLockLwMutex` answers one
+      code for all fifteen of its failures where the `_600` export gives the
+      specific one.
+    - **`mbx` — a circular list threaded through the guest's own messages.**
+      The kernel stores no copy: the queue is a linked list in the message
+      headers, and it *loops* — one message reports `next=ITSELF`, two report
+      `OTHER` and `FIRST`. A NULL-terminated list would differ on every line.
+    - **`vpl` and `msgpipe` — arithmetic that is the contract.** A vpl's
+      overhead is 32 bytes per pool and 8 per allocation with 8-byte alignment,
+      and `round_up(size, 8) - 32` reproduces all eleven pool sizes the create
+      test prints. A msgpipe has no framing at all despite the name: 256 bytes
+      into a 0x1000 pipe leaves `free=f00`.
+
+    Three rules that are distinctions rather than behaviours, each of which a
+    reasonable implementation would have flattened:
+
+    - A **negative** length is a different mistake from one merely bigger than
+      the pipe, and gets a different code.
+    - A pipe created with **no buffer** answers FULL rather than too-big, even
+      to requests that are obviously too big.
+    - A wait that **timed out** writes `bytes = 0` where an argument failure
+      leaves the caller's value alone. The tests pre-seed `0x1337` to tell them
+      apart.
+
+    And one crash worth recording because of where it hid: `mpp_take` updated
+    the ring cursor *before* checking the length, so a zero-length receive on a
+    zero-size pipe — both legal, both in the tests — took a remainder by zero.
+    It cost 45 lines of `tryreceive.expected`, which simply stopped mid-file
+    with no other symptom.
+
+    ### `mutex` was the first, and it said what the next one would cost
 
     419 differing lines to 68 in one file, `src/hle/kernlock.c`, with three
     tests matching exactly. Nothing about it needed a scheduler change; it needed
