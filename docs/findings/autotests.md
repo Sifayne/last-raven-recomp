@@ -111,8 +111,8 @@ it runs is the whole class of bug this project keeps writing down:
    | `gum` | ExitGame | **MATCHES hardware** |
    | `prefixes` | ExitGame | 26 / 26 lines, **1** differs |
    | `vregs` | ExitGame | 30 / 48 lines — stale test data, see 9 |
-   | `colors` | `.word 0xD480000C` | 1 / 5 lines |
-   | `vavg` | `.word 0xD0470480` | no output |
+   | `colors` | ExitGame | **MATCHES hardware** |
+   | `vavg` | ExitGame | **MATCHES hardware** |
    | `convert` | budget | 1 / 108 lines |
    | `vector` | budget | 1045 / 5329 lines |
 
@@ -256,6 +256,43 @@ it runs is the whole class of bug this project keeps writing down:
    the wrong thing"; and where the disagreement is in the data, patch the datum
    in a copy of the binary and re-run, which turns a hypothesis into a
    measurement.
+
+10. **`colors` and `vavg` match hardware.** Four of the eight now do. Two
+    groups of instructions and one piece of machine state:
+
+    - **Unaligned quad load/store** (`lvl.q`/`lvr.q`, `svl.q`/`svr.q`). A quad
+      is 16-byte aligned, so a vector straddling two blocks takes a pair of
+      instructions: one fills the lanes at and below the address, the other the
+      lanes at and above, and each leaves the rest alone. Both tests hit these
+      long before their own subject matter -- they are in the C library's
+      block copy, 16 and 32 uses respectively -- which is why neither got as
+      far as printing anything interesting.
+    - **`vfad`, `vavg` and the colour packs** (VFPU4 rs=2). `vfad` sums the
+      lanes and `vavg` averages them; both are a dot product against a constant
+      vector on hardware, which is worth writing that way because it keeps one
+      property a loop loses: `vavg` of a *single* lane is zero, since the
+      constant for size 1 is 0 rather than 1. `vt4444`/`vt5551`/`vt5650` pack
+      four 8888 pixels into four 16-bit ones and are the only VFPU ops that
+      read the register file as integers.
+    - **A fresh thread's float and vector registers are NaN, not zero.** The
+      PSP fills all 32 COP1 and all 128 VFPU registers with 0x7F800001 for a
+      new thread context. That is directly observable: `vavg` writes one lane
+      with `vavg.p S000` and stores four with `sv.q C000`, so the other three
+      print whatever the register file came up with -- `nan` on hardware,
+      `0.000000` from a zeroed file. Every one of vavg's 24 lines turned on it.
+
+      The general-purpose half of the same reset -- 0xDEADBEEF in every GPR --
+      is deliberately not copied. Nothing measured needs it, and seeding every
+      register with something that looks like a plausible pointer would turn
+      "the guest used an uninitialised register" from a null-page fault into a
+      wild write.
+
+    The decode test's example of a "still genuinely unmapped" encoding had to
+    move again, for the second time: it was opcode 0x35, which is now the
+    unaligned quad load. The comment above it already recorded the same thing
+    happening to 0x34. Choosing that example by what the dispatch actually
+    leaves unmapped, rather than by what happened to be missing on the day,
+    would have avoided both.
 
 `nest refused` in a report is the bounded-execution signal: a callback or
 thread start beyond the nesting limit did not run, so the result is not a
