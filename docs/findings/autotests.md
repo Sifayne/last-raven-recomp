@@ -1276,3 +1276,88 @@ faithful execution of that test.
     There is nothing to stop but there is still something to free. The id
     checks are terminate's, including the one that forbids a thread from
     ending itself.
+
+    ### `threads/terminate`: three calls compared, five rules found
+
+    18 differing lines to 3. The test is built as a comparison -- it runs ten
+    thread states through `sceKernelTerminateThread`,
+    `sceKernelTerminateDeleteThread` and `sceKernelDeleteThread` and prints all
+    thirty answers -- and comparison is what makes it productive: each rule
+    shows up as one column differing from the other two.
+
+    **Delete refuses what it would have to stop.** It is the only one of the
+    three that answers `800201a4` to a thread that is ready, waiting, suspended
+    or running, including the caller itself, which is what an id of 0 names
+    here. Ours accepted all of them.
+
+    **A thread that finishes inside `sceKernelStartThread` was marked runnable
+    again on the way out.** `psp_sched_spawn` performs the reschedule-at-the-
+    system-call for a thread that outranks its starter -- it has done so all
+    along, with a comment saying why -- so a short thread can be *finished*
+    before that call returns. `hle_StartThread` then assigned `TH_READY` over
+    the `TH_DORMANT` its own end hook had just written. Moving the bookkeeping
+    to before the spawn fixed `Finished:` in two tests. Worth naming the shape:
+    the missing piece was not a rule but an ordering, and the code that was
+    wrong looked like initialisation.
+
+    **Terminating a thread ends it.** Ours stopped the thread and left everything
+    waiting on it parked for the rest of the run. All the ways a thread reaches
+    an end now go through one function, and they differ only in the status left
+    behind -- `0x800201AC` for terminate, which is not a wake code but the
+    *exit status*: `threads/refer` reads it back out with
+    `sceKernelReferThreadStatus` (`exit=800201ac`) and `threads/threadend` gets
+    the same value out of `sceKernelWaitThreadEnd`, which returns the exit
+    status. Two observations, one value. A thread freed out from under a wait
+    answers the same, and `threads/threadend` puts that on consecutive lines
+    with `80020198` for a thread that was already gone when the wait began.
+
+    The three lines left are one artifact, and it is measured rather than
+    guessed: `checkpoint()` calls `sceKernelGetSystemTimeWide`, which costs
+    `PSP_READ_TICK_US` -- 100us of virtual guest time. Two checkpoints exhaust
+    the test's `sceKernelDelayThread(200)`, so the main thread resumes and exits
+    before the third line is written. Hardware spends microseconds there. The
+    same granularity is what `sched.c` already records about the `[x]`/`[r]`
+    column.
+
+    ### The two rules `threads/change` needed, and the corpse in the way
+
+    Correcting the start ordering above cost `threads/change` 98 lines before it
+    gained any, which is the useful kind of regression: it had been passing for
+    a reason that was not the rule. Three findings came out of the file, and the
+    last one is not in threadman at all.
+
+    **`sceKernelStartThread` distinguishes three bad ids where we had one.**
+    Zero is `80020197`, an id naming nothing is `80020198`, and a thread that is
+    already running is `800201a4` -- `threads/start.expected` prints them on
+    consecutive lines as `NULL`, `Deleted`/`Invalid` and `Twice`/`Current`. The
+    third is the load-bearing one: the restart in `threads/change`'s loop only
+    happens when the thread is dormant, and everything downstream depends on it.
+
+    **Starting forgets the priority.** A restarted thread comes back at the
+    priority it was created with: `0x08 priority: 00000000` followed by
+    `After restart: Current=30, init=30`.
+
+    **A priority change reschedules like a start.** Raising *another* thread
+    above the caller hands it the CPU at that instruction, which
+    `psp_sched_spawn` has always done for a spawn and `hle_ChangeThreadPriority`
+    did only for the caller's own priority. The test proves it without ambiguity:
+    it sweeps a ready thread through every legal priority, and the four values
+    higher than the caller's are exactly the four where ` - testThread` appears
+    *before* the line reporting the change that caused it -- the thread ran to
+    completion inside the call.
+
+    That left one thing that no threadman rule could reach. **Slots are never
+    reused** -- deliberately, and `psp_sched_spawn` records the 131,929,071 bad
+    memory accesses that reuse cost -- so a thread that is terminated and started
+    again owns *two* slots carrying one uid, and `slot_of` returned the first,
+    which is the corpse. Its priority, its state and its place in every scan.
+    Making a live slot win the lookup is not reuse and needs no join; the dead
+    slot is still the answer when it is the only one, because a finished thread
+    is a thing callers legitimately ask about.
+
+    Across the suite: 2,585 differing lines to 2,515, 34 matching. Seven tests
+    improved -- `start` 71 to 53, `threadend` 38 to 24, `terminate` 18 to 3,
+    `change` 156 to 140, `suspend` 6 to 2, `refer` 52 to 50, `threads` 4 to 0 --
+    and `tls/free` went 23 to 26, which is a reshuffle rather than a new fault:
+    threads now run at different points, so different lines of a test that has
+    real tls bugs in it line up.
