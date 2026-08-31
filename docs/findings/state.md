@@ -969,10 +969,39 @@ that produced it.
 
 ### Two measurements worth taking before building further
 
-- **What the rasterizer costs on a real scene.** Now urgent rather than
-  hypothetical: the GE went from 1,900 commands to 106,108 in one fix, and
-  everything from here is built on the software rasterizer. If a real frame costs
-  tens of milliseconds, the GE needs GPU-backed display-list translation instead.
+- **What the rasterizer costs on a real scene. — Measured. It is a placeholder,
+  not the architecture.** `PSPRECOMP_GE`'s summary now carries a `raster time`
+  line, timed around `sw_draw` with `CLOCK_MONOTONIC` (patch 0067).
+
+  | | *default* | *decoder* |
+  |---|---|---|
+  | raster time, 60s run | 2.387 s | **48.318 s** |
+  | pixels | 93,354,668 | 1,475,092,138 |
+  | cost | 25.6 ns/px | 32.8 ns/px |
+  | GE finishes | 212 | 3,741 |
+
+  **The movie path spends 80% of wall-clock inside the rasterizer**, and that
+  is with the guest paced in real time, so the two are competing for the same
+  seconds. Per GE finish it is 394k pixels and **12.9 ms** — of a 16.7 ms
+  frame. A single full-screen fill (130,560 px) costs **4.3 ms**, so the budget
+  is about **3.9 screens of overdraw per frame**, and the movie already uses
+  three of them drawing what is essentially a blit.
+
+  That is the answer to the question as posed. Gameplay is strictly heavier
+  than movie playback — real geometry, more passes, effects — so the software
+  path will not hold 60fps on a real scene, and **GPU-backed display-list
+  translation is required before anything is judged on how it plays**.
+
+  What it does *not* mean is that the software rasterizer was a mistake or
+  should be replaced now. It is what made the picture visible at all, it is
+  exact, and it is the reference any GPU backend gets checked against — the
+  backend interface (`psp_render_backend`) already exists for exactly this. It
+  is correct and too slow, which is the right order to arrive in.
+
+  Caveat on the number: `ns/pixel` is higher in the decoder run (32.8 vs 25.6)
+  because that path is textured — 462M of its 1.47bn pixels sample a texture,
+  against 2M of 93M in the default run. Do not read the two as the same
+  workload measured twice.
 - **The behavioural oracle.** Scaffolded — see
   [autotests.md](autotests.md) and `scripts/07-autotests.sh`. The differential
   oracle validates *translation*, and everything left is *environment*, which is
