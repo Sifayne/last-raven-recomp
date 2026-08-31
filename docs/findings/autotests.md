@@ -794,10 +794,11 @@ faithful execution of that test.
     mattered would have been worse than not writing it.
 
 
-26. **`threads`: waits block, and the suite opens.** 0 of 127 to **21**, and
-    8,057 differing lines to **4,219**. Across all 432 the oracle went 35 to
-    **57** matching and 80,466 to 75,118 differing lines. What follows is the
-    part that is reusable — the numbers are in the commits.
+26. **`threads`: waits block, and the suite opens.** 0 of 127 to **30**, and
+    8,057 differing lines to **3,319** — and **no test in the suite is silent
+    any more**. Across all 432 the oracle went 35 to **66** matching and 80,466
+    to 74,228 differing lines. What follows is the part that is reusable — the
+    numbers are in the commits.
 
     ### The architecture question 25 left open, and why it was forced
 
@@ -934,32 +935,31 @@ faithful execution of that test.
     | subsystem | before | after | |
     |---|---|---|---|
     | `lwmutex` | 922 | **0** | all 8 match |
+    | `fpl` | 404 | **38** | 4 of 9 match |
+    | `alarm` | 90 | **29** | 2 of 4 match |
     | `mutex` | 419 | **68** | 3 of 10 match |
     | `semaphores` | 210 | **76** | 4 of 10 match |
+    | `vtimers` | 306 | **104** | 2 of 12 match |
     | `mbx` | 671 | **127** | 2 of 9 match |
+    | `tls` | 453 | **186** | 1 of 6 match |
     | `msgpipe` | 1001 | **193** | 2 of 10 match |
-    | `vpl` | 1138 | 569 | 2 of 11 match; see below |
+    | `vpl` | 1138 | 555 | 2 of 11 match; see below |
     | `scheduling` | 734 | 461 | dispatch suspend/resume |
     | `events` | 300 | 214 | |
-    | `threads` | 1178 | 1097 | |
-    | `tls` | 453 | 441 | *not implemented* |
-    | `fpl` | 404 | 393 | *not implemented* |
-    | `vtimers` | 306 | 306 | *not implemented* |
-    | `alarm` | 90 | 99 | *not implemented* |
+    | `threads` | 1178 | 1093 | |
 
-    Four types still absent — `fpl`, `vtimers`, `tls`, `alarm` — and they are
-    the census 25 missed, not the five it named. `threads/fpl/allocate` is the
-    only test in the suite still emitting nothing, and it is waiting on a pool
-    that was never created.
+    **Every object type the suite exercises now exists.** What is left is
+    accuracy rather than absence, and it is concentrated: `threads`, `vpl`,
+    `scheduling` and `events` are two thirds of the remainder.
 
-    **`vpl/order` is 278 of vpl's remaining 569 and is a different kind of
+    **`vpl/order` is 278 of vpl's remaining 555 and is a different kind of
     work.** It walks the pool's free list *in guest memory* — `VPL bottom
     block: at 00000018, next->000000f8, 000000e0` — so the kernel's node layout
     and placement are observable, not just the totals. The allocator here keeps
     its bookkeeping host-side and writes nothing into the pool. That is the one
     remaining piece with a known shape.
 
-    ### Six object types, six attribute masks, no two the same
+    ### Eight object types, seven attribute masks
 
     | type | legal attribute bits |
     |---|---|
@@ -969,15 +969,21 @@ faithful execution of that test.
     | lwmutex | `0x3FF` |
     | vpl | `0x43FF` |
     | mbx | `0x5FF` |
+    | fpl | `0x41FF` |
+    | tlspl | `0x41FF` |
 
-    Every one measured from its own capture, and every pair disagrees. The
-    mutex refuses bit 10 and accepts bit 11; mbx does the reverse. An event
-    flag refuses bit 8 where every other type accepts it. **Read the capture
-    for the type you are implementing, not the one next to it** — the one time
-    this project assumed two objects shared a rule it took the game from 633 GE
-    lists to 0.
+    Seven distinct masks across eight types. The mutex refuses bit 10 and
+    accepts bit 11; mbx does the reverse. An event flag refuses bit 8 where
+    every other type accepts it. A vpl takes bit 9 where an fpl does not, and
+    the two masks differ by exactly that bit. **Read the capture for the type
+    you are implementing, not the one next to it** — the one time this project
+    assumed two objects shared a rule it took the game from 633 GE lists to 0.
 
-    ### What the four types cost, and the three shapes they came in
+    The single pair that *does* agree, fpl and tlspl, was checked against its
+    own capture like the rest. It happens to be the only one that could have
+    been guessed, and there was no way to know that in advance.
+
+    ### What the seven types cost, and the four shapes they came in
 
     Roughly a file each, no scheduler changes, and the work was reading rather
     than designing. What made each hard was different:
@@ -997,11 +1003,23 @@ faithful execution of that test.
       The kernel stores no copy: the queue is a linked list in the message
       headers, and it *loops* — one message reports `next=ITSELF`, two report
       `OTHER` and `FIRST`. A NULL-terminated list would differ on every line.
-    - **`vpl` and `msgpipe` — arithmetic that is the contract.** A vpl's
-      overhead is 32 bytes per pool and 8 per allocation with 8-byte alignment,
-      and `round_up(size, 8) - 32` reproduces all eleven pool sizes the create
-      test prints. A msgpipe has no framing at all despite the name: 256 bytes
-      into a 0x1000 pipe leaves `free=f00`.
+    - **`vpl`, `fpl`, `msgpipe` and `tlspl` — arithmetic that is the
+      contract.** A vpl's overhead is 32 bytes per pool and 8 per allocation
+      with 8-byte alignment, and `round_up(size, 8) - 32` reproduces all eleven
+      pool sizes the create test prints. An **fpl has neither** — nothing is
+      rounded and nothing is reserved, which had to be checked rather than
+      inherited from the pool next to it. A msgpipe has no framing at all
+      despite the name: 256 bytes into a 0x1000 pipe leaves `free=f00`. And an
+      fpl's free list is a **queue**, not a lowest-first search: after freeing
+      the first block the next allocation lands *above* the second, which the
+      test states in words.
+    - **`alarm` and `vtimer` — a handler called from no thread.** Nothing
+      blocks on either. threads/alarm prints `alarmHandler called on thread -1`
+      and means it: the handler asks which thread it is on and the answer is
+      neither of the two that exist. A deadline is noticed at a firmware call,
+      because that is the only place guest time is observed to move, and the
+      handler's return value is a *rescheduling interval* — which is how a
+      guest writes a periodic timer with one call and no thread.
 
     Three rules that are distinctions rather than behaviours, each of which a
     reasonable implementation would have flattened:
@@ -1014,11 +1032,38 @@ faithful execution of that test.
       leaves the caller's value alone. The tests pre-seed `0x1337` to tell them
       apart.
 
+    Two more of the same kind, from the later types:
+
+    - **A `Refer*Status` writes exactly as many bytes as the caller says it has
+      room for.** `alarm/refer` sweeps the size field one byte at a time: at 1
+      the `size` field alone reads back as 20, because one byte of the
+      little-endian 0x14 is the whole of it. Writing all 20 regardless differs
+      on every line of the sweep; writing none differs on the rest.
+    - **A 64-bit read signals failure with all-ones.** Its whole return value
+      is the number, so there is no room for an error code, and returning the
+      ordinary `0x800201BE` in the low word reads back as a plausible time.
+
     And one crash worth recording because of where it hid: `mpp_take` updated
     the ring cursor *before* checking the length, so a zero-length receive on a
     zero-size pipe — both legal, both in the tests — took a remainder by zero.
     It cost 45 lines of `tryreceive.expected`, which simply stopped mid-file
     with no other symptom.
+
+    ### Two absences that were subtractions
+
+    Both are the pattern state.md names as the shape of most bugs here, hiding
+    in an arithmetic rather than in a return value.
+
+    **`sceKernelTotalFreeMemSize` and `sceKernelMaxFreeMemSize` did not
+    exist.** An unimplemented call returns zero, and a test measuring what an
+    operation *consumed* takes the difference of two of them — so
+    `(allocated N bytes)` read 0 for every create in `tls/create`, 120 lines of
+    it, while saying nothing about memory at all.
+
+    **`vpl`'s free path returned the allocator's `ILLEGAL_MEMBLOCK`**
+    (`0x800201A9`) where both pools use `0x800201B6` for a pointer that is real
+    but is not the start of one of their live blocks. Found by writing `fpl`
+    next to it; it would have gone on looking like a vpl-specific gap.
 
     ### `mutex` was the first, and it said what the next one would cost
 
