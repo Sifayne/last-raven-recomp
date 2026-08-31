@@ -421,10 +421,46 @@ that produced it.
    wash-out would also produce — **one sample cannot separate those**, and
    reaching for the sequence is what settled it in one run.
 
-   **The logo is 68px left of where it belongs, and the cause is upstream of
-   the GE.** A reference render (PPSSPP) puts the glyphs at x 69..420, y
-   119..147. Ours land at x 1..349, y 118..148 — **the y position and the width
-   match**, and only x is short, by exactly 68.
+   **The logo was 68px left of where it belongs. Fixed — it was the VFPU after
+   all.** A reference render (PPSSPP) puts the glyphs at x 69..420, y 119..147.
+   They now land at **x 68..416, y 118..147**, and the frame reads FROM SOFTWARE
+   across the middle of the screen. Before the VFPU matrix work they were at
+   x 1..349, y 118..148 — the y position and the width always matched, and only
+   x was short, by exactly 68.
+
+   The world matrix reaching the GE is now
+
+   ```
+   [0..2]  1  0  0        [3..5]  0  1  0
+   [6..8]  0  0  1        [9..11] 68 117 0     <- translation
+   ```
+
+   which is exactly what the game's own object data says (`x 68, y 117`). It
+   used to arrive with the 68 in `[7]` — column 2's y — and `[9]` zero, which
+   is why there was no x translation at all.
+
+   **Nothing in the renderer changed.** The fix is patches 0043/0044/0046:
+   matrix orientation and sub-matrix addressing, `mtv`/`mfv`, and the operand
+   prefixes. The investigation below is left in full because its conclusion —
+   "the matrix is already wrong in the game's own memory, and the upload and
+   the transform are both faithful to it" — was *correct*, and correctly
+   located the fault upstream of everything it could reach. What it could not
+   do was reach further: the code building that matrix runs on the VFPU, and
+
+   > `psp_vtfm` and `psp_vmmul` are shared by the interpreter and the emitted
+   > code, so the differential oracle can never see a bug in them
+
+   is the sentence that entry ended on. It was right, and the instrument that
+   could see them — pspautotests, run against real-hardware output — did not
+   exist yet. Building it found seven VFPU bugs; this was one of the things
+   they had been breaking.
+
+   **The lesson is about the retraction, not the bug.** This entry retracted a
+   VFPU lead (below) on the grounds that `0x002AFEF8` is never called. That
+   retraction was correct and the *conclusion drawn from it* — that the VFPU
+   was not involved — did not follow. One dead address does not clear a
+   subsystem. Worth re-reading before the next time a negative result gets
+   generalised.
 
    Everything the GE is given has been verified byte-for-byte:
 
