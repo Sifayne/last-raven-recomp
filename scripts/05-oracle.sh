@@ -44,9 +44,13 @@ FUNCLIST="$REPORTS/05-funclist.txt"
 #
 # So: refuse, rather than warn. A warning in a 300-line log is a warning that
 # gets read after the wrong conclusion has already been drawn.
+# The *sources* that decide what gets emitted, not the binary: allegrexrecomp
+# is relinked by any build of the toolkit, so testing its mtime would force a
+# full re-emit after an unrelated change to the HLE.
 for src in "$ROOT/tools/psprecomp/tools/allegrexrecomp/emit.c" \
            "$ROOT/tools/psprecomp/tools/allegrexrecomp/decode.c" \
-           "$AR"; do
+           "$ROOT/tools/psprecomp/tools/allegrexrecomp/decode.h" \
+           "$ROOT/tools/psprecomp/include/psprecomp/recomp_rt.h"; do
     [ -e "$src" ] || continue
     [ "$src" -nt "$GEN_OBJ/aclr_funcs.o" ] && die \
         "$(basename "$src") is newer than the recompiled objects — the emitted C

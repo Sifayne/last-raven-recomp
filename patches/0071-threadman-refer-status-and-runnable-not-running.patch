@@ -1,0 +1,558 @@
+diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
+index c69dbd8..db845f8 100644
+--- a/include/psprecomp/hle.h
++++ b/include/psprecomp/hle.h
+@@ -218,6 +218,11 @@ void psp_display_set_present(void (*fn)(uint32_t addr, uint32_t stride,
+ void psp_audio_set_output(int64_t (*fn)(int ch, uint32_t samples,
+                                         uint32_t fmt, uint32_t buf));
+ 
++/* The priority of whatever is running now, or the module entry thread's when
++ * the scheduler holds nothing. Needed by a spawn hook deciding whether a newly
++ * started thread outranks its starter. */
++uint32_t psp_threadman_current_priority(void);
++
+ void psp_threadman_init(void);
+ void psp_threadman_register(void);
+ void psp_threadman_reset(void);
+diff --git a/include/psprecomp/sched.h b/include/psprecomp/sched.h
+index b16701e..1eb0460 100644
+--- a/include/psprecomp/sched.h
++++ b/include/psprecomp/sched.h
+@@ -115,6 +115,15 @@ void psp_sched_exit(uint32_t uid);
+  * nothing and spawns no host thread. The interpreter uses this to run a
+  * started thread synchronously inside the run that started it; a host that
+  * wants real threads installs nothing. */
++/* Undo a spawn the hook took but has not run yet.
++ *
++ * A hook that models "runnable, not running" has to be told when the guest
++ * kills a thread it never let start -- otherwise the thread runs later, which
++ * is worse than running early. Called by sceKernelTerminateThread and
++ * sceKernelDeleteThread; a no-op when no hook is installed. */
++void psp_sched_cancel_spawn(uint32_t uid);
++void psp_sched_set_cancel_hook(void (*fn)(uint32_t uid));
++
+ void psp_sched_set_spawn_hook(int (*fn)(uint32_t uid, uint32_t entry, uint32_t sp,
+                                         uint32_t a0, uint32_t a1, int priority));
+ 
+diff --git a/src/hle/sched.c b/src/hle/sched.c
+index c5a1bd0..8dd6ac5 100644
+--- a/src/hle/sched.c
++++ b/src/hle/sched.c
+@@ -69,6 +69,11 @@ void psp_sched_init(void) { psp_sched_reset(); }
+ 
+ void psp_sched_set_threading(int on) { g_threading = on; }
+ 
++static void (*g_cancel_hook)(uint32_t uid);
++
++void psp_sched_set_cancel_hook(void (*fn)(uint32_t uid)) { g_cancel_hook = fn; }
++void psp_sched_cancel_spawn(uint32_t uid) { if (g_cancel_hook) g_cancel_hook(uid); }
++
+ void psp_sched_set_spawn_hook(int (*fn)(uint32_t uid, uint32_t entry, uint32_t sp,
+                                         uint32_t a0, uint32_t a1, int priority)) {
+     g_spawn_hook = fn;
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index 9547c4e..e7b2c57 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -67,6 +67,8 @@ typedef struct {
+     char     name[32];
+     int32_t  count;
+     int32_t  max_count;
++    int32_t  init_count;      /* what it was created with; ReferSemaStatus reports it */
++    uint32_t attr;
+     int      used;
+     /* Who to wake on a signal. A fixed array rather than a list: the count is
+      * small, and overflowing it would only cost a wakeup, not correctness --
+@@ -87,6 +89,8 @@ typedef struct {
+     uint32_t uid;
+     char     name[32];
+     uint32_t pattern;
++    uint32_t init_pattern;
++    uint32_t attr;
+     int      used;
+ } psp_evflag;
+ 
+@@ -95,6 +99,9 @@ typedef struct {
+     char     name[32];
+     uint32_t func;
+     uint32_t arg;
++    uint32_t thread;          /* the thread that created it */
++    uint32_t notify_count;
++    uint32_t notify_arg;
+     int      used;
+ } psp_callback;
+ 
+@@ -271,6 +278,8 @@ static void hle_ExitThread(void) {
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
++static void hle_TerminateThread(void);
++
+ static void hle_DeleteThread(void) {
+     psp_thread *t = find_thread(psp_arg(0));
+     if (!t) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_THID); return; }
+@@ -383,9 +392,36 @@ static void hle_ChangeThreadPriority(void) {
+     psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
+-static void hle_GetThreadCurrentPriority(void) {
++/* A module's entry point is not running on "no thread".
++ *
++ * On hardware the loader creates a thread to call module_start and that thread
++ * has a priority like any other -- 0x20 for a user module. Here module_start
++ * is called directly, so psp_sched_current() is zero until the guest creates
++ * threads of its own, and answering 0 says "priority zero", which is a real
++ * and very high priority rather than an absence.
++ *
++ * pspautotests threads/mutex/unlock2 opens by checking exactly this and
++ * refuses to run at all when it is wrong. */
++#define PSP_MAIN_THREAD_PRIORITY 0x20
++
++uint32_t psp_threadman_current_priority(void) {
+     const psp_thread *c = current_thread();
+-    psp_ret(c ? c->priority : 0);
++    return c ? c->priority : PSP_MAIN_THREAD_PRIORITY;
++}
++
++static void hle_GetThreadCurrentPriority(void) {
++    psp_ret(psp_threadman_current_priority());
++}
++
++/* Terminate stops a thread without freeing it. Unimplemented until now, which
++ * mattered more than it looks: pspautotests' checkpoint helper terminates its
++ * rescheduler thread between every pair of checks, and a terminate that does
++ * nothing leaves that thread to run later. */
++static void hle_TerminateThread(void) {
++    psp_thread *t = find_thread(psp_arg(0));
++    if (!t) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_THID); return; }
++    psp_sched_cancel_spawn(t->uid);
++    psp_ret(SCE_KERNEL_ERROR_OK);
+ }
+ 
+ static void hle_ChangeCurrentThreadAttr(void) {
+@@ -484,16 +520,44 @@ void psp_threadman_dump_signalled(FILE *out) {
+     }
+ }
+ 
++/* A NULL name is rejected, and the attribute word is range-checked.
++ *
++ * Both are observable and neither was done. The pspautotests create tests
++ * pass a null pointer as the name and expect SCE_KERNEL_ERROR_ERROR back;
++ * we accepted it, read a string from guest address 0, and reported success.
++ * The two objects that answer NO_MEMORY instead of ERROR (fpl, msgpipe) are
++ * not implemented here, so the single code is right for everything that is.
++ *
++ * The attribute check is 0x200 and up: hardware takes the low nine bits and
++ * rejects anything above them with ILLEGAL_ATTR. Measured, not guessed --
++ * create.expected accepts 0x1ff and refuses 0x200. */
++static int name_ok(uint32_t name_ptr) { return name_ptr != 0; }
++static int attr_ok(uint32_t attr)     { return attr < 0x200u; }
++
++/* Copy a name into a guest SceKernel*Info block: 32 bytes, truncated to 31
++ * characters and NUL-terminated, which is what hardware reports back for the
++ * 31-character name the create tests hand it. */
++static void write_info_name(uint32_t dst, const char *name) {
++    char buf[32];
++    memset(buf, 0, sizeof buf);
++    for (int i = 0; i < 31 && name[i]; i++) buf[i] = name[i];
++    for (int i = 0; i < 32; i++) psp_write8(dst + (uint32_t)i, (uint8_t)buf[i]);
++}
++
+ static void hle_CreateSema(void) {
+     /* (name, attr, initVal, maxVal, option) */
++    if (!name_ok(psp_arg(0))) { psp_ret(SCE_KERNEL_ERROR_ERROR); return; }
++    if (!attr_ok(psp_arg(1))) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_ATTR); return; }
+     psp_sema *s = NULL;
+     for (int i = 0; i < MAX_SEMAS; i++) if (!g_sema[i].used) { s = &g_sema[i]; break; }
+     if (!s) { psp_ret(SCE_KERNEL_ERROR_NO_MEMORY); return; }
+ 
+     memset(s, 0, sizeof *s);
+     psp_str(psp_arg(0), s->name, sizeof s->name);
+-    s->count     = (int32_t)psp_arg(2);
+-    s->max_count = (int32_t)psp_arg(3);
++    s->attr       = psp_arg(1);
++    s->count      = (int32_t)psp_arg(2);
++    s->init_count = (int32_t)psp_arg(2);
++    s->max_count  = (int32_t)psp_arg(3);
+     s->uid = g_next_uid++;
+     s->used = 1;
+     /* Through a local: source and destination are both inside g_sema, and the
+@@ -600,13 +664,17 @@ static void hle_WaitSema(void) {
+ 
+ static void hle_CreateEventFlag(void) {
+     /* (name, attr, bits, option) */
++    if (!name_ok(psp_arg(0))) { psp_ret(SCE_KERNEL_ERROR_ERROR); return; }
++    if (!attr_ok(psp_arg(1))) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_ATTR); return; }
+     psp_evflag *f = NULL;
+     for (int i = 0; i < MAX_FLAGS; i++) if (!g_flag[i].used) { f = &g_flag[i]; break; }
+     if (!f) { psp_ret(SCE_KERNEL_ERROR_NO_MEMORY); return; }
+ 
+     memset(f, 0, sizeof *f);
+     psp_str(psp_arg(0), f->name, sizeof f->name);
+-    f->pattern = psp_arg(2);
++    f->attr         = psp_arg(1);
++    f->pattern      = psp_arg(2);
++    f->init_pattern = psp_arg(2);
+     f->uid = g_next_uid++;
+     f->used = 1;
+     psp_ret(f->uid);
+@@ -668,7 +736,71 @@ static void hle_WaitEventFlag(void) {
+ 
+ /* ---- callbacks ----------------------------------------------------------- */
+ 
++/* The Refer*Status calls: what an object currently is, written into a struct
++ * the caller supplies.
++ *
++ * None of the three existed. An unregistered firmware call returns without
++ * touching its out-parameter, so the caller prints its own uninitialised
++ * stack -- the create tests reported `attr=167767488, init=1308, cur=43`
++ * where hardware writes zeros. Same failure as the missing
++ * sceDisplayGetFrameBuf: success reported, nothing written.
++ *
++ * `size` is written rather than left alone. A caller sets it before the call
++ * and hardware fills what fits, so echoing the real size is right for the
++ * common case and better than leaving a field the caller may not have set. */
++static void hle_ReferSemaStatus(void) {
++    const psp_sema *sm = find_sema(psp_arg(0));
++    const uint32_t info = psp_arg(1);
++    if (!sm)   { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_UID); return; }
++    if (!info) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_ADDR); return; }
++    psp_write32(info +  0, 56);
++    write_info_name(info + 4, sm->name);
++    psp_write32(info + 36, sm->attr);
++    psp_write32(info + 40, (uint32_t)sm->init_count);
++    psp_write32(info + 44, (uint32_t)sm->count);
++    psp_write32(info + 48, (uint32_t)sm->max_count);
++    psp_write32(info + 52, (uint32_t)sm->nwaiters);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++static void hle_ReferEventFlagStatus(void) {
++    const psp_evflag *f = find_flag(psp_arg(0));
++    const uint32_t info = psp_arg(1);
++    if (!f)    { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_UID); return; }
++    if (!info) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_ADDR); return; }
++    psp_write32(info +  0, 52);
++    write_info_name(info + 4, f->name);
++    psp_write32(info + 36, f->attr);
++    psp_write32(info + 40, f->init_pattern);
++    psp_write32(info + 44, f->pattern);
++    psp_write32(info + 48, 0);              /* no waiters are modelled */
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
++/* No lookup existed: callbacks are only ever created here, never resolved. */
++static psp_callback *find_cb(uint32_t id) {
++    for (int i = 0; i < MAX_CBS; i++)
++        if (g_cb[i].used && g_cb[i].uid == id) return &g_cb[i];
++    return NULL;
++}
++
++static void hle_ReferCallbackStatus(void) {
++    const psp_callback *c = find_cb(psp_arg(0));
++    const uint32_t info = psp_arg(1);
++    if (!c)    { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_UID); return; }
++    if (!info) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_ADDR); return; }
++    psp_write32(info +  0, 56);
++    write_info_name(info + 4, c->name);
++    psp_write32(info + 36, c->thread);
++    psp_write32(info + 40, c->func);
++    psp_write32(info + 44, c->arg);
++    psp_write32(info + 48, c->notify_count);
++    psp_write32(info + 52, c->notify_arg);
++    psp_ret(SCE_KERNEL_ERROR_OK);
++}
++
+ static void hle_CreateCallback(void) {
++    if (!name_ok(psp_arg(0))) { psp_ret(SCE_KERNEL_ERROR_ERROR); return; }
+     psp_callback *c = NULL;
+     for (int i = 0; i < MAX_CBS; i++) if (!g_cb[i].used) { c = &g_cb[i]; break; }
+     if (!c) { psp_ret(SCE_KERNEL_ERROR_NO_MEMORY); return; }
+@@ -677,6 +809,7 @@ static void hle_CreateCallback(void) {
+     psp_str(psp_arg(0), c->name, sizeof c->name);
+     c->func = psp_arg(1);
+     c->arg  = psp_arg(2);
++    c->thread = psp_sched_current();
+     c->uid  = g_next_uid++;
+     c->used = 1;
+     /* Registered but never fired: callbacks are delivered from the scheduler,
+@@ -706,6 +839,7 @@ void psp_threadman_register(void) {
+     psp_hle_register(0xF475845D, "ThreadManForUser", "sceKernelStartThread",             hle_StartThread);
+     psp_hle_register(0xAA73C935, "ThreadManForUser", "sceKernelExitThread",              hle_ExitThread);
+     psp_hle_register(0x9FA03CD3, "ThreadManForUser", "sceKernelDeleteThread",            hle_DeleteThread);
++    psp_hle_register(0x616403BA, "ThreadManForUser", "sceKernelTerminateThread",         hle_TerminateThread);
+     psp_hle_register(0xCEADEB47, "ThreadManForUser", "sceKernelDelayThread",             hle_DelayThread);
+     psp_hle_register(0x68DA9E36, "ThreadManForUser", "sceKernelDelayThreadCB",           hle_DelayThread);
+     psp_hle_register(0x278C0DF5, "ThreadManForUser", "sceKernelWaitThreadEnd",           hle_WaitThreadEnd);
+@@ -741,4 +875,7 @@ void psp_threadman_register(void) {
+     psp_hle_register(0x402FCF22, "ThreadManForUser", "sceKernelWaitEventFlag",           hle_WaitEventFlag);
+ 
+     psp_hle_register(0xE81CAF8F, "ThreadManForUser", "sceKernelCreateCallback",          hle_CreateCallback);
++    psp_hle_register(0xBC6FEBC5, "ThreadManForUser", "sceKernelReferSemaStatus",         hle_ReferSemaStatus);
++    psp_hle_register(0xA66B0120, "ThreadManForUser", "sceKernelReferEventFlagStatus",    hle_ReferEventFlagStatus);
++    psp_hle_register(0x730ED8BC, "ThreadManForUser", "sceKernelReferCallbackStatus",     hle_ReferCallbackStatus);
+ }
+diff --git a/tests/test_hle.c b/tests/test_hle.c
+index ea8d081..0847882 100644
+--- a/tests/test_hle.c
++++ b/tests/test_hle.c
+@@ -29,6 +29,20 @@ static int failures;
+     } while (0)
+ 
+ /* Invoke a registered firmware call with o32 arguments. */
++/* A NUL-terminated name in guest RAM.
++ *
++ * The create calls reject a null name pointer, as hardware does, so a test
++ * that wants a semaphore has to supply one. Address chosen to sit in user RAM
++ * clear of the stack the harness sets up. */
++static uint32_t guest_name(const char *s) {
++    const uint32_t at = 0x08804000u;
++    for (uint32_t i = 0; ; i++) {
++        psp_write8(at + i, (uint8_t)s[i]);
++        if (!s[i]) break;
++    }
++    return at;
++}
++
+ static uint32_t call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2,
+                      uint32_t a3) {
+     psp_cpu.r[PSP_REG_A0] = a0;
+@@ -159,7 +173,7 @@ static void test_semaphores(void) {
+     const uint32_t SIGNAL = psp_nid("sceKernelSignalSema");
+     const uint32_t DELETE = psp_nid("sceKernelDeleteSema");
+ 
+-    uint32_t sem = call5(CREATE, 0, 0, 2 /*init*/, 4 /*max*/, 0);
++    uint32_t sem = call5(CREATE, guest_name("sema"), 0, 2 /*init*/, 4 /*max*/, 0);
+     CHECK(sem != 0, "semaphore created");
+ 
+     CHECK(call(WAIT, sem, 1, 0, 0) == 0, "wait succeeds while the count allows");
+@@ -194,7 +208,7 @@ static void test_event_flags(void) {
+     const uint32_t CLEAR  = psp_nid("sceKernelClearEventFlag");
+     const uint32_t WAIT   = psp_nid("sceKernelWaitEventFlag");
+ 
+-    uint32_t ef = call(CREATE, 0, 0, 0x0000, 0);
++    uint32_t ef = call(CREATE, guest_name("evflag"), 0, 0x0000, 0);
+     CHECK(ef != 0, "event flag created");
+ 
+     call(SET, ef, 0x0005, 0, 0);
+diff --git a/tests/test_interp.c b/tests/test_interp.c
+index b4c97a3..8cc0868 100644
+--- a/tests/test_interp.c
++++ b/tests/test_interp.c
+@@ -396,12 +396,27 @@ static void test_spawn_serving(void) {
+ 
+     psp_interp_service_dispatch(1);
+     psp_interp it = run(outer, 4, 1000);
++    /* Sampled before the hooks come down: disabling them resets the pending
++     * list, the same fresh-run guarantee that resets the nesting counter. */
++    const uint32_t data_before_drain = psp_read32(DATA);
++    psp_interp_drain_pending(1000);
+     psp_interp_service_dispatch(0);
+     psp_interp_free_imports();
+ 
+     CHECK(it.status == I_OK_RETURN, "spawn: %s", psp_interp_status_str(it.status));
++
++    /* Started at priority 32, by a starter also at 32. Equal is not more
++     * urgent, so the thread is runnable and has *not* run: a PSP reschedules
++     * at StartThread only for a thread that outranks the caller. Running it
++     * here is the behaviour pspautotests' checkpoint helper detects, and it
++     * tagged every line of the threads suite `[r]` instead of `[x]`. */
++    CHECK(data_before_drain != 7,
++          "an equal-priority thread does not run at StartThread: DATA=%u",
++          data_before_drain);
++
+     CHECK(psp_read32(DATA) == 7,
+-          "the started thread ran with StartThread's $a0: DATA=%u", psp_read32(DATA));
++          "and runs when the top-level run drains it, with StartThread's $a0: DATA=%u",
++          psp_read32(DATA));
+     CHECK(R(S0) == 99,
+           "the starter's registers survived the thread: s0=%u", R(S0));
+ }
+diff --git a/tools/allegrexrecomp/interp.c b/tools/allegrexrecomp/interp.c
+index 58b672d..10d9d27 100644
+--- a/tools/allegrexrecomp/interp.c
++++ b/tools/allegrexrecomp/interp.c
+@@ -571,6 +571,22 @@ static uint64_t    g_nest_refused;
+ 
+ static int spawn_hook(uint32_t uid, uint32_t entry, uint32_t sp,
+                       uint32_t a0, uint32_t a1, int priority);
++static void cancel_hook(uint32_t uid);
++
++/* Threads that were started but did not outrank their starter. See spawn_hook. */
++typedef struct {
++    uint32_t uid, entry, sp, a0, a1;
++    int      priority, used;
++} pending_thread;
++
++#define MAX_PENDING 16
++static pending_thread g_pending[MAX_PENDING];
++
++/* Re-entrancy guard: a drained thread that blocks lands back in the drain, and
++ * without this the second call would start pulling threads off the same list
++ * from inside the first one's run. One drain at a time; anything parked while
++ * draining is picked up by the loop that is already running. */
++static int g_draining;
+ 
+ static int dispatch_hook(uint32_t addr) {
+     if (!g_active) return 0;              /* not inside an interpreter run */
+@@ -629,28 +645,99 @@ void psp_interp_service_dispatch(int enable) {
+     g_active = NULL;
+     psp_set_dispatch_hook(enable ? dispatch_hook : NULL);
+     psp_sched_set_spawn_hook(enable ? spawn_hook : NULL);
++    psp_sched_set_cancel_hook(enable ? cancel_hook : NULL);
++    g_draining = 0;
++    for (int i = 0; i < MAX_PENDING; i++) g_pending[i].used = 0;
+ }
+ 
+-/* A started thread runs to completion here, on the interpreter's own stack.
++/* Starting a thread does not mean running it.
++ *
++ * A PSP reschedules at sceKernelStartThread only when the new thread *outranks*
++ * the starter -- lower number, more urgent. An equal or less urgent thread
++ * becomes runnable and waits, and the starter keeps the CPU until it blocks or
++ * exits. Running every started thread immediately is not a conservative
++ * approximation of that; it is the opposite behaviour, and it is observable.
++ *
++ * pspautotests' own checkpoint helper measures exactly this. Between every two
++ * checks it terminates a rescheduler thread, prints, and starts it again; the
++ * thread sets a flag, and each line is tagged `[x]` if the flag is clear and
++ * `[r]` if it is set. The thread is created at the caller's own priority, so
++ * on hardware it never runs and every line reads `[x]`. Running it inside
++ * StartThread made every line in the threads suite read `[r]`.
++ *
++ * So: outranking threads still run nested and to completion, which is what a
++ * pspautotests crt needs when module_start starts main. Everything else is
++ * parked, cancelled if the guest terminates it first, and drained when the
++ * top-level run ends.
+  *
+- * That is sequential semantics, not scheduling: a thread that blocks part-way
+- * has nothing to be resumed into, and a second thread started before the
+- * first finishes waits rather than interleaving. It is also exactly what a
+- * pspautotests crt needs -- module_start creates and starts main, main runs
+- * its checks, prints, and returns -- and it is honest about what it is, which
+- * pretending the boot host's scheduler was in play would not be. */
++ * This is still not scheduling -- a parked thread cannot interleave with the
++ * starter, and one that blocks has nothing to be resumed into. It models one
++ * specific rule, "runnable is not running", because that rule is what the
++ * tests can see. */
++static void cancel_hook(uint32_t uid) {
++    for (int i = 0; i < MAX_PENDING; i++)
++        if (g_pending[i].used && g_pending[i].uid == uid) g_pending[i].used = 0;
++}
++
++static int run_thread_now(uint32_t entry, uint32_t sp, uint32_t a0, uint32_t a1);
++
++/* The budget a drained thread gets. The drain happens after the top-level run
++ * has ended, so there is no outer run left to charge against and none to
++ * inherit a limit from -- the caller supplies one, and it is the same cap the
++ * top-level run was given. Without it a parked thread that loops forever would
++ * hang the harness at the point it was reporting results. */
++static uint64_t g_drain_budget;
++
++/* Run everything parked, most urgent first, until nothing is left. Draining
++ * can itself start threads, hence the outer loop. */
++void psp_interp_drain_pending(uint64_t budget) {
++    if (g_draining) return;
++    g_draining = 1;
++    g_drain_budget = budget;
++    for (;;) {
++        int best = -1;
++        for (int i = 0; i < MAX_PENDING; i++)
++            if (g_pending[i].used &&
++                (best < 0 || g_pending[i].priority < g_pending[best].priority)) best = i;
++        if (best < 0) { g_draining = 0; return; }
++        const pending_thread t = g_pending[best];
++        g_pending[best].used = 0;
++        (void)run_thread_now(t.entry, t.sp, t.a0, t.a1);
++    }
++}
++
+ static int spawn_hook(uint32_t uid, uint32_t entry, uint32_t sp,
+                       uint32_t a0, uint32_t a1, int priority) {
+-    (void)uid; (void)priority;
+     if (!g_active) return 0;              /* not inside an interpreter run */
+     if (g_nest >= MAX_NEST) { g_nest_refused++; return 1; }
+ 
++    /* Equal or less urgent than whoever is starting it: runnable, not running. */
++    if (priority >= (int)psp_threadman_current_priority()) {
++        for (int i = 0; i < MAX_PENDING; i++) {
++            if (g_pending[i].used) continue;
++            g_pending[i] = (pending_thread){ uid, entry, sp, a0, a1, priority, 1 };
++            return 1;
++        }
++        /* Out of slots. Running it is the old behaviour and still better than
++         * dropping the thread entirely. */
++    }
++    return run_thread_now(entry, sp, a0, a1);
++}
++
++static int run_thread_now(uint32_t entry, uint32_t sp, uint32_t a0, uint32_t a1) {
++    if (g_nest >= MAX_NEST) { g_nest_refused++; return 1; }
++
++    /* NULL when draining: the top-level run has ended and this thread is one
++     * it left runnable. There is then no outer run to charge or to inherit a
++     * budget from, so g_drain_budget stands in for both. */
+     psp_interp *outer = g_active;
+     const psp_cpu_state saved = psp_cpu;
+ 
+-    uint64_t left = 0;
+-    if (outer->budget) {
+-        left = outer->budget > outer->executed ? outer->budget - outer->executed : 1;
++    uint64_t left = g_drain_budget;
++    if (outer) {
++        left = 0;
++        if (outer->budget)
++            left = outer->budget > outer->executed ? outer->budget - outer->executed : 1;
+     }
+ 
+     /* The thread's own register file: arguments from StartThread, its own
+@@ -668,8 +755,8 @@ static int spawn_hook(uint32_t uid, uint32_t entry, uint32_t sp,
+ 
+     psp_interp sub;
+     psp_interp_init(&sub, entry, NESTED_RA, left);
+-    sub.trace      = outer->trace;
+-    sub.trace_regs = outer->trace_regs;
++    sub.trace      = outer ? outer->trace      : 0;
++    sub.trace_regs = outer ? outer->trace_regs : 0;
+ 
+     g_nest++;
+     g_active = &sub;
+@@ -678,7 +765,7 @@ static int spawn_hook(uint32_t uid, uint32_t entry, uint32_t sp,
+     g_nest--;
+     note_nested("thread", entry, &sub);
+ 
+-    outer->executed += sub.executed;
++    if (outer) outer->executed += sub.executed;
+     psp_cpu = saved;
+     return 1;
+ }
+diff --git a/tools/allegrexrecomp/interp.h b/tools/allegrexrecomp/interp.h
+index 5f52429..937cd1d 100644
+--- a/tools/allegrexrecomp/interp.h
++++ b/tools/allegrexrecomp/interp.h
+@@ -65,6 +65,10 @@ typedef struct {
+ 
+ /* Set up a run: pc = entry, $ra = sentinel, counters cleared. Does not touch
+  * memory or any register other than $ra, so the caller controls the arguments. */
++/* Run every thread that was started but parked because it did not outrank its
++ * starter. Call after a top-level run ends; see the note at spawn_hook. */
++void psp_interp_drain_pending(uint64_t budget);
++
+ void psp_interp_init(psp_interp *it, uint32_t entry, uint32_t ra_sentinel,
+                      uint64_t budget);
+ 
+diff --git a/tools/allegrexrecomp/main.c b/tools/allegrexrecomp/main.c
+index 1c75c2b..5c13855 100644
+--- a/tools/allegrexrecomp/main.c
++++ b/tools/allegrexrecomp/main.c
+@@ -1005,6 +1005,10 @@ static int cmd_interp(const char *path, uint32_t from, int have_from,
+     printf("---\n");
+ 
+     psp_interp_run(&it);
++    /* Threads the guest started but that never outranked their starter. On
++     * hardware they would have run when the starter blocked or exited; here
++     * the top-level run ending is the closest equivalent point. */
++    if (dispatch) psp_interp_drain_pending(budget);
+ 
+     printf("---\n");
+     printf("stopped:  %s\n", psp_interp_status_str(it.status));

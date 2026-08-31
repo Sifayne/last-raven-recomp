@@ -719,3 +719,77 @@ faithful execution of that test.
     Left undone, deliberately: the rounding mode does not reach `psp_fsqrt`'s
     iteration, and the conversion ops do not raise flags. No test covers
     either, and inventing untested behaviour is worse than a stated gap.
+
+25. **`threads`: four gaps closed, and the suite still 0 of 127.** Reporting
+    this as a win would be wrong. The aggregate moved -- 8,870 differing lines
+    to 8,057, and `threads/semaphores/create` from 74 to 7 -- and **not one
+    test crossed to a full match.** What the work actually bought is a clear
+    account of why.
+
+    Four real gaps, each measured:
+
+    - **The module entry thread had no priority.**
+      `sceKernelGetThreadCurrentPriority` answered 0 when the scheduler held
+      nothing. On hardware `module_start` runs on a loader-created thread at
+      0x20, and 0 is not an absence -- it is a real and very urgent priority.
+      `threads/mutex/unlock2` checks this on its first line and refuses to run
+      at all when it is wrong.
+    - **NULL names were accepted and attributes unchecked.** Hardware rejects
+      a null name with `0x80020001` and any attribute at `0x200` or above with
+      `0x80020191`. Measured: `create.expected` accepts `0x1ff` and refuses
+      `0x200`.
+    - **The three `Refer*Status` calls did not exist.** Same failure as the
+      missing `sceDisplayGetFrameBuf` in 22 -- the create tests printed
+      `attr=167767488, init=1308` where hardware writes zeros, because an
+      unregistered call returns without touching its out-parameter.
+    - **`sceKernelTerminateThread` did not exist**, which is why the
+      rescheduler thread below survived being killed.
+
+    **And one rule, which the tests measure directly.** pspautotests'
+    `checkpoint` helper terminates a rescheduler thread between every two
+    checks, prints, and restarts it; the thread sets a flag, and each line is
+    tagged `[x]` if the flag is clear and `[r]` if set. That thread is created
+    *at its creator's own priority*, and a PSP reschedules at
+    `sceKernelStartThread` only for a thread that **outranks** the starter. So
+    on hardware it never runs and every line reads `[x]`.
+
+    Running every started thread to completion inside `StartThread` is not a
+    conservative approximation of that. It is the opposite behaviour, and it
+    tagged every line in the suite `[r]`. Outranking threads still run nested;
+    everything else is parked, cancelled if the guest terminates it, and
+    drained when the top-level run ends.
+
+    ### Why none of it is enough, and what actually blocks the suite
+
+    `hle_WaitEventFlag` ends an unsatisfiable wait like this:
+
+    ```c
+    warn_block("sceKernelWaitEventFlag");
+    psp_ret(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+    ```
+
+    **A wait that cannot be satisfied returns a timeout instead of blocking.**
+    The threads suite is largely a test of blocking and wakeup *ordering*, and
+    there is nothing here to order. On top of that, five of the object types it
+    exercises have no implementation at all -- `fpl`, `vpl`, `mbx`, `msgpipe`
+    and `lwmutex`; `grep -c MsgPipe` over threadman.c returns 0.
+
+    So the remaining work is making waits block and implementing five kernel
+    object types, which is a larger piece than the gaps above and not a
+    continuation of them.
+
+    ### Two things recorded against interest
+
+    Eight tests got *worse* in line count. Six are `msgpipe`/`fpl`, where the
+    output is garbage either way and reordering merely shuffles it -- but
+    `threads/events/events` went 16 to 22 and that one *is* implemented, so it
+    is a genuine regression from the parked-thread model.
+
+    A drain-on-block hook was built to fix exactly that: park a thread, and
+    give it its turn when the starter blocks, which is when hardware would run
+    it. **It was removed again.** Measured across all 432 tests it changed
+    nothing -- byte-identical results, 8,057 lines both ways -- because no wait
+    path reaches `psp_sched_block` to trigger it. It was correct-looking, dead,
+    and untestable until waits block. Shipping it with a comment claiming it
+    mattered would have been worse than not writing it.
+
