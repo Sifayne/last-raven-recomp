@@ -1986,3 +1986,32 @@ faithful execution of that test.
     and the zero-timeout route. All three were right about *something*, which
     is what made them look settled. The pattern to watch for is a comment whose
     example has only one case in it.
+
+    ### A mailbox holds its *last* message, not its first
+
+    `mbx/send` is the nastiest test in this directory and the only one that can
+    show this: it sends messages, then reaches into the guest-owned packet
+    header of the one it just sent and rewrites `next` behind the kernel's
+    back, then reads the mailbox status. Two of its cases are decisive:
+
+    ```
+    next = itself   ->  the walk starts at that message
+    next = NULL     ->  first=NULL, with count still 2
+    ```
+
+    Neither is reachable if the kernel keeps a head pointer, because the guest
+    cannot touch a head pointer. Both fall out of `first = last->next`: the
+    mailbox stores its **last** message and derives the head. Our head-pointer
+    version could not be made to produce either.
+
+    The restructure cost two bugs of my own, both worth naming because they are
+    the same bug twice. Inserting in front of the head and appending after the
+    last write the *same two links* -- in a ring, `last -> msg -> head` is both
+    -- so the links cannot say which happened and only the search that produced
+    them can. And the FIFO append read the head *after* overwriting the link
+    the head is derived from, which is a hazard the head-pointer version simply
+    did not have. Deriving a value instead of storing it moves where the
+    ordering constraints live.
+
+    `mbx/receive`, `poll`, `cancel` and `delete` match hardware; `refer` 10 to
+    4, `send` 29 to 24, `priority` 30. Suite 1,647 to 1,636.
