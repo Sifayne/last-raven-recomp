@@ -1692,3 +1692,23 @@ faithful execution of that test.
     neighbouring tests where that readback is still 2ms out: the millisecond
     difference there is not a fixed offset in the clock, it is a consequence of
     a wait taking a different path.
+
+    ### The same rule, for every object type that has a Cancel
+
+    `fpl/cancel`, `vpl/cancel` and `mbx/cancel` all went to 0 together, and the
+    diff each one showed was the same two lines msgpipe had shown: `800201a9`
+    from hardware, `800201b5` from us. Four object types, one rule, and the
+    fifth -- `mutex` -- moved 24 to 20 with the same change and has other
+    problems underneath.
+
+    Worth noting as method rather than as a finding. The mechanism was built
+    for message pipes and the rule was stated in the commit that built it, with
+    the other types named as still open. Generalising it afterwards took the
+    reason constants out of `kernobj.c` and into `waitq.h`, added a
+    `psp_waitq_cancel_all` next to the existing `release_all`, and inserted the
+    same six lines into four waits. Nothing was rediscovered. That is the
+    argument for writing down the shape of a fix at the time even when only one
+    caller needs it.
+
+    Threads suite at this point: **42 of 127 matching, 1,967 differing lines**,
+    from 0 of 127 and 8,057 at the start of this work.
