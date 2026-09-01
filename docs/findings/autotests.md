@@ -1757,3 +1757,36 @@ faithful execution of that test.
     The code is `800201C5`, which is the same one an unlock of a *free* mutex
     gets -- so the kernel does not distinguish "nobody has it" from "somebody
     else has it". Both are "you do not have it".
+
+    ### The clock: a read is a firmware call like any other
+
+    This one was named in three separate commits as "the virtual clock" and
+    left alone each time, because it looked like an accuracy limit rather than
+    a bug. It was a bug, and it was one line.
+
+    A clock read charged **100us** of guest time where every other firmware
+    call charged 1. The argument for that, written down when the constant was
+    introduced, was about *our* throughput: a guest polling the clock in a loop
+    should finish in a sane number of iterations. It was paid for in fidelity.
+    pspautotests' `checkpoint()` reads the clock once, so a checkpoint cost
+    100us, and a test that delays 200us and prints two lines had its delay
+    expire inside the printing.
+
+    The throughput it protected turns out not to need protecting. With reads
+    charging one microsecond the game's output is **byte-identical** -- same 633
+    GE lists, same 93,354,668 pixels -- so nothing it does polls the clock long
+    enough to notice, and no test started timing out. So the separate read tick
+    is gone rather than retuned.
+
+    `threads/terminate`, `threads/threadmanidlist` and `msgpipe/create` went to
+    0; `alarm/set` 22 to 12, `fpl/create` 8 to 4, `tls/create` 60 to 56,
+    `msgpipe/tryreceive` and `trysend` 4 to 2 each. Suite 1,919 to 1,890, 45
+    matching to 48.
+
+    The lesson is about the shape of the mistake rather than the constant. Two
+    questions -- "how long does a kernel call take" and "how long does reading
+    the clock take" -- had different answers only for as long as one of them
+    was unmeasured, and the wrong one was defended by an argument about
+    performance that nobody had checked. The same file already records the
+    identical correction being made to the *other* constant, from 100 to 1, for
+    the same reason. It was made once and not carried across.
