@@ -2148,3 +2148,35 @@ faithful execution of that test.
     mailbox's derived head was the second kind, and only a tampering test could
     expose it. And it says nothing about the values, only that something checks
     them; a field written wrongly in a way no test reads is invisible to both.
+
+    ### `tls`: a wait that was never entered, and an owner that outlived nothing
+
+    Two rules, and the second is the one that makes thread-local storage
+    thread-local.
+
+    **`sceKernelGetTlsAddr` waits.** A pool with nothing free answered NULL.
+    `tls/priority` makes a pool of *one* block, takes it from the main thread,
+    starts three threads that each ask for one, and reads the pool back:
+    `totalBlocks=00000001, freeBlocks=00000000, wait=2`. Two of the three are
+    parked inside the call. The struct already had a waiter queue and
+    `sceKernelFreeTlspl` already released it; nothing had ever joined.
+
+    **A block goes back to the pool when its thread ends.** The same test
+    measures it without ever freeing successfully: its workers take a block,
+    delay, and then free it with `sceKernelFreeFpl` -- the wrong call for the
+    type, which fails with `8002019d` every time, on hardware and here. The
+    block still reaches the next waiter, so what returned it was the worker
+    exiting.
+
+    That second one is the sort of rule a test can only show by getting
+    something else wrong. A test that freed correctly would have proved
+    nothing.
+
+    `tls/priority` 28 differing lines to 12, `delete` 20 to 12, `free` 21 to
+    16. Suite 1,566 to 1,537.
+
+    All six lines left in `tls/priority` are the same line: the pool's base
+    address, `09d35700` on hardware against `09d00000` here. Every ordering,
+    release and count matches. That residue is the memory-map difference that
+    also holds `threads/create` at 254, and it is the only thing between this
+    test and hardware.

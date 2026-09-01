@@ -1,0 +1,60 @@
+diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
+index 5ebdde5..d41f35d 100644
+--- a/include/psprecomp/hle.h
++++ b/include/psprecomp/hle.h
+@@ -442,6 +442,10 @@ void psp_ktimer_reset(void);
+  * path, which is the only place guest time is observed to move. */
+ void psp_ktimer_tick(void);
+ void psp_kernobj_reset(void);
++/* A thread has ended: return anything it still holds. Only thread-local
++ * storage cares -- a pool block or a mutex outlives its owner, a tls block by
++ * definition does not. */
++void psp_kernobj_thread_ended(uint32_t uid);
+ void psp_kernlock_reset(void);
+ 
+ void psp_threadman_init(void);
+diff --git a/src/hle/kernobj.c b/src/hle/kernobj.c
+index bf536c7..0e02af2 100644
+--- a/src/hle/kernobj.c
++++ b/src/hle/kernobj.c
+@@ -1774,6 +1774,28 @@ static void hle_GetTlsAddr(void) {
+     psp_ret(tls_block_of(t, me));
+ }
+ 
++/* A thread's blocks go back to the pool when the thread ends. That is what
++ * makes the storage thread-local, and tls/priority measures it without ever
++ * calling free successfully: its workers take a block, delay, and then free it
++ * with sceKernelFreeFpl -- the wrong call for the type, which fails with
++ * 8002019d every time. The block still reaches the next waiter, so what
++ * returned it was the worker exiting. */
++void psp_kernobj_thread_ended(uint32_t uid) {
++    for (int i = 0; i < MAX_TLSPLS; i++) {
++        psp_tlspl *t = &g_tls[i];
++        if (!t->alive) continue;
++        for (uint32_t b = 0; b < t->nblocks; b++) {
++            if (t->owner[b] != uid) continue;
++            t->owner[b] = 0;
++            const int wi = psp_waitq_pick(&t->q, t->attr);
++            if (wi < 0) continue;
++            const psp_waiter w = psp_waitq_take(&t->q, wi);
++            t->owner[b] = w.uid;
++            (void)psp_sched_wake(w.uid);
++        }
++    }
++}
++
+ static void hle_FreeTlspl(void) {
+     psp_tlspl *t = find_tls(psp_arg(0));
+     if (!t) { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_TLSPLID); return; }
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index aefb8be..ec2f159 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -550,6 +550,7 @@ static void hle_DelayThread(void) {
+ static void thread_ended(psp_thread *t, uint32_t status) {
+     t->exit_status = status;
+     t->state       = TH_DORMANT;
++    psp_kernobj_thread_ended(t->uid);
+     for (int i = 0; i < t->nenders && i < MAX_SEMA_WAITERS; i++)
+         psp_sched_wake(t->enders[i]);
+     t->nenders = 0;
