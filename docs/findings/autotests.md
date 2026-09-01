@@ -1636,3 +1636,37 @@ faithful execution of that test.
     entries, one per allocation). Both were guesses about what a game needs, and
     the tests are the only thing here that has ever named a number. A capacity
     failure tells you about exactly one limit at a time.
+
+    ### `msgpipe/tryreceive`: a poll is not a peek, and a wake needs a reason
+
+    16 differing lines to 4.
+
+    **A poll reaches past the buffer.** `sceKernelTryReceiveMsgPipe` decided
+    from what was stored, so on a pipe with no buffer it always failed -- even
+    with a sender blocked on the other side holding exactly what was asked for.
+    Two lines of the test say otherwise, both against `buffer=0`:
+    `Partial packet: OK (bytes=128)`, `Complete packet: OK (bytes=256)`.
+
+    Deciding from the buffer was a shortcut taken for a real reason: a poll
+    moves all-or-nothing and cannot take bytes back from a thread it has already
+    handed them to. The way out is to *ask instead of try* -- capacity is
+    knowable, so the poll computes it, decides, and only then joins the queue,
+    by which point completing is certain.
+
+    **A wake does not say what happened, and two outcomes need opposite
+    answers.** The test deletes a pipe immediately after a poll that satisfied
+    two senders. Those senders were released, their bytes moved, their counts
+    written -- and then the pipe vanished before they next held the CPU. Our
+    post-block path looked the pipe up first, found it gone, and reported
+    `800201b5`; hardware answers `00000000`, because bytes already moved are
+    moved. But a sender genuinely *abandoned* by that same delete does get
+    `800201b5`, on the next line of the same file, so "was I woken" cannot
+    decide it and neither can "does the object still exist".
+
+    So the waker leaves a reason behind in the scheduler slot. This is general
+    rather than msgpipe's: `fpl/cancel` has the same shape, where a cancel must
+    answer `800201a9` and a delete `800201b5`, and it is still open.
+
+    The two lines left are both the virtual clock -- one `[x]`/`[r]`, and one
+    timeout readback of `10ms remaining` against hardware's `8ms`, which is the
+    same thing measured in milliseconds.
