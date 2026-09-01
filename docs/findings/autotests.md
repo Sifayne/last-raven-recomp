@@ -1899,3 +1899,30 @@ faithful execution of that test.
 
     `callbacks/callbacks` matches hardware; `vpl/allocate` 14 to 4, against 9
     before this area was touched at all. Suite 1,719 to 1,703, 54 matching.
+
+    ### A deadline that has already arrived is not a wait
+
+    `vpl/allocate` asks for a block that is not there with a timeout of **0**
+    and tags the line `[x]`: no reschedule happened. Ours tagged it `[r]`,
+    because a zero timeout was being turned into "the earliest deadline that
+    exists" and then parked on -- which hands the CPU away and takes it back,
+    and that round trip is what the tag reports.
+
+    There is no interval in which anything could change, so there is nothing to
+    schedule around. `psp_sched_block_until` now answers EXPIRED without
+    switching away when the deadline is already behind it.
+
+    The rule was written down as a deliberate choice when zero timeouts were
+    first handled -- "the shortest real one there is ... so that it expires
+    through the ordinary path" -- which is right about the *result* and wrong
+    about the route, and the difference is only visible in a column that says
+    whether a switch happened. `msgpipe/receive` and `msgpipe/send` came with
+    it, 8 to 6 each.
+
+    What is left in `vpl/allocate` is a single line and it is calibration, not
+    a rule: the harness's worker retries on a **5us** timeout, and hardware's
+    `sceKernelAllocateVpl` takes long enough for one of those to expire inside
+    it where our one-microsecond firmware call does not. The 5us is chosen by
+    the test to sit on that boundary. Nothing in the captures says what a vpl
+    allocation costs, so tuning to it would be fitting the constant to the
+    test.
