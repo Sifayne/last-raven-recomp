@@ -2707,3 +2707,56 @@ faithful execution of that test.
      a switch that should not happen at all: right in the column, for a reason
      hardware does not have. Gating dispatch on interrupt masking is a separate
      finding and the test is 38 lines from passing regardless.
+
+     ### A vblank wait is a wait, and one vblank releases everybody
+
+     `threads/scheduling/scheduling` 38 to **22** differing lines. No test
+     matches that did not before, and none got worse.
+
+     Breaking that test down first was what made it worth touching at all. Its
+     38 lines were **three** independent causes, not one: 4 lines of interrupt
+     masking, 16 of vblank, and 18 in the two `testSimpleScheduling` sections.
+     The last of those is the deep one — hardware takes upwards of 500us to
+     create and start a thread, enough that thread 0's `sceKernelDelayThread(500)`
+     expires while the main thread is still starting thread 1, where we take
+     about six. That is `PSP_CALL_TICK_US` arriving from the opposite direction
+     to the hypothesis refuted above, it is global, and it is the parameter that
+     has already cost this project a session. The test does not go green without
+     it, so the test was not the target; the vblank half was.
+
+     Two things were wrong with `hle_WaitVblank`, and they are separable.
+
+     **It yielded instead of waiting.** A yield marks the caller READY and hands
+     off, and the handoff picks the most urgent READY thread — which is the
+     caller again whenever it outranks everything else. The test's threads are
+     priority 0x18 against the main thread's 32, so thread 0 ran its whole
+     four-iteration loop before thread 1 started its first. `psp_sched_delay`
+     already existed for exactly this and says so in its own comment, written
+     when the game's movie threads sat READY and never ran; the vblank handler
+     had never adopted it.
+
+     **It advanced the clock per caller.** Three threads waiting on one vblank
+     each added a frame, so the guest saw three frames of guest time pass for
+     one frame of scanout. The fix is to make the boundary a shared absolute
+     moment — `psp_clock_next_frame`, on the grid the clock already owns —
+     rather than a per-caller duration. Everyone parks on the same moment and
+     the existing idle path in `handoff_locked` releases them together, because
+     it already wakes *every* slot whose deadline has arrived. Nothing in the
+     scheduler had to change. `psp_clock_frame` is gone: adding a frame is no
+     longer an operation anything wants.
+
+     The frame counter is now counted per vblank rather than per waiter, which
+     is what it was always documented to mean. It is deliberately *not* derived
+     from the clock, which would look tidier and would destroy it: ticks advance
+     the clock, so a derived counter would keep climbing for a game that is
+     stuck, and telling looping from stuck is the entire reason it exists.
+
+     The risk here was the game, not the suite — this is the frame path, and
+     the boot is byte-identical across it: 633 GE lists, 106,108 commands,
+     93,354,668 pixels, 0 bad memory accesses. The payoff was narrower than
+     hoped, and worth recording as such: `display/vblankmulti` was the reason to
+     expect more, and it did not move. It tests `sceDisplayWaitVblankStartMulti`
+     and whether `vcount` advances by exactly one across a wait — and
+     `hle_GetVcount` still advances the counter on *read*, which is a separate
+     infidelity with its own comment. `intr/vblank` did not move either. The 16
+     lines in `threads/scheduling` are the whole measured result.
