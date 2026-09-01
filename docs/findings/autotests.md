@@ -2090,3 +2090,34 @@ faithful execution of that test.
     All eight `mbx` tests now match hardware, from 4, 2, 8, 24, 16, 10, 29 and
     40 differing lines when this directory was first opened. Suite 1,582 to
     1,578, 59 matching.
+
+    ### The `Refer` zero-size census
+
+    Not a test but a sweep across an established rule: list every
+    `sceKernelRefer*Status` we implement, check each for "a caller offering
+    zero bytes gets zero back and nothing written". Thirteen calls, nine had
+    it.
+
+    Three did not -- sema, event flag, callback -- and each is pinned by its
+    own test printing `00000000 => 00000000` against `=> 00000034` or
+    `=> 00000038` for every other size. All three predate the commit that first
+    wrote the rule down, which is exactly why: it was established while
+    implementing `mutex` and applied forward, never backward.
+
+    The fourth apparent gap was a fault in the census itself.
+    `sceKernelReferLwMutexStatus` looks unguarded because the guard lives in
+    `lw_refer`, the helper it and `ReferLwMutexStatusByID` both delegate to.
+    Pattern-matching a function body does not see through delegation -- worth
+    remembering the next time one of these sweeps looks conclusive.
+
+    A fourth call had a different bug the census surfaced anyway:
+    `ReferCallbackStatus` answered the generic `UNKNOWN_UID` where a callback
+    has its own id error, the same one notify and cancel already used.
+
+    `semaphores/refer`, `events/refer` and `callbacks/refer` all match
+    hardware. Suite 1,578 to 1,566, 62 matching.
+
+    The method is worth repeating. Every rule in this file that was established
+    for one object type and applied forward is a candidate: the types written
+    before it will lack it, and their tests will say so without anyone having
+    opened them.
