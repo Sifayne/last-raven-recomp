@@ -1856,3 +1856,46 @@ faithful execution of that test.
     now happen often enough that each notify arrives on its own and the
     accumulated count never reaches 2. Both are about *when* delivery happens,
     which is the next question in this area.
+
+    ### When a callback is delivered: one moment, found by elimination
+
+    Every CB wait delivered on the way *in*, unconditionally. The real point is
+    neither end of the call, and two tests fix it between them.
+
+    `callbacks/callbacks` notifies a callback and calls `sceKernelLockMutexCB`
+    three times, printing four consecutive lines:
+
+    ```
+    Lock 0 => 5: 800201BD                    illegal count
+    cbHandler called: 00000002, ...          <- two arrive at once
+    Lock 0 => 1: 00000000                    succeeded
+    Lock 1 => 1: 800201C8                    already held
+    ```
+
+    The count of **two** proves that a call refused on its arguments delivers
+    nothing: the first call's notify was still pending. So delivery is *after*
+    validation.
+
+    Moving it to the way out, on success, is wrong twice over.
+    `sceKernelWaitThreadEndCB` returns the awaited thread's **exit status** --
+    an arbitrary number, 5 here -- so "succeeded" cannot be read from the
+    return value at all; and a CB wait that *times out* delivers. The question
+    is whether the call reached its wait, not how it ended.
+
+    And it is not the way out either: `threads/threadend` tags the handler's
+    line `[x]` and the wait's result `[r]`, so a reschedule falls between them
+    and the handler ran *before* the wait blocked.
+
+    That leaves one moment -- past the argument checks, not yet blocked -- and
+    every waiting call passes through it exactly once, in `psp_wait_deadline`.
+    Worth noting that the `[x]`/`[r]` column, which this file has treated as
+    noise throughout, is what settled the last step.
+
+    One correction fell out: `sceKernelLockMutex` took its deadline *before*
+    refusing a non-recursive relock, so that refusal counted as reaching the
+    wait and delivered. The check moved up with the other argument checks --
+    an ordering that read as arbitrary until the delivery point landed between
+    the two positions.
+
+    `callbacks/callbacks` matches hardware; `vpl/allocate` 14 to 4, against 9
+    before this area was touched at all. Suite 1,719 to 1,703, 54 matching.
