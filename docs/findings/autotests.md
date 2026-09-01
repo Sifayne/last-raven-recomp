@@ -1712,3 +1712,27 @@ faithful execution of that test.
 
     Threads suite at this point: **42 of 127 matching, 1,967 differing lines**,
     from 0 of 127 and 8,057 at the start of this work.
+
+    ### `mutex/cancel`: a re-arm, and a sentinel that is not zero
+
+    20 differing lines to 0, and the second of the two findings reached four
+    other files.
+
+    **`sceKernelCancelMutex` re-arms the mutex.** It is not just a release: it
+    sets the count, and the test sweeps that count against a mutex it never
+    locks by any other means. The ceiling is a lock's -- one, when the mutex is
+    not recursive -- and exceeding it leaves the object *and* the caller's
+    wait-count word untouched. A negative count is not a count; it means
+    unlocked, as zero does.
+
+    **An unheld mutex reports its owner as `-1`.** The tests read that field
+    through `info.lockThread == -1 ? 0 : 1`, so the zero we wrote for a free
+    mutex printed as *locked* -- an error that inverts a boolean rather than
+    perturbing a number, which is why it was worth four other tests
+    (`mutex/create` 18 to 2, `refer` 2 to 0, `unlock` 10 to 6).
+
+    It also forced a small correction of an assumption: the owner cannot be
+    derived from the uid alone, because the main context's uid is **0**, so a
+    mutex held by it is indistinguishable from a free one by that field. The
+    count is what says whether it is held. Worth remembering wherever else a
+    uid of zero is treated as "nobody".
