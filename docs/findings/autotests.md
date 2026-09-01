@@ -2043,3 +2043,31 @@ faithful execution of that test.
 
     Six of the eight `mbx` tests now match hardware. Suite 1,636 to 1,612, 57
     matching.
+
+    ### `mbx/priority`: "never joined the queue" is observable
+
+    30 differing lines to 0, by deleting one write.
+
+    A message sent while a receiver is already waiting goes straight across
+    without joining the queue. Ours said so in a comment and then wrote a
+    ring-of-one into the packet anyway -- harmless-looking, since the message
+    is being handed over rather than stored.
+
+    It is not harmless, because the packet is the *guest's* memory. The test
+    poisons every packet with `0xDEADBEEF` before sending and reads that value
+    back out of the delivered message:
+
+    ```
+    GOT: "hi 2" (next=DEAD, prio=15)
+    ```
+
+    `DEAD` is the poison surviving. A message that had been queued carries
+    `ITSELF`, and the difference between the two is the whole question of
+    whether it was ever in the queue. Seven of the eight `mbx` tests now match
+    hardware; suite 1,612 to 1,582, 58 matching.
+
+    Three of this directory's fixes have now been the removal of a write to
+    guest memory that we had no business making -- the received packet's
+    `next`, the delivered packet's `next`, and the mailbox's head. Structures
+    the guest owns are observable in a way internal ones are not, and every
+    field written into them is a claim being made about hardware.
