@@ -2071,3 +2071,22 @@ faithful execution of that test.
     `next`, the delivered packet's `next`, and the mailbox's head. Structures
     the guest owns are observable in a way internal ones are not, and every
     field written into them is a claim being made about hardware.
+
+    ### `mbx/refer`, and the last two lines of the directory
+
+    Two rules, one of them already written down elsewhere in the same file.
+
+    **A `Refer*Status` offering zero bytes writes nothing.** The mutex, thread,
+    alarm and pool versions all follow it -- it is recorded above as one of the
+    corrections that fell out of implementing `mutex` -- and the mailbox's was
+    written before that and never revisited. `Size 00000000 => 00000000`
+    against `=> 00000034` for every other value the sweep tries, including -1.
+
+    **A send is refused by a ring the guest has already broken.** Where a
+    *receive* from such a mailbox has two distinguishable failures, a send has
+    exactly one observable effect: the test breaks the ring, sends another
+    message, and reads the count back unchanged.
+
+    All eight `mbx` tests now match hardware, from 4, 2, 8, 24, 16, 10, 29 and
+    40 differing lines when this directory was first opened. Suite 1,582 to
+    1,578, 59 matching.
