@@ -2522,3 +2522,40 @@ faithful execution of that test.
      `CPUDI`; it is now called that, and its two existing callers say so.
      Nothing warned: two `#define`s of one name are only an error if the
      bodies differ textually, and these were both plain integers.
+
+     ### Ordering rules, and a cap that hid as an allocation failure
+
+     118 to **120 of 432**, `threads` 82 to **84 of 127**, nothing worse.
+
+     - **`fpl` and `vpl` never got the cap the other types got.** It read as
+       `Failed at 0` rather than `Failed at 64`, because the earlier sections
+       of `fpl/create` leave their pools alive — so the loop had no slot to
+       start from, and the failure looked like memory rather than
+       bookkeeping. The same miscounting made the alignment sweep's 4096 case
+       report `NO_MEMORY` for a 64K pool.
+     - **An unmapped pointer is refused before `sceKernelFreeVpl` looks at the
+       uid.** A null uid with a good pointer is `UNKNOWN_VPLID`; a null uid
+       with 0xDEADBEEF is 0x800200D3. The argument the kernel objects to first
+       is not the first argument.
+     - **A waiter absorbs a signal that would otherwise overflow.**
+       `semaphores/signal` refuses +2 on an idle 0/1 semaphore and allows the
+       same +2 on one with a thread queued for 1, so the overflow test has to
+       look past the queue before it refuses.
+
+     Two things found and deliberately not acted on:
+
+     **`vpl/create`'s pool arithmetic**, which is out of the band at 18 lines
+     but whose rule is now known: `poolSize` is the requested size rounded up
+     to 8, less 0x20 of overhead — *except* that a pool which would end up
+     with 0x10 or less usable becomes a whole 0x1000 page instead. The sweep
+     shows both halves plainly: 0x30 gives 0xFE0 and 0x31 gives 0x18.
+
+     **The error names in `hle.h` do not all belong to their numbers.**
+     0x800200D2 is `ILLEGAL_ARGUMENT` and not `ILLEGAL_PARTITION` (0x800200D6);
+     0x800200D3 is `ILLEGAL_ADDR` and not `ILLEGAL_SIZE` (0x800201BC, which is
+     in the header under the invented name `ILLEGAL_SIZE_MPP`). This is the
+     same trap that produced the `ILLEGAL_CONTEXT` bug above, still loaded: a
+     future correct constant would collide with a wrong name and lose
+     silently. Left as a separate audit because it is a rename across 34 call
+     sites and wants doing against the whole published list at once, not
+     three entries at a time.
