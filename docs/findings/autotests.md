@@ -2644,3 +2644,66 @@ faithful execution of that test.
        compacted, so one past the highest slot ever handed out is the correct
        bound. Callbacks, semaphores and event flags got it on principle;
        vtimers is the one that was measured.
+
+     ### Why we rescheduled where hardware did not
+
+     127 to **128 of 432**, `threads` 88 to **89 of 127**, differing lines
+     71,762 to 71,738.
+
+     Two hypotheses were on the table, both framed as a single number with a
+     physical meaning, and **both were wrong**. Neither cost a sweep, which is
+     the point worth keeping.
+
+     The first was that a firmware call costs more than one microsecond of
+     guest time, so msgpipe's `1us:` and `2us:` waits would find their deadline
+     already passed. It is not reachable by any value of `PSP_CALL_TICK_US`.
+     The tick is charged at *call entry* (`psp_hle_call`), and the handler then
+     computes its deadline as `psp_clock_peek() + usec` from that
+     already-advanced clock before comparing it against the same unchanged
+     value. The cost moves the deadline and the comparison point by exactly the
+     same amount: it is a relative offset, and the guard can never fire for a
+     nonzero timeout however expensive a call is made.
+
+     The second was that the 5000us quantum fires mid-sequence. It does not
+     fire at all. Instrumented to report every time it actually switches, the
+     slice fired **zero** times in `mutex/unlock2`, `threads/change`,
+     `threads/threadend`, `msgpipe/receive`, `msgpipe/send` and
+     `threads/suspend` — and twice in the whole `threads` suite, both in
+     `callbacks/notify`, which is how the probe was shown to be alive rather
+     than broken.
+
+     What it actually is, and it was already written down here: **giving way to
+     a thread you just woke is a preemption, not a yield.** `psp_sched_wake`
+     sets `urgent` on a strict `priority <` and nothing else, so a caller that
+     switches on it did not volunteer — it was displaced. sched.c has described
+     the difference since `threads/change` first showed it, and
+     `sceKernelStartThread` was wired to `psp_sched_preempt` accordingly; the
+     28 wake sites were left calling `psp_sched_yield`, which sends the caller
+     to the *tail* of its own priority queue. pspautotests creates its resched
+     thread at exactly the main thread's priority, so an equal-priority thread
+     waiting there overtakes the caller on the way back — and that overtaking
+     is the entire thing a checkpoint measures.
+
+     `threads/mutex/unlock2` is the whole difference in one line. The switch
+     trace before and after, on `Unlocked, ran: 4`:
+
+         better(p16) -> resched(p32)     [r], ours
+         better(p16) -> user_main(p32)   [x], hardware
+
+     One test moved the wrong way, and it is worth being exact about why it is
+     not a counter-example. `threads/scheduling/scheduling` went 36 to 38
+     differing lines on a **single** flipped line — a one-line change re-aligns
+     the diff around it — and that line is inside
+     `testNoThreadSwitchingWhenSuspendedInterrupts`:
+
+         int intr = sceKernelCpuSuspendIntr();
+         checkpoint("  sceKernelWakeupThread: %08x", sceKernelWakeupThread(sleepingThid));
+
+     The woken thread is priority 0x10 against the main thread's 32, so it does
+     outrank it — but interrupts are suspended and hardware must not switch.
+     `sceKernelCpuSuspendIntr` is bookkeeping only here (`g_intr_enabled` in
+     misc.c is set and never read), so we take the switch either way and get
+     the line *ordering* wrong in both versions. The old `[r]` was produced by
+     a switch that should not happen at all: right in the column, for a reason
+     hardware does not have. Gating dispatch on interrupt masking is a separate
+     finding and the test is 38 lines from passing regardless.
