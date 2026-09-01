@@ -2180,3 +2180,57 @@ faithful execution of that test.
     release and count matches. That residue is the memory-map difference that
     also holds `threads/create` at 254, and it is the only thing between this
     test and hardware.
+
+    ### The HLE is psprecomp's Phase 4, and it did not build on Windows
+
+    Not a test finding. A census of a different kind, prompted by asking where
+    this work belongs.
+
+    `psprecomp/ROADMAP.md` **Phase 4 — the HLE library** lists threads,
+    semaphores, event flags, mutexes, callbacks, memory partitions, timers,
+    `sceIo`, `sceCtrl`, `sceDisplay`+`sceGe`, `sceAudio`/`sceSas` and import
+    resolution. Every box unchecked. `ARCHITECTURE.md` lists the HLE alongside
+    the CPU and the GE as a first-class component, and the README calls runtime
+    libraries part of the product. Measured:
+
+    ```
+    upstream src/hle:   2,350 lines,  8 files
+    ours:              12,237 lines, 18 files
+    created by the series: clock, ctrl_replay, kernlock, kernobj,
+                           ktimer, mpeg, sched, umd, waitq
+    ```
+
+    So the HLE belongs exactly where it is, and this work *is* that phase. It
+    was already integrated on the project's own terms -- our files sit in its
+    `CMakeLists.txt` source list, three suites were added to its `tests/` under
+    that directory's no-game-data rule, and the licence posture is the one its
+    README picks a fight over.
+
+    One thing did not fit, and it was ours:
+
+    ```
+    upstream psprecomp uses pthreads:  nowhere
+    sched.c:  86 sites   clock.c: 2 sites   render.c: 1 site
+    ```
+
+    The README says "MSVC on Windows; gcc/clang elsewhere". We introduced an
+    entire POSIX threading dependency into a codebase that had none, so the
+    runtime did not build on a platform the project claims. `find_package
+    (Threads)` does not save it: that links a library, it does not make
+    `pthread_mutex_t` a type.
+
+    Fixed by `include/psprecomp/os.h` + `src/os.c` -- five primitives, two
+    backends. Two details worth keeping:
+
+    - **A POSIX condition variable's timed wait is on `CLOCK_REALTIME` by
+      default**, so a deadline computed from a monotonic clock expires at an
+      unrelated moment, or never. The attribute has to be set explicitly, which
+      is why a statically-initialised condvar needs an init call after all.
+    - **The Windows monotonic clock overflows the obvious arithmetic.**
+      `counter * 1e9 / frequency` exceeds 64 bits within seconds of uptime at a
+      10 MHz counter, so it is computed as seconds plus remainder.
+
+    The Windows half is **written and not run** -- there is no MSVC or mingw
+    here. `mingw-w64-gcc` would compile-check it. The POSIX half is verified the
+    usual way: the threads suite is byte-identical across the change, 62
+    matching and 1,537 differing before and after.
