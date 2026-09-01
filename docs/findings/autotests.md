@@ -1670,3 +1670,25 @@ faithful execution of that test.
     The two lines left are both the virtual clock -- one `[x]`/`[r]`, and one
     timeout readback of `10ms remaining` against hardware's `8ms`, which is the
     same thing measured in milliseconds.
+
+    ### `msgpipe/cancel`, and a constant that had been named on a guess
+
+    8 differing lines to 0. The gap was the one flagged as open one commit
+    earlier, and the mechanism to close it was already there: cancelling an
+    object is not destroying it, and the waiters turned out of it answer
+    `800201a9` where a delete's answer is `800201b5`. Only the waker knows
+    which, so it says so.
+
+    Worth recording what the value turned out to be. `0x800201A9` was already in
+    `hle.h`, named `SCE_KERNEL_ERROR_ILLEGAL_MEMBLOCK` -- and **never used**.
+    That name was a guess made before the pool types were written, and the
+    captures overruled it at the time: a pool's "not a live block of mine" is
+    `0x800201B6`, which is why `ILLEGAL_MEMBLOCK_PTR` exists next to it. The
+    guess was left behind rather than removed, and sat there looking like
+    knowledge. It is `WAIT_CANCEL`.
+
+    The timeout readback came right with it -- `timeout = 8ms remaining`,
+    matching hardware exactly -- which is worth noting against the two
+    neighbouring tests where that readback is still 2ms out: the millisecond
+    difference there is not a fixed offset in the clock, it is a consequence of
+    a wait taking a different path.
