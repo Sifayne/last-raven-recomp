@@ -2281,3 +2281,48 @@ faithful execution of that test.
     Worth keeping as a distinction. "Where did this number come from" and "what
     makes it right" are different questions, and a comment that answers only the
     first has borrowed someone's homework even when nothing was copied.
+
+     ### `tls/get`: four rules about a pool, and one about uids
+
+     48 differing lines to **6**, and the directory 144 to 74. Four of the
+     rules are cheap once seen, and each is a thing the obvious implementation
+     gets wrong in a way that looks reasonable:
+
+     - **The index a pool reports is a slot, not a count of the living.** The
+       test makes two pools, deletes the first and makes a third; hardware
+       gives the third index 0. Counting survivors answers 1.
+     - **Blocks are handed out round-robin.** Take and free from a pool of
+       three, four times over, and the offsets are +0000, +0010, +0020, +0000.
+       First-free answers +0000 every time — and is indistinguishable from
+       correct until the pool has more than one block *and* something is freed
+       between the takes.
+     - **The option struct's alignment is a block stride, not a pool
+       placement.** One-byte blocks with alignment 0x100, 1 and 0 are spaced
+       0x100, 4 and 4 apart: it rounds each block up, anything below four is
+       four, and a pool created with no options behaves as though it asked for
+       four. The reported `blockSize` stays what was asked for, so the stride
+       is not observable through `Refer` — only through the addresses.
+     - **A block is zeroed when it is handed out.** The evidence is the pair,
+       not the single line: scribble 0xCC, free, take again and the read is
+       zero; scribble again and take *without* freeing and it is still 0xCC.
+       The second take is the already-ours early return, which is what places
+       the clearing in the allocation branch rather than at the top of the
+       call.
+
+     ### The six lines left in `tls/get`, and what they would cost
+
+     `sceKernelGetTlsAddr` does not validate its uid. It indexes an object
+     table, and a PSP uid encodes that index as `uid >> 3`. Every case fits:
+     with two pools alive at slots 0 and 1, uid 0 and uid 1 both answer the
+     first pool's base, 0xF answers the second's, and 0x10, 0x17, 0x18, -1 and
+     0xDEADBEEF all fail. `ReferTlsplStatus` on the same uids answers
+     `800201D0`, so the laxity is this one call's, not the object table's.
+
+     Not implemented, and deliberately. Our uids come from a global counter
+     with no table index in them, so reproducing this means either a fallback
+     that tries `index == uid >> 3` when the exact match fails — which fits
+     every line of this test and is not the mechanism, since it would be dead
+     code the moment uids did encode an index — or giving every kernel object
+     a uid derived from its slot in a shared table. The second is the real
+     fix, it is a change to every object type at once, and it is worth doing
+     for a better reason than six lines of one test.
