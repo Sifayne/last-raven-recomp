@@ -1926,3 +1926,31 @@ faithful execution of that test.
     the test to sit on that boundary. Nothing in the captures says what a vpl
     allocation costs, so tuning to it would be fitting the constant to the
     test.
+
+    ### A threshold that is in the data and is not a rule
+
+    `msgpipe/receive` sweeps a wait's timeout one microsecond at a time against
+    an empty pipe, and the `[x]`/`[r]` column changes at a single place:
+
+    ```
+    [x] 0us   [x] 1us   [x] 2us   [r] 3us   [r] 4us   [r] 5us  ...
+    ```
+
+    That reads exactly like a kernel deciding a handoff costs more than a wait
+    of two microseconds is worth. It is the cleanest-looking measurement in the
+    suite, it made `msgpipe/receive` and `msgpipe/send` match, and it is wrong.
+
+    Refusing to park below the threshold took **forty tests to no output at
+    all**. pspautotests' own workers spin on 1us waits at a priority above the
+    main thread; a wait that never parks never yields, so the thread that was
+    going to release them never runs again. The `[x]` at 1us therefore does not
+    mean "did not park" -- it means "parked, and nothing else managed to use
+    the microsecond". Which of those it is remains open.
+
+    Two things worth keeping from it beyond the finding. The sweep reports a
+    test with no output as zero differing lines, so a naive count of
+    zero-difference rows called that run **68 matching** -- the best number of
+    the session, produced by breaking a third of the suite. The verdict column
+    exists for exactly this and is the thing to count. And this is the second
+    time in this file that an empty output has read as success; the first is
+    recorded near the top as a trap, which did not stop it happening again.
