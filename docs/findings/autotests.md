@@ -2492,3 +2492,33 @@ faithful execution of that test.
      that a semaphore at zero *with a waiter* answers `ILLEGAL_COUNT` and not
      `SEMA_ZERO` — one observation supports it and nothing contradicts it, and
      the comment in the code says so.
+
+     ### The content half of the band: four more, and a name that hid a bug
+
+     116 to **118 of 432**, `threads` 80 to **82 of 127**, nothing worse.
+
+     - **A vtimer handler is handed two clock *pointers*, not one clock.** The
+       signature takes `SceKernelSysClock *` for both `elapsedScheduled` and
+       `elapsedReal`; passing the schedule's low and high words in a1/a2 put a
+       small integer where an address belonged. `vtimers/vtimer` dereferences
+       the second argument and prints what it finds, which is how a wrong
+       calling convention showed up as a garbage number rather than a crash.
+       `sethandler` dropped eight lines with it.
+     - **A vtimer cannot be deleted from inside a handler**, and the code says
+       why: `ILLEGAL_CONTEXT`, which is about where the call was made from
+       rather than what it was made on.
+     - **`fpl`'s option alignment spaces its blocks out**, exactly as a
+       tlspl's does. This one is worth the warning: `fpl/tryallocate` measures
+       16 bytes between blocks in three sections and 32 in the fourth, all
+       with the same `blockSize=0x10`. Reading only the failing lines makes it
+       look like a property of the block size. The fourth section is the one
+       that passes `opt.alignment = 32`.
+
+     And a bug that existed only because of a name. Adding
+     `SCE_KERNEL_ERROR_ILLEGAL_CONTEXT` at 0x80020064 -- PSPSDK's value --
+     produced a *second* definition of that name in the header, because
+     0x80020066 was already carrying it. The later definition quietly won, and
+     the vtimer's refused delete answered the dispatch code. 0x80020066 is
+     `CPUDI`; it is now called that, and its two existing callers say so.
+     Nothing warned: two `#define`s of one name are only an error if the
+     bodies differ textually, and these were both plain integers.
