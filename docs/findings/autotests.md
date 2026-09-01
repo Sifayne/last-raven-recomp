@@ -1819,3 +1819,40 @@ faithful execution of that test.
 
     A comment citing evidence is worth more than one that doesn't, and it is
     also more dangerous: it stops the next reader from re-deriving the thing.
+
+    ### The scheduling harness, and a census worth repeating
+
+    Eight of the test groups share a harness that starts a worker, has it spin
+    on a wait that can only end when main deletes the object under it, and
+    prints a six-letter trace of which thread was last active at each step.
+    Hardware's is `A1B1C2E1D1F2`; ours was `A1B1D2C2E1F1`. A different letter
+    *order* is the harness saying the two threads interleaved differently, and
+    it says so in every test that uses it.
+
+    The cause was one unregistered call. **`sceKernelWaitEventFlagCB` did not
+    exist**, and an unimplemented call returns zero -- which is exactly what a
+    *successful* wait returns. So the worker's loop ended on its first
+    iteration and the worker was never waiting while the rest of the test ran.
+
+    That prompted a census rather than another single fix: list every
+    `sceKernel*CB` the suite calls, diff against what we register. Two were
+    absent entirely and six more were registered straight to their non-CB
+    handlers -- they waited correctly and delivered nothing, the suffix being
+    the whole difference between the two calls. Worth repeating for other
+    suffixes.
+
+    One more rule came out of the same trace: **a wait released by a delete
+    reports a pattern of zero**, because there is no longer a flag to have one.
+    The harness reads that word after deleting the flag under its waiter.
+
+    `events/clear`, `events/set`, `events/poll`, `events/delete` and
+    `events/events` all went to 0; `wait` 24 to 2, `create` 12 to 2, `refer` 8
+    to 2, `cancel` 36 to 30. Suite 1,806 to 1,719, 48 matching to 53.
+
+    Two tests got noisier and both are the fix exposing new behaviour rather
+    than breaking old: `vpl/allocate` 9 to 14, whose own harness expects `E2`
+    where the events one expects `E1` -- so the worker is supposed to run at a
+    point ours does not -- and `callbacks/callbacks` 4 to 6, where deliveries
+    now happen often enough that each notify arrives on its own and the
+    accumulated count never reaches 2. Both are about *when* delivery happens,
+    which is the next question in this area.
