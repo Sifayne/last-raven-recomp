@@ -2544,11 +2544,14 @@ faithful execution of that test.
 
      Two things found and deliberately not acted on:
 
-     **`vpl/create`'s pool arithmetic**, which is out of the band at 18 lines
-     but whose rule is now known: `poolSize` is the requested size rounded up
-     to 8, less 0x20 of overhead — *except* that a pool which would end up
-     with 0x10 or less usable becomes a whole 0x1000 page instead. The sweep
-     shows both halves plainly: 0x30 gives 0xFE0 and 0x31 gives 0x18.
+     **`vpl/create`'s pool arithmetic** — and this one was wrong when first
+     written here. `poolSize` is the requested size rounded up to 8, less 0x20
+     of overhead, which is exact from 0x31 upward. The five smaller sizes all
+     report 0x0FE0, and reading that as "a pool below a floor becomes a whole
+     0x1000 page" is modelling test noise: `schedfVpl` refers into an
+     **uninitialised stack struct** and prints what the previous iteration
+     left in it. The comment above `vpl_pool_size` in kernobj.c had already
+     established this. Those five lines cannot be matched and should not be.
 
      **The error names in `hle.h` do not all belong to their numbers.**
      0x800200D2 is `ILLEGAL_ARGUMENT` and not `ILLEGAL_PARTITION` (0x800200D6);
@@ -2597,3 +2600,47 @@ faithful execution of that test.
      delivered. Both belong with the checkpoint-column work rather than ahead
      of it, which means the band and that investigation are not as cleanly
      separable as the classification suggested.
+
+     ### The end of the band, and a regression the numbers nearly hid
+
+     125 to **127 of 432**, `threads` 86 to **88 of 127**.
+
+     `fpl/allocate` and `fpl/tryallocate` finished the fpl directory on one
+     finding: **a waiter handed a block is not a waiter whose pool vanished.**
+     Both were woken the same way, so the waiter told them apart by asking
+     whether the pool still existed — and `fpl/allocate` deletes the pool
+     immediately after the free that hands a block over. The block is not
+     taken back by that delete. A message pipe already drew this distinction;
+     nothing else does, and the other five object types still have the bug
+     with no test that catches it.
+
+     ### What the sweep caught, and what nearly stopped it being caught
+
+     The same sweep reported `utility/msgdialog` going from 139 differing
+     lines to **no output at all** — a test in a directory nobody had touched.
+
+     The cause was the *first* change of the band, twenty commits earlier:
+     raising the object caps to 2048. `vtimer_tick` runs at every firmware
+     call by design, so its scan went from 32 iterations to 2048 on the
+     hottest path in the runtime, and the test stopped finishing inside its
+     budget. A correctness change with no correctness consequence, paid for in
+     time.
+
+     Three things about finding it are worth keeping:
+
+     - **It was invisible in the headline.** Matching went *up* in that sweep.
+       Only the per-test join against the previous run showed a test moving
+       the wrong way, and NOOUTPUT is scored separately from MATCH so nothing
+       about 127 looked wrong.
+     - **The first two bisection steps were worthless.** `git revert
+       --no-commit` followed by `git checkout -- .` left `hle.h` modified, so
+       two "reverts" were built against a mixed tree and both said the bug was
+       still there. The give-away was a checkout that *failed* with "local
+       changes would be overwritten" and a test that ran anyway. A `git reset
+       --hard` between steps is what made the search mean anything.
+     - **The fix is the same shape as an existing one.** sched.c already
+       describes its slot table as "a high-water mark rather than a census".
+       These tables are too: freed slots stay in range and are never
+       compacted, so one past the highest slot ever handed out is the correct
+       bound. Callbacks, semaphores and event flags got it on principle;
+       vtimers is the one that was measured.
