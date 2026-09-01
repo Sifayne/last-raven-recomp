@@ -1601,3 +1601,38 @@ faithful execution of that test.
 
     Suite: 2,144 differing lines to 2,051, 38 matching. `data` 63 to 0, `send`
     24 to 12, `receive` 22 to 12, `delete` 8 to 4, `trysend` 16 to 12.
+
+    ### `msgpipe/create`: the seventh attribute mask, and two ceilings
+
+    28 differing lines to 2, in three findings, only one of which is about
+    message pipes.
+
+    **The attribute mask is `0x51FF`**, and the sweep settles it in two lines:
+    `0x3FF` is refused and `0x51FF` is accepted, so the legal set is the low
+    nine bits plus the two queue-order bits. That is now seven object types with
+    seven different masks -- sema `0x1FF`, event flag `0x2FF` minus `0x100`,
+    mutex `0xBFF`, lwmutex `0x3FF`, vpl `0x43FF`, mbx `0x5FF`, fpl and tlspl
+    `0x41FF`, msgpipe `0x51FF`. **Read the capture for the type you are
+    implementing.**
+
+    **A request too big to round up was allocated anyway.** In the allocator,
+    not in msgpipe:
+
+    ```c
+    uint32_t rounded = (size + 0xFF) & ~0xFFu;
+    if (!rounded) rounded = 0x100;
+    ```
+
+    `0xFFFFFFFF + 0xFF` truncates to `0xFE`, masks to 0, and the zero-size guard
+    on the next line turns it into a **256-byte** allocation that succeeds. A
+    caller asking for four gigabytes got a handle and a buffer three orders of
+    magnitude smaller than the one it thinks it has. Every caller of
+    `psp_sysmem_alloc` had it; the test that asks for `0xFFFFFFFF` is the one
+    that noticed.
+
+    **Two ceilings, and the second was invisible behind the first.** The test
+    ends by creating 1024 pipes and checking they all succeeded. We failed at
+    64 (the pipe table), and then at 507 (the allocator's block table, 512
+    entries, one per allocation). Both were guesses about what a game needs, and
+    the tests are the only thing here that has ever named a number. A capacity
+    failure tells you about exactly one limit at a time.
