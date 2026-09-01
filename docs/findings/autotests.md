@@ -1790,3 +1790,32 @@ faithful execution of that test.
     performance that nobody had checked. The same file already records the
     identical correction being made to the *other* constant, from 100 to 1, for
     the same reason. It was made once and not carried across.
+
+    ### `events/poll`, and a check order that was written down backwards
+
+    74 differing lines to 10. `sceKernelPollEventFlag` was not registered, so
+    it answered OK, wrote nothing and cleared nothing -- all 37 lines wrong.
+
+    It is the wait's immediate path, so writing it surfaced two rules the wait
+    had only half of: **`PSP_EVENT_WAITCLEARALL` (0x10)** clears the whole
+    pattern where `WAITCLEAR` clears only the bits waited for (the test shows
+    the pair on consecutive lines from the same starting pattern --
+    `cur=FFFFFFFE` against `cur=00000000`), and both clear modes at once is
+    `ILLEGAL_MODE`. And **a poll counts as a waiter** for the single-waiter
+    rule even though it never parks.
+
+    The poll's own rule: a poll that finds the pattern absent still writes the
+    *current* pattern to the out word, where an argument error leaves the
+    caller's `0xDEADBEEF` alone. "Not yet" is an answer, not a refusal.
+
+    Then the part worth recording as method. `hle_WaitEventFlag` carried a
+    comment asserting the check order, citing the capture -- and the order in
+    the comment was **backwards**. Both files show `Wrong (0x04) 0x00000000`
+    answering `ILLEGAL_MODE`, not `EVF_ILPAT`, so the mode is checked before
+    the pattern. The comment got the "arguments before the handle" half right
+    and the relative order of the two argument checks wrong, and it had been
+    read as settled ever since. Correcting it moved `events/wait` 32 to 24 and
+    `events/events` 18 to 6 for free -- two tests that were never looked at.
+
+    A comment citing evidence is worth more than one that doesn't, and it is
+    also more dangerous: it stops the next reader from re-deriving the thing.
