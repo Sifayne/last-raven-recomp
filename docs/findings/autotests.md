@@ -2015,3 +2015,31 @@ faithful execution of that test.
 
     `mbx/receive`, `poll`, `cancel` and `delete` match hardware; `refer` 10 to
     4, `send` 29 to 24, `priority` 30. Suite 1,647 to 1,636.
+
+    ### The rest of `mbx/send`: what the kernel checks and what it does not
+
+    24 differing lines to 0, in four rules, and the interesting one is the case
+    the kernel *does not* mind.
+
+    The test breaks the ring three ways from the guest side and receives from
+    it. Two are refused, with different codes:
+
+    ```
+    next = NULL                     no head to take            800200D3
+    two messages, head is the last  taking it would empty      800201C9
+    ```
+
+    The third -- a two-node ring whose head is not the last, built by pointing
+    a queued message at a packet that was never sent -- is served without
+    complaint, and that is what pins the rest of the model. It returns the
+    never-sent packet, drops the count to zero, and *still reports a non-null
+    first*: `count=0, first=OTHER`, with a walkable message behind it. So the
+    head is `last->next` unconditionally, and the box is empty when the message
+    leaving **is** the last one -- which is not the same as the count reaching
+    zero, and only a tampered ring can tell them apart.
+
+    The fourth rule is `Send twice`: a packet belongs to one queue at a time,
+    and sending the same one again is refused with the count left at 1.
+
+    Six of the eight `mbx` tests now match hardware. Suite 1,636 to 1,612, 57
+    matching.
