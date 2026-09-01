@@ -2433,3 +2433,62 @@ faithful execution of that test.
      be a flat megabyte and that megabyte broke `gum.prx`, which asks for a
      single 0x01500000 block against a 0x01400000 heap, gets NULL, does not
      check it, and formats into its own code at address zero.
+
+     ### The ten-line band: sixteen tests, eight findings
+
+     `threads` 64 of 127 to **80**, the whole suite 100 to **116 of 432**, no
+     test worse anywhere. Ranked by lines, these tests were all within ten of
+     matching, and what they had in common was that each was one rule rather
+     than one subsystem.
+
+     Two of the eight paid for themselves several times over:
+
+     - **Caps of our own, read as hardware's.** Semaphores, event flags,
+       callbacks, mutexes, mailboxes and vtimers were capped between 32 and
+       128, and every `Create 1024` case in the suite reported `Failed at 128`
+       against them. Five tests matched on the constant alone. The headroom
+       above 1024 matters: at exactly 1024 callbacks stopped at 1023, because
+       the process already held one.
+     - **A deleted object still writes back its timeout.** Every wait reported
+       how much of its timeout was left except the path where the object
+       vanished underneath it — the early return there reads as a clean
+       bail-out, but the timeout word belongs to the caller, not the object.
+       Eight sites, one shape, four tests matched.
+
+     The other six are each their own rule:
+
+     - `RotateThreadReadyQueue` refuses a priority a user thread could not
+       hold, and zero — meaning "my own level" — is always allowed.
+     - An event-flag wait with a **zero** timeout reports no pattern at all,
+       where one that ran out reports the pattern it did not get. The test
+       seeds the word with 0xDEADBEEF and reads it back untouched from the
+       zero case and 00000000 from the 5ms case on the next line.
+     - A callback handler may be null and may be nonsense but may not be
+       negative: 0x07ADBEEF is accepted and 0xDEADBEEF is not, and the only
+       thing between them is the top bit.
+     - A callback does not outlive the thread that created it.
+     - A null vtimer uid is `ILLEGAL_VTID`, which PSPSDK names at 0x800201BF —
+       and which of that and `UNKNOWN_VTID` a call answers is **per call**.
+       Start, stop, sethandler and cancelhandler take the first; delete,
+       gettime, getbase, refer and settime take the second. The tests disagree
+       on purpose, so only the two measured here were changed.
+     - Signalling a semaphore past its maximum is refused, not clamped, and
+       nothing moves.
+
+     And one that had to be measured twice. `vtimers/stop` reads a base of 0
+     after three start/stop cycles, which looked like "the base is not set by
+     starting". Making that change matched the test **and cost `sethandler`
+     four lines and `cancelhandler` two** — because `sethandler` prints
+     `base=0` beside every `active=0` and a real reading beside every
+     `active=1`. The base is set by the start and cleared by the *stop*. Both
+     versions matched the test that prompted the change; only one was right,
+     and the directory-wide run is what said which.
+
+     `semaphores/poll` was the other one worth writing down, because its three
+     answers come in an order nothing would suggest. An empty semaphore says
+     `SEMA_ZERO` whatever it was asked for; then the count is settled, before
+     the uid is even a question, so `PollSema(NULL, 0)` is `ILLEGAL_COUNT`
+     where `PollSema(NULL, 1)` is `UNKNOWN_SEMID`. The least certain part is
+     that a semaphore at zero *with a waiter* answers `ILLEGAL_COUNT` and not
+     `SEMA_ZERO` — one observation supports it and nothing contradicts it, and
+     the comment in the code says so.
