@@ -30,7 +30,7 @@ had no interpreter. Phase 1 wrote one.
 
 | Piece | Where |
 |---|---|
-| Allegrex interpreter | `patches/0003` → `tools/allegrexrecomp/interp.{c,h}` |
+| Allegrex interpreter | patch `0003` → `tools/allegrexrecomp/interp.{c,h}` |
 | CLI | `allegrexrecomp interp <elf> [--from] [--trace] [--regs]` |
 | Unit tests | `tests/test_interp.c` — 12 cases, hand-written encodings |
 | Differential harness | `host/oracle_diff.c` |
@@ -492,5 +492,5 @@ the interpreter side.
 3. Run `scripts/06-triage.py` over the full report — it groups divergences by
    signature, which is how the six-address cluster was spotted by eye above.
 4. Let the interpreter service `psp_dispatch`, closing the re-entry exclusion.
-5. Send `patches/0001`–`0005` upstream. Both emitter bugs are silent-truncation
+5. Send patches `0001`–`0005` upstream. Both emitter bugs are silent-truncation
    defects that affect every title, not just this one.

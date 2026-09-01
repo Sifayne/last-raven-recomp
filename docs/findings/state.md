@@ -1131,34 +1131,39 @@ next step and the most behind it.
   `sceKernelChangeThreadPriority` became real. Worth applying to the other
   never-blocking calls before priorities are trusted anywhere else.
 
-## The patch series
+## The fork
 
-Everything upstream-able lives in `patches/`, applied to the `tools/psprecomp`
-submodule by `scripts/build-tools.sh`. **`scripts/verify-patches.sh` is the
-check** — it applies the series to a pristine clone and compares git tree
-hashes, so it sees untracked files the series creates. `--build` also configures,
-compiles and tests the pristine clone, which is the other half of the bar.
+`tools/psprecomp` is a checkout of our fork of psprecomp, tracked like any
+other submodule. It used to be a pristine upstream checkout with a 152-patch
+series in `patches/` replayed over it on every build; everything that series
+did is now history in the fork, one commit per patch, in order, each carrying a
+`Last-Raven-Patch:` trailer naming the patch it came from.
 
-Regenerating a patch in the middle of the series has two traps, and the first is
-not hypothetical — it fired again while writing this:
+That trailer is what keeps this document honest, since it names patch numbers
+in about forty places:
 
-- **Files a patch *creates* are untracked in the submodule**, so a plain
-  `git diff` cannot see them and silently produces a patch with the file missing.
-  Regenerating `0018` this way produced a **zero-line patch** and reported
-  success. `git add -N` the file first.
-- **A patch must be diffed against the state *after* its predecessors**, not
-  against pristine HEAD, or it will clobber their hunks in a shared file. The
-  recipe: clone the submodule, apply `0001`..`N-1`, commit that as a baseline,
-  apply the old `N`, fold the new change in, and diff.
+```bash
+git -C tools/psprecomp log \
+    --format='%h %(trailers:key=Last-Raven-Patch,valueonly)' | grep 0021
+```
 
-**Prefer appending a new patch to regenerating a middle one.** A change to a
-region no existing patch owns — as the GE queue fix was — costs nothing to add at
-the end and avoids both traps entirely.
+`scripts/verify-patches.sh` is gone with the series. What it proved -- that we
+have not silently diverged from upstream -- is now `git log upstream/main..`,
+which answers the same question better.
+
+**Not yet pushed**, so `.gitmodules` points at `/home/sif/Projects/psprecomp` --
+the fork's actual location. That works on this machine and nowhere else, which
+is the honest state of a fork that has not been published; pointing it at
+upstream instead would be worse, since upstream does not have the SHA recorded
+here. Changing it is one command, in the fork's `FORK-NOTES.md`, and until then
+the submodule's remotes are the conventional pair:
+
+    origin    /home/sif/Projects/psprecomp
+    upstream  https://github.com/sp00nznet/psprecomp.git
 
 ## The regression checks, with the numbers they should produce
 
 ```bash
-scripts/verify-patches.sh          # tree diff: byte-identical
 ctest --test-dir build/psprecomp -C Release --output-on-failure   # 12/12
 scripts/05-oracle.sh 4000
 ```

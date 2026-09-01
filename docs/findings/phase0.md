@@ -77,7 +77,7 @@ and are the right place to contribute upstream rather than work around here:
 
 ## Upstream bugs found and fixed
 
-Three, all in `patches/`, all verified to apply to a pristine checkout.
+Three, patches `0001`-`0003`, now the first three of our commits on the fork.
 
 **`0001-cmake-link-libm-on-unix.patch`** — `src/vfpu.c` calls `sinf`/`cosf`/
 `powf`/`logf`/`asinf` but the library never linked `libm`. Invisible on MSVC,

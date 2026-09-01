@@ -4,10 +4,15 @@ Draft text for [sp00nznet/psprecomp](https://github.com/sp00nznet/psprecomp).
 **Nothing here has been posted.** Review and send it yourself, or ask for
 changes first.
 
-The patches sit in `patches/`, applied by `scripts/build-tools.sh`. They apply
-to a pristine checkout in order, reproduce the working tree byte-identically,
-and the suite stays green (12/12). The table below covers the first few; the
-series has grown well past it, so read `patches/` for the current list.
+These are now commits on our fork rather than a patch series, each carrying a
+`Last-Raven-Patch:` trailer with the number the table below uses. The table
+covers the first few; there are 152, so read `git log upstream/main..` in
+`tools/psprecomp` for the current list.
+
+Worth knowing before any of it is offered: about 38 of those commits touch the
+emitter, decoder, interpreter or renderer -- the part that was always
+upstreamable -- 99 are HLE only, and 14 touch both. The 14 need unpicking
+before a clean core-only branch exists.
 
 | patch | what | send as |
 |---|---|---|

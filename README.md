@@ -77,10 +77,9 @@ frame loop and stalls on the intro movie — see
 
 | Path | What |
 |---|---|
-| `scripts/` | the pipeline, one stage per file — 00–06 bring-up, `07-autotests.sh` the behavioural-oracle scaffold, `verify-patches.sh` the patch-series check |
+| `scripts/` | the pipeline, one stage per file — 00–06 bring-up, `07-autotests.sh` the behavioural-oracle scaffold |
 | `host/` | the native host: `boot` (module load, scheduler, GE rasterizer, HLE) and the link probe |
 | `docs/` | decisions and findings |
-| `patches/` | fixes and additions to vendored tools, applied by `build-tools.sh`, checked by `verify-patches.sh` |
 | `tools/psprecomp` | submodule — the recompiler, runtime and interpreter (MIT) |
 | `tools/pspdecrypt` | submodule — decryption, for the mode-9 path psprecomp lacks |
 | `game/`, `reports/` | gitignored working directories |
@@ -103,11 +102,9 @@ means for this project's own license first.
 
 ## Upstream
 
-`patches/` carries the changes to `psprecomp`, applied by `build-tools.sh` and
-verified to apply to a pristine checkout in order — `scripts/verify-patches.sh`
-is that check, and `--build` compiles and tests the pristine clone too. Read the
-directory for the current list rather than a count here, which rots; broadly
-they are:
+`tools/psprecomp` is our fork, tracked as an ordinary submodule. What we have
+added is `git log upstream/main..` there — read that for the current list
+rather than a count here, which rots. Broadly:
 
 | Area | What |
 |---|---|
