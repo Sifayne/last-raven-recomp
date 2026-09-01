@@ -102,6 +102,15 @@ for f in "${ELFS[@]}"; do
         gotc="$REPORTS/07-${name%.*}.cmp"
         tr -d '\r' < "$exp" > "$expc"
         tr -d '\r' < "$got" > "$gotc"
+        # And the same kind of artifact at the other end of the file: ten of the
+        # 435 .expected files have no final newline, though the guest printed
+        # one -- threads/k0/k0's last statement is a printf ending in \n. Left
+        # alone it costs those tests their verdict over a byte the recording
+        # dropped rather than one the PSP withheld. Empty files are left empty,
+        # since silence is the right answer for the framebuffer tests below.
+        [ -s "$expc" ] && [ -n "$(tail -c1 "$expc")" ] && printf '\n' >> "$expc"
+        [ -s "$gotc" ] && [ -n "$(tail -c1 "$gotc")" ] && printf '\n' >> "$gotc"
+        :
         # Compare *before* concluding anything from an empty file.
         #
         # "printed nothing" is only a failure when hardware printed something.

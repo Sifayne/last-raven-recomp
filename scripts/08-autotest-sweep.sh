@@ -57,6 +57,13 @@ while read -r f; do
     [ -f "$got" ] || : > "$got"
     tr -d '\r' < "$got" > "$SWEEPFS/g"
     tr -d '\r' < "$exp" > "$SWEEPFS/e"
+    # Ten of the 435 .expected files end without a newline the guest did print;
+    # see the longer note in 07-autotests.sh. Both scripts have to agree about
+    # this or the sweep and the per-directory run give different verdicts for
+    # the same test, which is worse than either answer on its own.
+    [ -s "$SWEEPFS/e" ] && [ -n "$(tail -c1 "$SWEEPFS/e")" ] && printf '\n' >> "$SWEEPFS/e"
+    [ -s "$SWEEPFS/g" ] && [ -n "$(tail -c1 "$SWEEPFS/g")" ] && printf '\n' >> "$SWEEPFS/g"
+    :
 
     # Compare before concluding anything from an empty file -- see the note in
     # 07-autotests.sh. Tests that check a framebuffer have an empty .expected,

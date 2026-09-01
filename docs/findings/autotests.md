@@ -2559,3 +2559,41 @@ faithful execution of that test.
      silently. Left as a separate audit because it is a rename across 34 call
      sites and wants doing against the whole published list at once, not
      three entries at a time.
+
+     ### Finishing the band: a register nothing pointed at, and a byte
+
+     120 to **125 of 432**, `threads` 84 to **86 of 127**, nothing worse.
+
+     - **A thread starts with `$k0` pointing at its control block.** The block
+       was already being written into the top 0x100 bytes of every thread
+       stack — thread id at +0xC0, stack address at +0xC8, 0xFFFFFFFF at +0xF8
+       and +0xFC — correctly, and *nothing pointed at it*. `threads/k0/k0`
+       takes `$k0` straight out of the register and walks the structure. It is
+       initial register state like `$sp`, so it belongs with the spawn, which
+       is why `psp_sched_spawn` grew an argument.
+     - **`sceKernelGetThreadId` answers nothing inside a handler.** ktimer.c's
+       header had said a handler runs on no thread since it was written; the
+       id call did not know.
+
+     And then a byte. **Ten of the 435 `.expected` files end without a final
+     newline that the guest did print** — `threads/k0/k0`'s last statement is a
+     `printf` ending in `\n`. That is a property of the recording, not of the
+     PSP, and it is exactly the artifact the CRLF strip already in
+     `07-autotests.sh` exists for. Normalising it matched **five** tests
+     outright: `cpu/icache`, `display/display`, `loader/bss`, `threads/k0` and
+     `threads/mutex/mutex`, and took two lines off `intr/intr`.
+
+     This is a loosening of the oracle and worth being plain about. It is
+     narrow — a missing trailing newline is added, empty files are left empty
+     so the framebuffer tests still read as silence — and it had to go into
+     **both** scripts, because a sweep and a per-directory run that disagree
+     about the same test are worse than either verdict alone. That mistake was
+     made first: `07-autotests.sh` was fixed, the sweep still said 10 lines,
+     and the two answers stood side by side for one run.
+
+     Two tests classified as content turned out not to be. `vpl/allocate`'s
+     `E2` against our `E1` is an interleaving marker from the scheduling
+     harness, and `callbacks/cancel`'s missing line is a callback never
+     delivered. Both belong with the checkpoint-column work rather than ahead
+     of it, which means the band and that investigation are not as cleanly
+     separable as the classification suggested.
