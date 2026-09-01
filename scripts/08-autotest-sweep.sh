@@ -21,6 +21,23 @@
 # Ranking by the third column is the point -- a test differing by one line is
 # one bug away, a test differing by five hundred is an unimplemented library,
 # and the two deserve very different amounts of attention.
+#
+# ## Two ways to read this file wrong, both of which have happened
+#
+# **Count $2=="MATCH", never $3==0.** A NOOUTPUT row also has zero differing
+# lines. Counting the third column once reported "68 matching" for a change
+# that had broken a third of the suite into silence -- the best number of that
+# session, produced by breaking it.
+#
+# **Diff per test against the previous run, not the totals.** Matching can rise
+# while an individual test dies, because NOOUTPUT is scored apart from MATCH.
+# That is how a regression went twenty commits unnoticed. This file is
+# gitignored, so copy it aside *before* re-sweeping:
+#
+#   cp reports/08-sweep.tsv /tmp/before.tsv && scripts/08-autotest-sweep.sh
+#   join -t$'\t' -j1 <(sort -k1,1 /tmp/before.tsv) <(sort -k1,1 reports/08-sweep.tsv) \
+#        -o 1.1,1.2,2.2,1.3,2.3 |
+#     awk -F'\t' '($2=="MATCH"&&$3!="MATCH")||($5>$4){print "REGRESSION",$0}'
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
