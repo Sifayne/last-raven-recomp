@@ -2121,3 +2121,30 @@ faithful execution of that test.
     for one object type and applied forward is a candidate: the types written
     before it will lack it, and their tests will say so without anyone having
     opened them.
+
+    ### The guest-owned structure writes: a census that found nothing
+
+    Recorded because a clean result is worth as much as a dirty one, and
+    because the next person to notice the pattern should not have to redo it.
+
+    Three of the `mbx` fixes above were the *removal* of a write into memory
+    the guest owns -- the received packet's `next`, the delivered packet's
+    `next`, and the mailbox's head. That is a class, so it deserves a sweep:
+    every `psp_write*` in the HLE that is not to a documented out-parameter,
+    which is thirty-nine sites in four groups.
+
+    | group | sites | pinned by |
+    |---|---|---|
+    | thread stack k0 area | `threadman.c:418-421` | `threads/start`, which reads `stack[0]` and `stackEnd[-1,-2,-14,-16]` by hand |
+    | lwmutex workarea | `kernlock.c:467-630` | all 8 `lwmutex` tests, which dump it raw including the pad words and `memcmp` the two Refer calls against each other |
+    | mbx ring links | `kernobj.c:1109-1154` | 8 of 9 `mbx` tests, which poison every field with `0xDEADBEEF` first |
+    | vpl in-pool accounting | `kernobj.c:190-273` | `vpl/order`, which walks the kernel's own structures printing every node's address, `next` and size |
+
+    Every group is covered by a test that reads the memory back, and every one
+    of those tests matches hardware. There is nothing to fix.
+
+    Two limits on what that means, so the result is not over-read. The census
+    finds writes we *make* and cannot find writes we *fail* to make -- the
+    mailbox's derived head was the second kind, and only a tampering test could
+    expose it. And it says nothing about the values, only that something checks
+    them; a field written wrongly in a way no test reads is invisible to both.
