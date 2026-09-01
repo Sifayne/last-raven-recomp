@@ -2326,3 +2326,35 @@ faithful execution of that test.
      a uid derived from its slot in a shared table. The second is the real
      fix, it is a change to every object type at once, and it is worth doing
      for a better reason than six lines of one test.
+
+     ### `tls/create`: the same argument, checked against a different table
+
+     40 differing lines to **0**. The directory is 144 to 44, and two of its
+     six now match.
+
+     - **Partitions 8 and 9 are `ILLEGAL_PARTITION` to a tlspl and
+       `ILLEGAL_PERM` to a vpl or an fpl.** All three take the same argument in
+       the same position and `vpl/create.expected` and `fpl/create.expected`
+       disagree with `tls/create.expected` about two of its values, so the
+       shared helper was wrong for one of its callers. Only the 1..7 window is
+       common. Partition 5 is the value no tlspl test covers, and it keeps
+       vpl's answer for want of anything better.
+     - **The option alignment must be a power of two**, refused with that same
+       partition code — which is what an fpl already does with the same field,
+       and remains the least guessable thing about either.
+     - **What bounds a pool is memory.** 0x1000 blocks of 0x100 bytes is a
+       megabyte and succeeds; the 64-entry owner table that made it fail was
+       ours. The two refusals either side of it are a distinction worth
+       keeping: 0x10000 blocks does not fit in *memory* and answers NO_MEMORY,
+       0x1000000 blocks is exactly 2^32 bytes and does not fit in a *word*, so
+       it answers ILLEGAL_MEMSIZE. Checking the overflow and letting the
+       allocator answer for the rest gets both without a table of sizes.
+     - **Sixteen pools, and the seventeenth answers `0x800201D1`.** Observable
+       twice, since the index a pool reports is its slot: the loop fails at 16
+       and the last success reports index 15.
+
+     PSPSDK's `pspkerror.h` does not name `0x800201D1` — its TLS entries stop
+     at the kernel-side trio, `ILLEGAL_KTLSID`, `KTLS_FULL` and `KTLS_BUSY` at
+     `0x800201C0..C2`. The user-side family sits one row down in the same
+     shape, which is corroboration for calling this one `TLSPL_FULL`; what
+     actually pins it is the seventeenth create.
