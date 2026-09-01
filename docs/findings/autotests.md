@@ -2385,12 +2385,9 @@ faithful execution of that test.
 
      144 differing lines to **34**, two of six matching. Of the 34:
 
-     - **~24 are one number.** Every "got result" line reports a block address,
-       and hardware's pool sits at 0x09d357xx-0x09d35axx where ours sits at
-       0x09d00000. `tls/priority` is *nothing but* those, so it matches the
-       moment the number does. This is the memory-map item that has
-       `threads/create` at 254 lines: the module base and the RAM size are
-       ours, not hardware's, and fixing it needs the module regenerated.
+     - **~24 are one number** -- every "got result" line reports a block
+       address, and hardware's pool sits at 0x09d357xx-0x09d35axx where ours
+       sat at 0x09d00000. That turned out to be its own finding, below.
      - **6 are `tls/get`'s uid family** — recorded above, and deliberately not
        implemented.
      - **2 are a sub-microsecond ordering tie in `tls/delete`.** A worker whose
@@ -2402,3 +2399,37 @@ faithful execution of that test.
        NOOUTPUT.
      - **2 are one `[x]` where hardware says `[r]`**, on a thread that sleeps
        and is woken. Not investigated.
+
+     ### A module outside the partition still occupies it
+
+     Filed as the memory-map problem, which it was not. The allocator's own
+     comment said a PRX linked at address 0 "lands outside the partition
+     entirely, so there is nothing to step around" and handed out user RAM
+     from 0x08800000. True of us; not true of the machine being modelled,
+     whose loader put the module in the partition before the test ran.
+
+     What made it measurable is that the difference is not a constant. Three
+     tls tests print a block address, and the address is the guest's heap end,
+     and the heap starts where the module stops:
+
+     | test | module image | implied heap start | address printed |
+     |---|---|---|---|
+     | `delete.prx` | 0x31700 | 0x08835700 | 0x09d35700 |
+     | `priority.prx` | 0x31700 | 0x08835700 | 0x09d35700 |
+     | `free.prx` | 0x319C0 | 0x08835A00 | 0x09d35A00 |
+
+     Three binaries, three different sizes, and the gap between the image and
+     the heap is **0x4000 in all three** -- the loader's own bookkeeping. A
+     single constant would have fitted one of them and been wrong about the
+     other two, which is what makes this a rule rather than a fudge.
+
+     Measured over the whole suite, both directions: **99 to 100 matching,
+     72,288 to 71,886 differing lines, and not one test worse.** Five moved --
+     `tls/priority` to matching, `tls/delete` and `tls/free` 8 to 2, and
+     `video/pmf` and `video/pmf_simple` by 8 and 370 lines, which were not
+     predicted and are the reason a global change gets a global measurement.
+
+     The reservation has to stay honest about its size. The floor here used to
+     be a flat megabyte and that megabyte broke `gum.prx`, which asks for a
+     single 0x01500000 block against a 0x01400000 heap, gets NULL, does not
+     check it, and formats into its own code at address zero.
