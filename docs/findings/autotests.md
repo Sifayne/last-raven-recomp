@@ -1551,3 +1551,53 @@ faithful execution of that test.
     the virtual clock: the test makes **10000** notify calls in a row, and at
     `PSP_CALL_TICK_US` each that is 10ms of guest time against a 5ms timeslice,
     so our rescheduler thread runs twice where hardware's does not run at all.
+
+    ### A message pipe is a byte stream, and `msgpipe/data` says so four times
+
+    63 differing lines to 0. Our transfer was all-or-nothing: a waiter either
+    got everything it asked for or nothing. A pipe is a byte stream, and the
+    test is built to make the difference unmissable -- it runs the *same*
+    scenario four times, varying one thing each time, and the four runs
+    triangulate the model:
+
+    | block | buffer | attr | what it isolates |
+    |---|---|---|---|
+    | Using a buffer | 0x100 | 0 | the baseline |
+    | Without a buffer | **0** | 0 | identical output with nowhere to store |
+    | Using receive priorities | 4 | 0x1000 | which queue that bit orders |
+    | Using send priorities | 4 | 0x100 | the other queue, and the asymmetry |
+
+    Four rules, each of which one block pins:
+
+    - **A waiting receiver is filled in pieces**, into its own buffer, and keeps
+      waiting for the rest. Three receivers wanting four bytes each, senders
+      offering three at a time, and each receiver finally reads a word assembled
+      across separate sends: `msg1`, `msg2`, `msg3`.
+    - **With the buffer drained, a sender hands bytes straight to a receiver.**
+      The no-buffer block produces byte-for-byte the same output as the 0x100
+      one, which it cannot do through storage.
+    - **The two queues take their order from different bits** -- 0x100 for
+      senders, 0x1000 for receivers. We passed the raw attribute to both, so
+      receivers were ordered by the sender's rule.
+    - **A full-wait sender does not part-fill the buffer; an ASAP one does.**
+      This is the subtle one, and the send-priority block reads it out directly:
+      a sender arriving at a pipe with one byte free leaves that byte alone, so
+      the receiver that comes next takes it from a *more urgent* sender instead
+      -- `msgs`, not `msg1`. Had the first sender dribbled its byte in, the
+      whole rest of the block would decode differently.
+
+    One consequence worth stating separately: **whoever satisfies a waiter is
+    the only one who knows how many bytes moved**, because an ASAP waiter can be
+    released with less than it asked for. So the byte count is written by the
+    releaser rather than by the woken thread, and a pipe deleted under a waiter
+    still reports what that waiter had got -- `received = 00000000` where an
+    untouched word would hold the test's 0x1337.
+
+    The rewrite livelocked the first time. The pump keeps the calling thread in
+    the queue so it sits in the right place in the release order, and I set the
+    "something moved" flag on *reaching* that thread rather than on moving
+    bytes, so the loop re-picked it forever. `msgpipe/receive` went from a diff
+    to no output at all, which is the shape a hang takes here.
+
+    Suite: 2,144 differing lines to 2,051, 38 matching. `data` 63 to 0, `send`
+    24 to 12, `receive` 22 to 12, `delete` 8 to 4, `trysend` 16 to 12.
