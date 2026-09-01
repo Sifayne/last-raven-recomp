@@ -2358,3 +2358,47 @@ faithful execution of that test.
      `0x800201C0..C2`. The user-side family sits one row down in the same
      shape, which is corroboration for calling this one `TLSPL_FULL`; what
      actually pins it is the seventeenth create.
+
+     ### `tls/free` and `tls/delete`: ownership is checked in one place only
+
+     Free does not care who holds the block. It is called twice in a row and
+     answers OK both times, and from a thread that never asked while another
+     thread holds the pool's only block — OK again, with `freeBlocks` still
+     zero, so it did not take anyone else's. The uid is validated; ownership is
+     not.
+
+     Delete does care, and about a different thing than the obvious one. A
+     one-block pool with two threads *queued behind it* deletes cleanly; a
+     two- and a three-block pool whose spare blocks went to threads that never
+     returned them both refuse with `0x800201D2`. So the count is of blocks
+     lent out, not of waiters, and the caller's own block does not count
+     towards it. Same row as `TLSPL_FULL` and the same shape as the
+     kernel-side `KTLS_BUSY`.
+
+     And a block is wiped at **both** ends of its life. `tls/free` writes 0xCC
+     over its block, frees it, and reads zero back without asking for it
+     again — so the free did that. `tls/get` dirties a block *after* a free
+     and reads zero after the next hand-out — so the allocation does it too.
+     Either rule alone explains one of the two tests and gets the other wrong.
+
+     ### What is left in `tls`, and it is mostly one thing
+
+     144 differing lines to **34**, two of six matching. Of the 34:
+
+     - **~24 are one number.** Every "got result" line reports a block address,
+       and hardware's pool sits at 0x09d357xx-0x09d35axx where ours sits at
+       0x09d00000. `tls/priority` is *nothing but* those, so it matches the
+       moment the number does. This is the memory-map item that has
+       `threads/create` at 254 lines: the module base and the RAM size are
+       ours, not hardware's, and fixing it needs the module regenerated.
+     - **6 are `tls/get`'s uid family** — recorded above, and deliberately not
+       implemented.
+     - **2 are a sub-microsecond ordering tie in `tls/delete`.** A worker whose
+       1000µs hold expires and a worker just started both become runnable at
+       the same priority within about a microsecond of each other, and
+       hardware runs the older one first. Left alone on purpose: the last time
+       a rule was fitted to a difference this small — the 2µs park threshold in
+       `msgpipe/receive` — it matched one test and took forty others to
+       NOOUTPUT.
+     - **2 are one `[x]` where hardware says `[r]`**, on a thread that sleeps
+       and is woken. Not investigated.
