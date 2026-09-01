@@ -1954,3 +1954,35 @@ faithful execution of that test.
     exists for exactly this and is the thing to count. And this is the second
     time in this file that an empty output has read as success; the first is
     recorded near the top as a trap, which did not stop it happening again.
+
+    ### `mbx/receive`: a line of code that was right for the wrong reason
+
+    A received message keeps the `next` it had. `mbx_pop` overwrote it with the
+    packet's own address, under a comment quoting the capture:
+
+    ```c
+    /* The message leaves pointing at itself, which is what a receiver sees:
+     * `GOT: "hi 0" (next=ITSELF)`. */
+    psp_write32(head + MSG_NEXT, head);
+    ```
+
+    The quote is real and the conclusion does not follow. `hi 0` is the
+    *Single standard* case -- one message in the box -- and a ring of one
+    already points at itself, so the write was invisible there. The test runs
+    three cases in a row and only the middle one separates them:
+
+    ```
+    Single standard:      next=ITSELF     ring of one
+    Multiple standard #1: next=FIRST      the other message, now first
+    Multiple standard #2: next=ITSELF     ring of one again
+    ```
+
+    Deleting the line is the whole fix. `mbx/receive` and `mbx/poll` both match
+    hardware, and `mbx/priority` came down 40 to 30. Suite 1,697 to 1,647, 56
+    matching.
+
+    That is now the third comment in this file found citing evidence for a
+    claim the evidence does not support -- after the event flag's check order
+    and the zero-timeout route. All three were right about *something*, which
+    is what made them look settled. The pattern to watch for is a comment whose
+    example has only one case in it.
