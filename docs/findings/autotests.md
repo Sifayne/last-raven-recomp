@@ -1736,3 +1736,24 @@ faithful execution of that test.
     mutex held by it is indistinguishable from a free one by that field. The
     count is what says whether it is held. Worth remembering wherever else a
     uid of zero is treated as "nobody".
+
+    ### `mutex/unlock`: the one rule an unlock has that a lock does not
+
+    6 differing lines to 0, and one line of code. Unlocking requires *holding*
+    it, and we checked only that the mutex was held by somebody.
+
+    The test isolates it the way this suite usually does -- two adjacent lines
+    with one thing different between them:
+
+    ```
+    Locked 1 => 1: L1 L2 OK (thread=00000000)
+    Locked 0 => 1: L1 L2 Failed (thread=00000000, main=800201C5)
+    ```
+
+    Same call, same count, same thread doing the unlocking. In the first, main
+    created the mutex already locked, so main owns it; in the second it was
+    created free and a worker thread took it first. Only the owner differs.
+
+    The code is `800201C5`, which is the same one an unlock of a *free* mutex
+    gets -- so the kernel does not distinguish "nobody has it" from "somebody
+    else has it". Both are "you do not have it".
