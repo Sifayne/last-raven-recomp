@@ -1,0 +1,96 @@
+diff --git a/include/psprecomp/hle.h b/include/psprecomp/hle.h
+index 79d9042..9312c7c 100644
+--- a/include/psprecomp/hle.h
++++ b/include/psprecomp/hle.h
+@@ -373,6 +373,9 @@ uint32_t psp_threadman_current_priority(void);
+ /* Deliver the current thread's pending callbacks, returning whether any ran.
+  * Every firmware call whose name ends in CB is a wait that does this first. */
+ int psp_threadman_run_callbacks(void);
++/* Raise a callback from outside threadman -- scePowerRegisterCallback fires one
++ * as it registers. Returns what sceKernelNotifyCallback would. */
++uint32_t psp_threadman_notify_callback(uint32_t cbid, uint32_t arg);
+ 
+ /* Shared with the other kernel object types: one uid space, and one way of
+  * writing a name into a SceKernel*Info block. */
+diff --git a/src/hle/misc.c b/src/hle/misc.c
+index 1ffc460..e7661ca 100644
+--- a/src/hle/misc.c
++++ b/src/hle/misc.c
+@@ -1,7 +1,8 @@
+ /* psprecomp — the smaller firmware libraries.
+  *
+  * Kernel_Library, UtilsForUser, StdioForUser, sceSuspendForUser,
+- * LoadExecForUser, ModuleMgrForUser, sceCtrl and sceAudio. Individually small,
++ * LoadExecForUser, ModuleMgrForUser, sceCtrl, sceAudio and scePower.
++ * Individually small,
+  * but collectively they are what a game's C runtime needs before main() gets
+  * anywhere -- newlib's reentrancy setup alone wants interrupt masking, a
+  * clock, and the standard file descriptors.
+@@ -20,6 +21,25 @@
+ #include <errno.h>
+ #include <time.h>
+ 
++/* ---- scePower -------------------------------------------------------------
++ *
++ * scePowerRegisterCallback(slot, cb) is the first half of the single most
++ * common idiom in a PSP program: register a callback, then sleep in
++ * sceKernelSleepThreadCB waiting for the home button.
++ *
++ * Registering *fires* it. That is not a detail of ours -- callbacks/notify
++ * says so on the line that calls it, `scePowerRegisterCallback (causes
++ * notify)`, and proves it two lines later by reading the accumulated count
++ * back as 2 after a single manual notify. The guest learns the current power
++ * state without having to ask for it separately.
++ *
++ * The slot argument is ignored: nothing here ever raises a second power event,
++ * so there is no bookkeeping a slot would serve. */
++static void hle_PowerRegisterCallback(void) {
++    const uint32_t cb = psp_arg(1);
++    psp_ret(psp_threadman_notify_callback(cb, 0));
++}
++
+ /* ---- Kernel_Library ------------------------------------------------------
+  * Interrupt masking. With no interrupts to mask, the pair only has to be
+  * *consistent*: suspend returns a cookie that resume accepts. Games use them
+@@ -533,6 +553,8 @@ void psp_misc_init(void) {
+ }
+ 
+ void psp_misc_register(void) {
++    psp_hle_register(0x04B7766E, "scePower", "scePowerRegisterCallback", hle_PowerRegisterCallback);
++
+     psp_hle_register(0x092968F4, "Kernel_Library", "sceKernelCpuSuspendIntr", hle_CpuSuspendIntr);
+     psp_hle_register(0x5F10D406, "Kernel_Library", "sceKernelCpuResumeIntr",  hle_CpuResumeIntr);
+ 
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index 40fbc7f..186dacf 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -1712,11 +1712,11 @@ static void hle_CreateCallback(void) {
+  * it collects the whole accumulation the next time it asks. callbacks/notify
+  * fires it 10002 times and the handler is entered *once*, with 0x2712 in its
+  * first argument. */
+-static void hle_NotifyCallback(void) {
+-    psp_callback *c = find_cb(psp_arg(0));
+-    if (!c) { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_CBID); return; }
++uint32_t psp_threadman_notify_callback(uint32_t cbid, uint32_t arg) {
++    psp_callback *c = find_cb(cbid);
++    if (!c) return SCE_KERNEL_ERROR_UNKNOWN_CBID;
+     c->notify_count++;
+-    c->notify_arg = psp_arg(1);
++    c->notify_arg = arg;
+     /* If the owner is parked in a CB wait, this ends it. callbacks/notify has
+      * two threads sitting in sceKernelSleepThreadCB that are never woken by
+      * name at all -- the handler lines they print are the only evidence they
+@@ -1726,7 +1726,11 @@ static void hle_NotifyCallback(void) {
+         owner->cb_wake = 1;
+         psp_sched_wake(owner->uid);
+     }
+-    psp_ret(SCE_KERNEL_ERROR_OK);
++    return SCE_KERNEL_ERROR_OK;
++}
++
++static void hle_NotifyCallback(void) {
++    psp_ret(psp_threadman_notify_callback(psp_arg(0), psp_arg(1)));
+ }
+ 
+ /* sceKernelGetThreadExitStatus(thid)

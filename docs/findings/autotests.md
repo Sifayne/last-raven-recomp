@@ -1504,3 +1504,50 @@ faithful execution of that test.
     agree until it became real.
 
     The two lines left are one `[x]`/`[r]`.
+
+    ### `callbacks/notify`: a CB wait is a wait a notify can end
+
+    18 differing lines to 2. Delivering callbacks on the way into a wait --
+    which is what the previous commit implemented -- is only half of what the
+    suffix means, and the wrong half for the tests built to measure it.
+
+    `callbacks/notify` puts threads in `sceKernelSleepThreadCB` and **never
+    wakes them by name at all**. The handler lines they print are the only
+    evidence those threads ran. So a notify raised by another thread has to end
+    the wait long enough to run the handler, after which the wait resumes; a
+    real `sceKernelWakeupThread` ends it for good. The two are told apart by a
+    flag set at the notify.
+
+    Three more rules came out of the same file:
+
+    - **A handler returning non-zero deletes the callback.** Measured from the
+      outside, without asking about the callback: a sleeper whose handler
+      returns 0x1337 answers `Notify #1: OK` and then
+      `Notify #2: Failed (800201a1)`, with nothing between but the handler
+      running. Every other handler in the file returns 0 and survives.
+    - **Delivery is re-entrant.** A handler may notify itself and then call a CB
+      wait, which delivers the notify it just raised. Guarding against re-entry
+      silences the second hit. What stops it running away is that the count is
+      cleared *before* the dispatch.
+    - **`scePowerRegisterCallback` fires the callback as it registers it.** The
+      test says so in the line that calls it -- `(causes notify)` -- and proves
+      it by reading the count back as 2 after a single manual notify.
+
+    And one absence with a long reach: **`sceKernelGetThreadExitStatus` was not
+    registered**, so it answered zero. That is not a harmless zero. The
+    pspautotests thread wrappers use it to decide whether a worker is alive, so
+    a live thread read as "exited cleanly" and was torn down silently instead of
+    being terminated and announced -- whole lines missing from several files.
+    `threads/exitstatus` went 18 to 0 with it.
+
+    Suite: 2,195 differing lines to 2,144, 37 matching. Two tests got noisier,
+    and in both the fault is older than the change that exposed it:
+    `msgpipe/data` 55 to 63, whose workers block on a zero-buffer pipe and never
+    complete either way, and `fpl/cancel` 3 to 4, sitting on top of a real bug
+    the file already showed -- `sceKernelCancelFpl` releases its waiters with
+    `800201b5` where hardware uses `800201a9`.
+
+    The two lines left in `notify` are one `[x]`/`[r]`, and this one is squarely
+    the virtual clock: the test makes **10000** notify calls in a row, and at
+    `PSP_CALL_TICK_US` each that is 10ms of guest time against a 5ms timeslice,
+    so our rescheduler thread runs twice where hardware's does not run at all.
