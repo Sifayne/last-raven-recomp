@@ -1,0 +1,195 @@
+diff --git a/src/hle/ge.c b/src/hle/ge.c
+index df02466..466dbbf 100644
+--- a/src/hle/ge.c
++++ b/src/hle/ge.c
+@@ -51,7 +51,10 @@
+ #define GE_VTYPE        0x12
+ #define GE_OFFSET_ADDR  0x13
+ #define GE_ORIGIN_ADDR  0x14
+-/* Texture state. Numbers from PPSSPP's GPU/ge_constants.h. */
++/* Texture state. The command numbers here and above are PSPSDK's, from
++ * src/gu/guInternal.h -- BSD, and the SDK that emits them, so it is the
++ * definition rather than a reading of one. Names differ (TEX_ADDR0,
++ * TEX_BUF_WIDTH0, CLUT_BUF_PTR); the values do not. */
+ #define GE_TEXADDR0     0xA0
+ #define GE_TEXBUFWIDTH0 0xA8
+ #define GE_CLUTADDR     0xB0
+@@ -449,8 +452,10 @@ uint64_t psp_ge_vertex_count(void)  { return g_ge.vertices; }
+  * texture sampler reads whatever VRAM happened to contain, which is zeros --
+  * a correctly sampled empty texture.
+  *
+- * Field extraction follows PPSSPP's GPUState.h getters exactly. The parts
+- * worth naming, because each is a way to be quietly wrong:
++ * The commands are PSPSDK's TRANSFER_* group (guInternal.h): SRC 0xb2, SRC_W
++ * 0xb3, DST 0xb4, DST_W 0xb5, START 0xea, SRC_OFFSET 0xeb, DST_OFFSET 0xec,
++ * SIZE 0xee. How the fields sit inside them is what sceGuCopyImage writes, and
++ * the parts worth naming are the ways to be quietly wrong:
+  *   - address low bits come from SRC/DST masked to 0xFFFFF0, and bits 24-31
+  *     from the *stride* register's high byte -- the same split as FBP/FBW.
+  *   - width and height are stored as n-1.
+@@ -908,9 +913,7 @@ static void draw_prim(uint32_t type, uint32_t count) {
+     /* Clear mode bypasses the depth test as well as texturing, blending and the
+      * alpha test. It is a blit of the clear values, so the comparison is forced
+      * to ALWAYS and depth write comes from the clear-mode depth bit rather than
+-     * ZMSK. PPSSPP's software rasterizer does exactly this -- FuncId.cpp sets
+-     * `depthTestFunc = GE_COMP_ALWAYS` and `depthWrite = isClearModeDepthMask()`
+-     * under clearMode.
++     * ZMSK.
+      *
+      * An earlier revision ran the game's own test here instead, on the reasoning
+      * that a clear should not overwrite geometry that rejected it. That gets the
+diff --git a/src/hle/iofilemgr.c b/src/hle/iofilemgr.c
+index 169e2df..7cff8b8 100644
+--- a/src/hle/iofilemgr.c
++++ b/src/hle/iofilemgr.c
+@@ -53,9 +53,9 @@ typedef struct {
+      * sectors from sector 58144 -- a plausible-looking read of entirely the
+      * wrong thing.
+      *
+-     * PPSSPP marks the same distinction, in Core/FileSystems/ISOFileSystem.cpp:
+-     *   "when open as umd1:... the param in sceIoLseek and sceIoRead is lba
+-     *    mode. we must mark it." */
++     * So the mode is a property of the *handle*, set at open by which device
++     * name was used, and not something a read can work out from its arguments.
++     */
+     int      sector_mode;
+ } io_file;
+ 
+@@ -413,8 +413,8 @@ static void write_stat(uint32_t out, int is_dir, uint64_t size, uint32_t lba) {
+      * zero, so it never reads anything meaningful -- which is exactly what this
+      * one did, opening umd1: and then never issuing a read.
+      *
+-     * PPSSPP does the same, in Core/HLE/sceIo.cpp __IoGetStat:
+-     *     stat->st_private[0] = info.startSector; */
++     * So st_private[0] carries the file's starting sector, which is the one
++     * field of the stat block this game reads. */
+     psp_write32(out + 64, lba);
+ 
+     /* The three timestamps stay zero. Nothing in a game's load path reads them,
+@@ -722,10 +722,13 @@ static void hle_Dclose(void) {
+  * a way to be wrong. So every operation stores its result immediately and poll
+  * reports it on the first ask.
+  *
+- * Behaviour follows PPSSPP's Core/HLE/sceIo.cpp:
++ * The three states an async handle can be in:
+  *   - an operation still running    -> poll returns 1, wait blocks
+  *   - a result waiting              -> written as a 64-bit value, poll returns 0
+  *   - nothing outstanding           -> SCE_KERNEL_ERROR_NOASYNC
++ * pspautotests does not cover the async calls, so unlike most rules in this
++ * tree these three are not pinned by a capture -- they are the shape the API
++ * has to have for its own return codes to mean anything.
+  * The first case cannot arise here, which is the one place this differs from
+  * hardware: a game that depends on a read *not* having finished yet sees it
+  * finished. That is the safe direction -- the data is there either way.
+diff --git a/src/hle/misc.c b/src/hle/misc.c
+index e7661ca..747e098 100644
+--- a/src/hle/misc.c
++++ b/src/hle/misc.c
+@@ -112,10 +112,14 @@ static void hle_Stderr(void) { psp_ret(2); }
+  * endless run of bad accesses just past the end of .bss, in a structure whose
+  * two neighbouring fields were the very pointers passed in here.
+  *
+- * Bounds from PPSSPP's Core/MemMap.h:
+- *   PSP_GetVolatileMemoryStart() == 0x08400000
+- *   PSP_GetVolatileMemoryEnd()   == 0x08800000
+- * which is below the user heap, so nothing else hands it out. */
++ * Where the block sits is this file's choice rather than a fact to look up:
++ * the call reports address and size through out-parameters and the guest uses
++ * what it is handed. Two things constrain the choice. It has to be mapped,
++ * which it is -- PSP_RAM_BASE is 0x08000000 and the RAM is 32MB -- and it has
++ * to sit below the user heap so that psp_sysmem_alloc can never hand the same
++ * bytes out twice. User memory begins at 0x08800000 (uofw documents the map),
++ * so the 4MB immediately under it is free for this and is where hardware keeps
++ * the UMD cache the call is borrowing. */
+ #define PSP_VOLATILE_BASE 0x08400000u
+ #define PSP_VOLATILE_SIZE 0x00400000u
+ 
+diff --git a/src/hle/mpeg.c b/src/hle/mpeg.c
+index fc8bbcf..a86b6d0 100644
+--- a/src/hle/mpeg.c
++++ b/src/hle/mpeg.c
+@@ -47,8 +47,12 @@
+  * and gives up on the movie, which is the desired outcome and says out loud
+  * what happened rather than pretending a stream ended.
+  *
+- * Constants and structure layouts are PPSSPP's (Core/HLE/sceMpeg.cpp and
+- * sceMpeg.h), which is the closest thing to a specification these have.
++ * sceMpeg has no published specification. The constants below are the ones the
++ * community's reverse engineering settled on, and what validates them here is
++ * end to end rather than by citation: the game queries a size, allocates it,
++ * hands back a ring buffer built to it, and the movie plays. A wrong value
++ * does not misbehave subtly -- the allocation is the wrong size and playback
++ * never starts.
+  *
+  * ## What the decode path does not do
+  *
+@@ -87,14 +91,16 @@
+ 
+ /* ---- constants ------------------------------------------------------------
+  *
+- * From PPSSPP Core/HLE/sceMpeg.cpp unless noted. */
++ * Two of these are derivations rather than lookups, and are marked. The rest
++ * are reverse-engineered values validated by the movie playing; see the header
++ * comment. */
+ #define MPEG_MEMSIZE            0x10000u    /* MPEG_MEMSIZE_0105: what Create needs */
+ #define MPEG_AVC_ES_SIZE        2048
+ #define MPEG_ATRAC_ES_SIZE      2112
+ #define MPEG_ATRAC_ES_OUT_SIZE  8192
+ /* 90000 * 2048 / 44100: one ATRAC3+ frame, in PSP's 90kHz timestamp units. */
+ #define MPEG_ATRAC_PTS_STEP     4180u
+-#define MPEG_RINGBUFFER_PACKET  (104 + 2048)  /* __MpegRingbufferQueryMemSize */
++#define MPEG_RINGBUFFER_PACKET  (104 + 2048)  /* a 2048-byte sector plus a 104-byte header */
+ 
+ #define PSMF_MAGIC              0x464D5350u  /* "PSMF" */
+ #define PSMF_STREAM_OFFSET_OFF  0x08         /* big-endian u32 */
+@@ -192,9 +198,8 @@ void psp_mpeg_reset(void) {
+  * on its own stdout, sceMpegRegistStream() is failed..., which is what a
+  * returned handle of zero means to it.
+  *
+- * PPSSPP dereferences the same way in getMpegCtx. The raw value is still
+- * accepted, because it costs nothing and a caller that kept the handle itself
+- * would otherwise be turned away for no reason. */
++ * The raw value is still accepted too, because it costs nothing and a caller
++ * that kept the handle itself would otherwise be turned away for no reason. */
+ static mpeg_ctx *ctx_of(uint32_t mpeg_addr) {
+     if (!mpeg_addr) return NULL;
+ 
+diff --git a/src/hle/sysmem.c b/src/hle/sysmem.c
+index 887ab1c..7856c2a 100644
+--- a/src/hle/sysmem.c
++++ b/src/hle/sysmem.c
+@@ -320,12 +320,13 @@ void psp_sysmem_register(void) {
+      * what it was built against. This module's ~PSP header reports devkit
+      * 0x05050010, and this is the NID it imports.
+      *
+-     * Registered *unnamed* on purpose. PPSSPP's NID database calls this
+-     * `sceKernelSetCompiledSdkVersion500_505`, but SHA-1 of that string is
+-     * 0xC28A2329, not 0x91DE343C -- so that label is a human-readable
+-     * disambiguator rather than the exported symbol, and the real name is not
+-     * known. Registering it as named would put a false name in the diagnostics
+-     * and break the SHA-1 check in test_hle.c, which is right to reject it. */
++     * Registered *unnamed* on purpose, and the reason is checkable rather than
++     * a matter of taste. The circulating label for this NID is
++     * `sceKernelSetCompiledSdkVersion500_505`, and SHA-1 of that string is
++     * 0xC28A2329, not 0x91DE343C -- so whatever that label is, it is not the
++     * exported symbol, and the real name is not known. Registering it as named
++     * would put a false name in the diagnostics and fail the SHA-1 check in
++     * test_hle.c, which is right to reject it. */
+     psp_hle_register_unnamed(0x91DE343C, "SysMemUserForUser", hle_SetCompiledSdkVersion);
+     psp_hle_register(0xF77D77CB, "SysMemUserForUser", "sceKernelSetCompilerVersion",   hle_SetCompilerVersion);
+     psp_hle_register(0x13A5ABEF, "SysMemUserForUser", "sceKernelPrintf",               hle_Printf);
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index ec2f159..40135b7 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -566,7 +566,9 @@ static void on_thread_end(uint32_t uid, uint32_t status) {
+  *
+  * The second argument is a *timeout pointer*, not somewhere to put the exit
+  * status -- writing the status there corrupted whatever the guest kept at that
+- * address. The status is the return value, as PPSSPP's implementation shows. */
++ * address. The status is the *return value*, which threads/threadend prints:
++ * a thread whose body returns 5 is waited on, and the wait answers
++ * `Already ended: 00000005`. */
+ static void hle_WaitThreadEnd(void) {
+     if (!psp_sched_can_wait()) { psp_ret(SCE_KERNEL_ERROR_CAN_NOT_WAIT); return; }
+     const uint32_t thid    = psp_arg(0);

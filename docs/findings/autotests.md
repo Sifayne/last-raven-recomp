@@ -2234,3 +2234,50 @@ faithful execution of that test.
     here. `mingw-w64-gcc` would compile-check it. The POSIX half is verified the
     usual way: the threads suite is byte-identical across the change, 62
     matching and 1,537 differing before and after.
+
+    ### Provenance: sourcing the facts outside PPSSPP
+
+    Twelve comments in six files cited PPSSPP. psprecomp's README makes the hard
+    MIT boundary the thing that distinguishes it from the other PSP recomp
+    project, so a Phase 4 contribution carrying those citations puts a
+    maintainer in the position of having to adjudicate them. Reading all twelve,
+    they were two different things:
+
+    **Six were corroboration.** We derived the rule from our own evidence and
+    noted that PPSSPP agrees. `iofilemgr.c` spends a paragraph on the bug we
+    found -- a read of 64 bytes at offset 58144 where the game asked for 64
+    *sectors* -- before mentioning them. `sysmem.c` cites them **to disagree**:
+    the circulating name for a NID hashes to `0xC28A2329`, not the NID, so it
+    cannot be the exported symbol. `threadman.c` we had re-confirmed this
+    session from `threads/threadend`. Nothing was taken; the comments just read
+    as though it had been. Reworded to lead with the evidence.
+
+    **Four were genuine lookups**, and three of those resolve to a better source
+    than the one they had:
+
+    - **GE command numbers** -- PSPSDK's `src/gu/guInternal.h`, BSD-licensed, and
+      the SDK that *emits* them, so it is the definition rather than a reading
+      of one. Values match exactly; only the names differ (`TEX_ADDR0`,
+      `CLUT_BUF_PTR`).
+    - **The block-transfer commands** -- same header, `TRANSFER_SRC` 0xb2
+      through `TRANSFER_SIZE` 0xee, with the field layout being what
+      `sceGuCopyImage` writes into them.
+    - **The volatile memory region** -- not a fact to look up at all. The call
+      reports address and size through out-parameters and the guest uses what it
+      is handed, so the placement is ours to choose; what constrains it is that
+      it be mapped and sit below the user heap, which uofw documents as starting
+      at 0x08800000.
+    - **sceMpeg's constants** -- the one with no better source, and the honest
+      answer is that sceMpeg has no published specification. What validates them
+      here is end-to-end rather than by citation: the game queries a size,
+      allocates it, and the movie plays. A wrong value does not misbehave
+      subtly; the allocation is the wrong size and playback never starts.
+
+    One reference survives, in `interp.h`, and it is the *correct* kind: it
+    names PPSSPP as the tier-2 external oracle, "separate processes -- never
+    linked". That is what `docs/ORACLE.md` prescribes and what the README
+    advertises as the legitimate use.
+
+    Worth keeping as a distinction. "Where did this number come from" and "what
+    makes it right" are different questions, and a comment that answers only the
+    first has borrowed someone's homework even when nothing was copied.
