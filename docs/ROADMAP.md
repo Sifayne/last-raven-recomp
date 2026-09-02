@@ -151,6 +151,13 @@ compared against PPSSPP reference shots, the way the logo was; `bad mem: 0`.
   `gpu/clipping` is the oracle for the clipper.
 - Speed is not a goal here. Headless runs are unpaced.
 
+**Indexed draws (2 Sep).** The settings panel's fragmentary glyphs and the
+hatched overlay were one bug: `GE_IADDR` was dropped and indexed vertex types
+were read sequentially. Fixed; the panel and the option menu behind it render
+exactly. Seven sampling fixes preceded it, each real, none this — see
+autotests item 28's retraction and cause. Found by `PSPRECOMP_GE_WILDUV=1`,
+which logs textured draws whose coordinates cannot be right.
+
 ## M3 — Sound
 
 **Gate.** Music and effects audible in a windowed run on the garage screen.

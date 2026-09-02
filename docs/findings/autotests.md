@@ -3274,19 +3274,65 @@ faithful execution of that test.
     filter, nor the coordinates. It is something in the fill, and it is the
     open question.
 
-    What the same log did explain is the hatched sheet. Interleaved with the
-    glyph draws are **full-screen quads using the glyph atlas with texture
-    coordinates of -512 and NaN**. That is texture coordinate *generation*:
-    `TEX_MAP_MODE` was never decoded, so mode 1 -- coordinates from the
-    generation matrix -- read the vertex's coordinate field anyway, and a game
-    using generation leaves that field uninitialised. It is also where the GE
-    summary's `u -inf..inf` came from. Decoded now, with the generation matrix
-    (PSPSDK: `TEX_MAP_MODE` 0xC0, `TGEN_MATRIX_NUMBER` 0x40,
-    `TGEN_MATRIX_DATA` 0x41), for the position and UV sources; the two normal
-    sources fall back to position because the vertex decoder does not read
-    normals, which is what `gpu/texmtx`'s remaining differences are. The
-    streaks across the panel are gone and `texmtx/source` went 40 value
-    differences to 15, `uvs` 4 to 2.
+    What the same log *seemed* to explain was the hatched sheet, and this is
+    recorded as a retraction because the claim went into a commit message.
+    Interleaved with the glyph draws are full-screen quads binding the glyph
+    atlas with texture coordinates of -512 and NaN, and the GE summary's
+    `u -inf..inf` comes from them. The first reading was texture coordinate
+    *generation*: `TEX_MAP_MODE` was never decoded, so a game using the
+    generation matrix would leave the vertex field uninitialised, and that is
+    exactly what these looked like. It was implemented (PSPSDK: `TEX_MAP_MODE`
+    0xC0, `TGEN_MATRIX_NUMBER` 0x40, `TGEN_MATRIX_DATA` 0x41), the panel frame
+    came back without streaks, and the commit said texgen had removed them.
+
+    Sif reported the streaks still there, going away only after confirming
+    the dialog. Two measurements settled it. The scenario's panel frame before
+    and after the texgen change is **pixel-identical** -- 0 of 130,560
+    differing -- so the change made no visible difference at all; the earlier
+    frame had simply been taken after the confirm. And with the texture-enable
+    bit, map mode, vertex type and colour added to the draw log, every one of
+    those full-screen quads has **texturing off**, map mode 0, and a black
+    colour with a fading alpha (`FD000000`, `F9000000`, `F3000000`...). They
+    are the fade overlay. The NaN is in a field the draw never reads.
+
+    Texgen stays: it is a real register the game sets elsewhere and
+    `gpu/texmtx` measures it (`source` 40 value differences to 15, `uvs` 4 to
+    2; the two normal sources fall back to position because the vertex
+    decoder reads no normals). It just was not this.
+
+    **The real cause, and it was one bug.** An every-120th-frame sequence
+    (`PSPRECOMP_FRAMES`) showed the hatch in full at frames 44-45, between the
+    New Game press and the settings panel: a single huge triangle covering
+    the lower-left of the screen, filled with high-frequency diagonal stripes,
+    the signature of a textured draw whose coordinates run hundreds of texture
+    widths across one primitive. `PSPRECOMP_GE_WILDUV=1`, which logs textured
+    draws with coordinates far outside the texture or not finite, fired 24
+    times -- and every hit was a **glyph batch**. The first four vertices of
+    each were the perfect 5x13 quad already seen; somewhere in the remaining
+    146 was garbage.
+
+    The vertex type of those batches is `0x99F`, and bits 11..12 of it are
+    `01`: **8-bit indexed**. `GE_IADDR` was decoded and dropped -- `case
+    GE_IADDR: break;` -- and `VT_INDEX` was defined and never read, so every
+    indexed draw in the game fetched its vertex array in order as if the index
+    list were 0,1,2,3... For a quad drawn as 0,1,2,0,2,3 that is right for the
+    first triangle and wrong for everything after, the error growing with
+    every glyph until the read runs off the end of the 100-vertex array into
+    whatever follows. Which is exactly what the panel showed: the first glyph
+    whole, the rest progressively misassembled, and the tail one enormous
+    triangle with coordinates from unrelated memory, painted as stripes.
+    Fixed with a `vertex_addr()` that fetches through the 8- or 16-bit index
+    list. Zero wild draws, and both the settings panel and the option menu
+    behind it render exactly: every glyph, every label, the caution box.
+
+    Seven rendering fixes chased this in the wrong place, and it is worth
+    saying why. Each of them was real -- the tests measured them and the
+    hardware numbers agree -- but none was *this*, because the symptom
+    (fragments) suggested sampling and the sampling was fine. The instrument
+    that found it did not look at textures or filters at all: it asked which
+    draws had coordinates that could not be right, and followed the draw. The
+    lesson is the one this file keeps relearning: when a fix does not change
+    the symptom, stop fixing and measure the symptom directly.
 
     **The pattern is worth keeping.** Every one of the seven rendering
     findings so far came from a test measuring something the game does; this
