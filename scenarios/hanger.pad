@@ -1,0 +1,34 @@
+# The hangar, quickly: circle past the logo, circle past the intro, START,
+# START, cross on OPTION. Lands on the option menu with the Caution box up
+# and the 3D hangar rendering behind it.
+#
+# This is the frame to compare against a PPSSPP reference: there the hangar
+# is a lit grey room, here it is nearly black. The shaded vertex colour and
+# the textures are both right (findings item 31); what is missing is in the
+# compositing passes.
+#
+# Recorded by Sif, 2 Sep. 383 polls of input against new-game.pad's 6,000 --
+# roughly a minute a run instead of several, which is the difference between
+# measuring a blend rule once and measuring it twenty times.
+#
+#   scripts/09-replay.sh --decode --env PSPRECOMP_FRAME=reports/hangar.ppm \
+#                        scenarios/hanger.pad
+#
+# Pair it with title-idle.pad, as new-game.pad is: a run that goes a similar
+# distance and presses nothing is what makes a difference here mean anything.
+
+drain 60
+
+@87     state circle 128 128   # t=3.500s
+@91     state none 128 128   # t=3.623s
+@161    state circle 128 128   # t=6.816s
+@163    state none 128 128   # t=6.915s
+@271    state start 128 128   # t=11.218s
+@273    state none 128 128   # t=11.328s
+@293    state start 128 128   # t=12.358s
+@294    state none 128 128   # t=12.413s
+@316    state cross 128 128   # t=13.540s
+@318    state none 128 128   # t=13.648s
+
+@420   mark "option menu, caution box up"
+@430   stop

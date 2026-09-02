@@ -93,6 +93,20 @@ drain, which is a *wall-clock* deadline — so how much of the game fits inside
 it varies between runs on the same build. Two replays are only comparable if
 they end at the same place, and `stop` is what makes that true.
 
+## The scenarios
+
+| file | reaches | polls |
+|---|---|---|
+| `empty.pad` | nothing; the base for recording | — |
+| `title-idle.pad` | the title menu, pressing nothing — the control | 1,800 |
+| `skip-intro.pad` | the title menu via circle-skip | 2,500 |
+| `hanger.pad` | the option menu over the 3D hangar | 430 |
+| `new-game.pad` | the sound-settings panel | 6,000 |
+
+`hanger.pad` and `new-game.pad` reach the same scene; the short one exists
+because a run that takes fourteen seconds gets measured twenty times and one
+that takes minutes gets measured twice. Pair either with `title-idle.pad`.
+
 ## Authoring: play it, then keep the recording
 
 Hand-writing exact poll numbers is guesswork. Record instead:

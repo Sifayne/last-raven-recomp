@@ -1293,6 +1293,7 @@ and cannot see anything past it. Measured 1 Sep on `3f402c5`.
 | `scripts/06-boot.sh` (default) | 639 lists, 106,762 commands, 93,875,406 pixels, 0 bad mem; frames 0 / 751 / 9,020 |
 | `scripts/09-replay.sh --decode scenarios/title-idle.pad` | `stop` at poll 1800, 0 bad mem, 5,406 lists, 874,060 commands |
 | `scripts/09-replay.sh --decode scenarios/skip-intro.pad` | `stop` at poll 2500, 0 bad mem, 7,506 lists, 2,280,256 commands, the menu in the displayed frame |
+| `scripts/09-replay.sh --decode scenarios/hanger.pad` | **`stop` at poll 430, 0 bad mem**, 1,296 lists, 1,580,603 commands, the option menu over the hangar — the same scene as new-game.pad in 14 seconds rather than minutes (2 Sep) |
 | `scripts/09-replay.sh --decode scenarios/new-game.pad` | **`stop` at poll 6000, 0 bad mem**, 70/70 events, 18,006 lists, 50,813,097 commands, the sound-settings panel in the displayed frame (1 Sep, night — M1's gate); **every glyph on it exact** since indexed draws were fixed (2 Sep) |
 | `scripts/08-autotest-sweep.sh` | **137 MATCH** of 432, 3 NOOUTPUT, no per-test regression against the 1 Sep baseline (2 Sep, after the clipper and scissor); diff per test, the total is not a goal |
 
