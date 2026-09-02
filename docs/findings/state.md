@@ -181,15 +181,17 @@ outscores the menu on variation. For a run that ends at `stop`, the
 Logs: `reports/09-<scenario>-<stamp>.{txt,err}`, frames `reports/m0-*.ppm`,
 both gitignored. Reproduce with the commands in the regression table.
 
-**Later the same day the fault was gone and a wait stood in its place.**
-Registering `sceAtrac3plus` as a stand-in decoder took NEW GAME from 1.2
-billion bad accesses to **zero**, at the same poll; the wait behind it was a
-SAS voice this runtime never ended, and the wait behind *that* is the title
-track's stop request, whose completion needs a stream-feeder word only a
-normal run-out clears. The whole chain, with the numbers, is
-[autotests.md](autotests.md) item 27; the next step is
-[../ROADMAP.md](../ROADMAP.md) M1 step 1c. Title screen and headless bar
-unchanged throughout.
+**By the end of the day NEW GAME runs through.** The fault was a codegen bug
+— the emitter and interpreter never translated the VFPU condition branches,
+so the game's polygon clipper doubled its output at every plane and ran over
+its caller's frame — reachable only after three audio lies (an import that
+wrote nothing, a refusal the game could not survive, a SAS voice that never
+ended) were removed from in front of it. `new-game.pad` now reaches its
+`stop` at poll 6000 with 0 bad accesses and the game's initial sound-settings
+panel on screen. The whole chain, with the numbers, is
+[autotests.md](autotests.md) item 27. Title screen and headless bar unchanged
+throughout. Two things for M2 seen in that run: smeared glyphs (affine
+texturing) and non-finite texture coordinates in the GE summary.
 
 ### The picture
 
@@ -1280,7 +1282,7 @@ and cannot see anything past it. Measured 1 Sep on `3f402c5`.
 | `scripts/06-boot.sh` (default) | 639 lists, 106,762 commands, 93,875,406 pixels, 0 bad mem; frames 0 / 751 / 9,020 |
 | `scripts/09-replay.sh --decode scenarios/title-idle.pad` | `stop` at poll 1800, 0 bad mem, 5,406 lists, 874,060 commands |
 | `scripts/09-replay.sh --decode scenarios/skip-intro.pad` | `stop` at poll 2500, 0 bad mem, 7,506 lists, 2,280,256 commands, the menu in the displayed frame |
-| `scripts/09-replay.sh --decode --stop 1 scenarios/new-game.pad` | **0 bad mem** since the atrac stand-in (1 Sep, evening); parks at poll 2567 in the sound system's shutdown loop, 7,707 lists — **the M1 gate is this row reaching its `stop`** |
+| `scripts/09-replay.sh --decode scenarios/new-game.pad` | **`stop` at poll 6000, 0 bad mem**, 70/70 events, 18,006 lists, 50,813,097 commands, the sound-settings panel in the displayed frame (1 Sep, night — M1's gate) |
 
 A replay without `--decode` is the default run with a script attached; see
 the configuration note at the top of this file.

@@ -5,10 +5,11 @@ the game's Allegrex MIPS code into C ahead of time, linked against a native
 runtime, to produce a real PC executable rather than an emulated one. Same model
 as N64Recomp / *Zelda 64: Recompiled*.
 
-**Status: the game boots, plays its intro movie, and renders the title menu;
-New Game faults in the game's own software clipper.** Translation is done —
-the differential oracle agrees on every function it can compare — and 154 of
-the 218 firmware imports are implemented. What comes next, in order, is
+**Status: the game boots, plays its intro movie, renders the title menu, and
+runs New Game through to its first settings screen with no bad memory
+accesses.** Translation is done — the differential oracle agrees on every
+function it can compare, and the one codegen bug it was blind to has been
+found and fixed — and 171 of the 218 firmware imports are implemented. What comes next, in order, is
 [docs/ROADMAP.md](docs/ROADMAP.md); where things stand right now, and how to
 measure them, is [docs/findings/state.md](docs/findings/state.md); Phase 0's
 numbers are in [docs/findings/phase0.md](docs/findings/phase0.md).

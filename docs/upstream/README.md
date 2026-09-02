@@ -17,7 +17,7 @@ before a clean core-only branch exists.
 | patch | what | send as |
 |---|---|---|
 | `0001` | `libm` never linked | small PR, no discussion needed |
-| `0002` | **four emitter codegen bugs** | one issue + one PR, or four issues |
+| `0002` | **five emitter codegen bugs** (the fifth, 2e, found 1 Sep) | one issue + one PR, or five issues |
 | `0003` | the interpreter oracle | issue first — it fills a roadmap slot, and the author may have a design in mind |
 | `0004` | `psp_hle_set_quiet`, drop a leftover debug line | small PR |
 | `0005` | two regression tests | folds into the `0002` PR |
@@ -53,7 +53,7 @@ host linking the runtime — inherit it. Patch: `0001`.
 
 ---
 
-## Issue 2 — four emitter bugs that silently drop instructions
+## Issue 2 — five emitter bugs that silently drop or never take instructions
 
 Found with a differential oracle (see Issue 4) on a retail module, then each one
 confirmed by re-measuring: on a fixed 400-function sample, disagreements went
@@ -134,6 +134,33 @@ reverting the fix and confirming the test fails. 2a and 2b do not — every
 synthetic shape tried got promoted to its own entry by discovery, giving a test
 that passes before *and* after, which is worse than none. `test_emit.c` records
 why. Reproducing them needs `a_discover`'s ownership rules pinned down.
+
+### 2e. The VFPU branches are emitted as never taken
+
+`branch_cond()` had no case for `bvt`, `bvf`, `bvtl` or `bvfl`. They fell to
+its default:
+
+```c
+default: snprintf(buf, n, "0 /* unhandled branch */"); break;
+```
+
+so every branch on a VFPU condition code became `if (0) goto ...` — no trap,
+no diagnostic, a program that runs and is quietly wrong. The decoder names all
+four (`decode_cop2`, COP2 with `rs == 8`; the code index is bits 18..20) and
+marks them as branches, so labels and delay slots were already right; only the
+condition text was missing. The interpreter's `branch_taken()` had the same gap,
+so the two translations agreed on never taking them and the differential oracle
+could not see it. No pspautotests source uses these branches either.
+
+Found on Armored Core: its polygon clipper skips a store with `bvf`. Never
+skipping it doubled the vertex count at every clip plane (3, 6, 12, 24, 48, 96
+vertices going into six planes, for a triangle) and ran the output over the
+caller's frame, where a vertex-type word was overwritten with a float and
+handed to the vertex decoder as a pointer. Fifteen sites in that module.
+
+Fixed with a `psp_vfpu_cond(cc)` helper in `cpu.h`, used by both sides.
+Regression test: `test_vfpu_branch_condition`, both senses with two different
+code indices.
 
 ---
 

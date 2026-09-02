@@ -3007,3 +3007,95 @@ faithful execution of that test.
     the one before it was removed, and each was found the same way -- the
     call histogram to see the shape, the HLE log to see the order, the
     `.expected` files to see what hardware does.
+
+    ### Retracted: the feeder word. What the stall was, measured
+
+    The section above named the stream feeder's busy word as the remaining
+    gate. Read at the stall with `PSPRECOMP_PEEK` -- the sound system is
+    reachable from the global word at `0x0031F5D8`, the player and feeder
+    tables from `0x0031F5E8` and `0x0031F5F0` -- all three request counts
+    were **zero** and both feeder words were **zero**. Player 0 had its end
+    flag set and its buffered-PCM counter at +76 holding `0x23B43080`. The
+    game adds `DecodeData`'s sample count to that counter *before* it looks
+    at the return code, and the stand-in wrote nothing back on failure, so
+    it added the stack's leftovers. The idle predicate's `< 8192` could never
+    be true. The unwritten out-parameter, one level down.
+
+    Hardware writes all three out-parameters on a decode with nothing left
+    -- `stream.expected` line 1108: `80630024=sceAtracDecodeData error:
+    samples: 00000000, finish: 00000001, remainFrame: -2` -- so the stand-in
+    now reports the stream fully decoded at its first decode, with the
+    drained `remainFrame` for its kind. The sound system shut down, and the
+    game reached **the fault it faulted on before any of this**: `read32 at
+    0x461CC570`, `ra 0x0002E2F8`, every register as on 30 Aug, with zero bad
+    accesses before it and no audio lie left on the path. The fault was
+    never about audio. Three lies had merely been standing in front of it.
+
+    ### The cause: a branch the emitter never took
+
+    With the fault reachable from a clean state, the roadmap's three
+    one-command steps ran on a TRACE build. `PSPRECOMP_WATCH=0x0002E1D8` --
+    the clipper's caller, entered once in the run, right before the fault --
+    showed sane arguments: a model pointer, a stack buffer, and a vertex-type
+    word of `0x1400013D` in the fifth register, a legitimate stride-20
+    s16-position type. `PSPRECOMP_WATCHMEM` on the caller's `sp+1028`, the
+    slot that word is stored to, saw it written by the setup routine and then
+    **overwritten four times by the per-plane clip routine**
+    `psp_func_0002E370`, the last value `0x4612ED37` -- the float the vertex
+    decoder faulted on. The clip stage ran off the end of its output buffer
+    into the caller's frame.
+
+    `PSPRECOMP_WATCH=0x0002E370` on the six calls gave the count going into
+    each plane: **3, 6, 12, 24, 48, 96.** A triangle against six planes can
+    produce at most nine vertices; ours doubled at every plane, which means
+    both stores ran on every edge. `PSPRECOMP_VCMP_RING` showed the compares
+    answering correctly. The emitted C for the branch that skips the first
+    store read:
+
+        /* 0002E3C4  bvf        0x0002E3D8 */
+        { int _c = (0 /* unhandled branch */);
+          if (_c) goto L_0002E3D8; }
+
+    `branch_cond()` in the emitter had no case for `bvt`, `bvf`, `bvtl` or
+    `bvfl` -- the branches on a VFPU condition code -- and emitted them as
+    never taken, with no trap and no diagnostic. The decoder named all four
+    and marked them as branches, so labels and delay slots were right; only
+    the condition was missing. The interpreter's `branch_taken()` had the same
+    gap, so **the two translations agreed on never taking them and the
+    differential oracle could not see it**; no pspautotests source uses the
+    branches either. Fifteen sites in this module. The game was the only
+    instrument, and it needed three lies removed from in front of it before
+    it could point.
+
+    Fixed with a `psp_vfpu_cond(cc)` helper beside `psp_fpu_cond`, the code
+    index being bits 18..20 of the word, used by both sides;
+    `test_vfpu_branch_condition` pins both senses. Oracle 316/316 unchanged.
+    This is the fifth silent emitter bug and is drafted for upstream in
+    [../upstream/README.md](../upstream/README.md), 2e.
+
+    ### M1's gate passes
+
+    `scripts/09-replay.sh --decode scenarios/new-game.pad` runs to its
+    `stop` at poll 6000 (t=94.8s) with **0 bad accesses** and 70 of 70 events
+    delivered: 18,006 GE lists, 50,813,097 commands, 1,035,722 primitives,
+    1,002,057 textured 3D draws, CLUT4 textures appearing for the first time,
+    5,601,280 bytes read. The displayed frame at the stop is the game's
+    initial **sound settings** panel -- BGM, SE and Voice volume sliders
+    between MIN and MAX, a Default button, a status line -- which is the first
+    screen a new game shows. From 1.2 billion bad accesses at poll 2567.
+
+    Two things seen on the way that are M2's: the glyphs on that panel are
+    smeared, which is the affine texturing the roadmap already names; and the
+    GE summary reports texture coordinates of `-inf..inf`, so something in
+    the new geometry hands the rasterizer non-finite UVs. Also
+    `sceIoGetstat failed: ms0:/PSP/SAVEDATA/NPUH10024DATAINSTALL` -- the game
+    looked for its install data and was told honestly there is none (M4).
+
+    Title screen 7,506 GE lists and headless 639 unchanged, both 0 bad
+    accesses; sweep 129 of 432 unchanged.
+
+    **Four stops at one poll.** An import answering zero and writing nothing;
+    a refusal the game's own error path could not survive; a voice that never
+    ended; a decoder that wrote nothing back on failure -- and underneath all
+    four, the codegen bug that was there from the first run. Every one of the
+    audio findings was real and needed fixing. None of them was the fault.

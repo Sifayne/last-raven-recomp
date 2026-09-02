@@ -30,12 +30,16 @@ where the work is: 154 of the module's 218 firmware imports are implemented
 are ATRAC3+ — all of the game's music — and the rest are small.
 
 Measured 1 Sep, decoder on, from `scenarios/`: the intro plays, circle skips
-it, the title menu renders headless (7,506 GE lists, 41,753 textured 3D draws,
-0 bad accesses), and cross on NEW GAME faults 67 polls later in the game's own
-clipper — the same registers as the 30 Aug windowed session. The title music
-is started on the title screen with five `sceAtrac` calls that are answered 0
-and write nothing back, and released right before the fault. The full table
-is in [findings/state.md](findings/state.md) under *pad-driven*.
+it, the title menu renders headless (7,506 GE lists, 0 bad accesses), and by
+the end of the day NEW GAME runs through to the game's sound-settings panel
+(18,006 GE lists, a million textured draws, 0 bad accesses) — M1's gate. The
+fault behind it was a codegen bug in the VFPU condition branches, reached
+only after three audio lies were removed; see M1 below. The full table is in
+[findings/state.md](findings/state.md) under *pad-driven*.
+
+Known from that run and belonging to M2: the panel's glyphs are smeared
+(affine texturing), and the GE reports non-finite texture coordinates from
+the new geometry.
 
 The renderer is a software rasterizer that is exact where it is implemented
 and a placeholder where it is not: one texture function of five, no clipper,
@@ -48,21 +52,25 @@ output) with seven no-op entry points. `sceAtrac3plus` does not exist.
 Saves: the savedata dialog runs its lifecycle and completes; nothing is read or
 written, and the result code is never filled in.
 
-## M1 — Past New Game
+## M1 — Past New Game ✅ 1 Sep
 
-**Gate.** `scripts/09-replay.sh --decode scenarios/new-game.pad` reaches its
-`stop` with `bad mem: 0`; `scenarios/title-idle.pad` still reports `bad mem:
-0`; the *displayed* frame at the stop shows the first screen after New Game
-(not the best-frame pick, which on every decoder run is the same washed intro
-shot).
+**Gate — passed.** `scripts/09-replay.sh --decode scenarios/new-game.pad`
+reaches its `stop` at poll 6000 with `bad mem: 0`, 70 of 70 events delivered,
+18,006 GE lists; the displayed frame is the game's initial sound-settings
+panel. `title-idle.pad` and `skip-intro.pad` unchanged.
 
-The fault, re-measured 1 Sep with `--stop 1`, is a read at `0x461CC570` from
-the game's own software clipper, `psp_func_0002E790`, handed a float where a
-vertex-type word belongs — 1.2 billion cascading accesses if the run is let
-go on. Before diagnosing it, remove the known lies on the
-path — each is a candidate cause and each is cheap. An unimplemented import
-returns 0 and writes **nothing** to its out-parameters; the game proceeds on
-whatever was on the stack.
+**What the fault was.** Not audio. The emitter never translated the four VFPU
+condition branches (`bvt`/`bvf` and likely forms) — it emitted them as never
+taken, silently — and the game's polygon clipper skips a store with `bvf`, so
+the vertex count doubled at every clip plane and ran over the caller's frame.
+The interpreter had the same gap, so the oracle agreed with the emitter; no
+test used the branches. Three real audio lies had to be removed before the
+fault was reachable from a clean state and the harness's instruments could
+point at it. [findings/autotests.md](findings/autotests.md) item 27 has the
+whole chain.
+
+The steps as they were run, kept because the order and the corrections are
+the reusable part:
 
 1. ~~**The 13 `sceAtrac3plus` calls fail honestly.**~~ **Done 1 Sep, and
    corrected on the way** ([findings/autotests.md](findings/autotests.md)
@@ -77,14 +85,17 @@ whatever was on the stack.
      hardware's rule from `audio/sascore/vag.expected`; `SetGrain`,
      `GetGrain`, `SetOutputmode`, `GetOutputmode` registered with the codes
      the suite pins.
-   - **1c. Next.** The run now parks in the sound system's shutdown loop
-     (`psp_func_00267298`) waiting for the title track's stop request, whose
-     predicate needs the stream feeder's busy word clear — which only a
-     normal run-out clears, not the decode-error stop. Read who calls
-     `psp_func_0026BC24`; TRACE build, `PSPRECOMP_WATCH=0x00267298` for
-     `sys`, `PSPRECOMP_PEEK` on `[sys+16]`, `[sys+544]`, `[sys+1072]` and the
-     feeder word. The likely durable fix is a stand-in that *plays* silence
-     at the right sample count, so every path is the normal one.
+   - **1c. Done, and the feeder theory retracted.** PEEK showed the request
+     counts and feeder words all zero; the gate was the player's buffered-PCM
+     counter, fed from a `DecodeData` out-parameter the stand-in had not
+     written. It now answers hardware's end-of-stream shape (`80630024`,
+     samples 0, end 1, drained remainFrame). The sound system shut down and
+     the original fault was reachable from a clean state.
+   - **1d. Done — the cause.** TRACE build, `PSPRECOMP_WATCH` on the clipper's
+     caller and clip routine, `PSPRECOMP_WATCHMEM` on the argument slot,
+     `PSPRECOMP_VCMP_RING`: the clip stage doubled its output per plane
+     because its `bvf` was emitted as `0 /* unhandled branch */`. Fixed in
+     the emitter and interpreter with `psp_vfpu_cond`; `test_emit.c` pins it.
 2. **`sceUtilityMsgDialog*` gets the savedata ratchet.** Four calls, same
    lifecycle (`src/hle/utility.c`). Unregistered, `GetStatus` is a permanent
    `NONE` — the non-terminating poll the savedata fix just removed, one
