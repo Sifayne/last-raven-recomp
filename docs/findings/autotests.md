@@ -2760,3 +2760,54 @@ faithful execution of that test.
      `hle_GetVcount` still advances the counter on *read*, which is a separate
      infidelity with its own comment. `intr/vblank` did not move either. The 16
      lines in `threads/scheduling` are the whole measured result.
+
+     ### A dialog that never appears still has to say so
+
+     `NOOUTPUT` 11 to **3 of 432**. Eight `utility/savedata` tests went from
+     producing nothing at all to running to completion.
+
+     None of them was failing. They were *hanging*. An unimplemented firmware
+     call returns zero (`psp_hle_call`), and zero from a dialog's InitStart
+     reads as "started successfully" — so the harness settled into the poll loop
+     every dialog caller has, waiting for a status nothing would ever set. Its
+     loop is bounded at four hundred thousand iterations with a 2ms delay
+     between them, which is not a hang in principle and is one in practice: each
+     test hit the ten-second thread-drain timeout and dumped core. The eight of
+     them together now take **three seconds**.
+
+     sceMpeg already reached this conclusion and wrote it down — refuse
+     outright rather than report nothing, because a caller that waits out
+     "nothing" never stops. The same shape, one subsystem over.
+
+     **The first attempt was wrong in an instructive way.** Reporting the dialog
+     as cancelled the moment it started does end the loop, and it made six tests
+     that already produced output *worse*: `filelist` 86 to 92, `sizes` 90 to
+     96. The diff said why. Hardware runs the whole documented lifecycle even
+     for a dialog that does nothing — `INIT`, `VISIBLE`, an `Update`, `QUIT`,
+     then `FINISHED` after ShutdownStart, settling to `NONE` — and the tests
+     print every status transition. Skipping three of them loses three lines per
+     trial. Walking the states as a ratchet, advancing on each poll because
+     being asked is the only thing that could drive it here, reproduces the
+     sequence exactly. Four of those six then came out *below* where they
+     started: `filelist` 80, `getsize` 74, `idlist` 75, `sizes` 84.
+
+     **Differing lines are not monotone in correctness, and this is the clean
+     example.** `autosave` reads as a regression, 37 to 40. It went from seven
+     lines of output to all thirty-four, and from two lines matching hardware to
+     fourteen. A longer output has more lines available to differ, so the count
+     rose while the test got substantially better — the same trap as `NOOUTPUT`
+     scoring zero, one level up. When output *length* changes, count matching
+     lines; the third column only means something between runs of the same
+     shape.
+
+     The game calls savedata too, and the run changed: **633 GE lists to 639**,
+     106,108 commands to 106,762, 93,354,668 pixels to 93,875,406, still 0 bad
+     memory accesses. The frame comparisons are identical to the pixel — 0, 751
+     and 9,020 of 130,560 against the corner — so nothing is drawn differently.
+     It gets further per instruction budget because it is no longer spinning on
+     a dialog that could not finish. The reference figures in state.md move with
+     it.
+
+     Nothing here touches ms0:, PARAM.SFO or the save layout, and the eight
+     tests are nowhere near matching. This is the shape of the conversation, not
+     savedata.

@@ -37,7 +37,16 @@ by different routes.
 > also a true report; the numbers below stand, the `threads:` line does not.
 >
 > The pixel count in the block below is older still and predates the renderer
-> work; the run reports 93,354,668 today.
+> work; the run reports 93,875,406 today.
+>
+> **The GE figures below moved once more, and upward.** Registering the savedata
+> dialog (src/hle/utility.c) took the run to **639 lists, 106,762 commands, 214
+> finishes, 93,875,406 pixels**, still 0 bad accesses. The game polls a savedata
+> dialog during startup; unimplemented, its InitStart returned zero, which reads
+> as "started", so the poll never ended. It now gets a documented lifecycle and
+> stops waiting. The frame comparisons are unchanged to the pixel -- 0, 751 and
+> 9,020 of 130,560 -- so this is the same picture reached with less spinning,
+> not a different one.
 
 `sceMpegGetAvcAu` refuses and the game prints its own diagnosis:
 
