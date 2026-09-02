@@ -2811,3 +2811,39 @@ faithful execution of that test.
      Nothing here touches ms0:, PARAM.SFO or the save layout, and the eight
      tests are nowhere near matching. This is the shape of the conversation, not
      savedata.
+
+     ### `cpu_branch`: one line, and it is the module base
+
+     Parked, and filed next to `threads/create` because it is the same
+     question. Worth writing down mainly to stop it being picked up again as
+     the cheap cpu-level fix it looks like.
+
+     `cpu/cpu_alu/cpu_branch` differs on one line out of nine:
+
+         jalr: non-ra: 00000420      ours
+         jalr: non-ra: 08804420      hardware
+
+     The `jalr` is correct. Every other line in that test is an ordinal — which
+     branch went first, whether the link register was written before or after
+     the delay slot — and all eight pass, including the three that check the
+     link register's *ordering*. This is the only line in the file that prints
+     an absolute address, and the difference is exactly 0x08804000: the base a
+     PSP loads a user module at.
+
+     Our loader puts each segment where it was linked, and says so —
+     "a relocation against segment 0 adds zero and every code address stays
+     put". For a relocatable PRX that linked address is zero, so the module runs
+     based at zero and a captured code address is short by the base.
+
+     Rebasing is not a loader change. **Emitted function names are addresses** —
+     `psp_func_00299C5C` — so the base is the project's naming convention, the
+     oracle's identity for a function (`mapped: 0x00000000 + 6162720 bytes`,
+     102,615 relocations against it), and the address in every report and
+     finding written so far. The game's own ELF is relocatable and based at zero
+     too, so this is not a test-only path: it would move Armored Core, rename
+     every generated function, and invalidate the emitted C.
+
+     One line is not worth that. `threads/create`'s 28 lines are the same cause
+     — its `entry=`/`gpReg=` USER classification depends on the module living in
+     the user partition — so the two are one question, and it is worth about 30
+     lines whenever something else makes rebasing necessary anyway.
