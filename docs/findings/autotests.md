@@ -3300,6 +3300,18 @@ faithful execution of that test.
     2; the two normal sources fall back to position because the vertex
     decoder reads no normals). It just was not this.
 
+    **Correction (later the same day).** The paragraph below reads as though
+    the mip chain explained the dotted trails. It did not. With the chain
+    implemented the New Game frame came back **pixel-identical** -- 0 of
+    130,560 differing -- and the instrument added with it says why: not one
+    draw in that scene carries a mip chain (`TEX_MODE`'s top level is 0
+    throughout), so the mip path never engages. Mipmapping was a real gap and
+    `gpu/textures/mipmap` now matches hardware on every value, but the trails
+    were something else. What follows is the reasoning as it stood; it is
+    kept because the *shape* of the argument -- minified fine detail
+    point-sampled from one level -- was sound, and only its application to
+    this scene was wrong.
+
     **The real cause, and it was one bug.** An every-120th-frame sequence
     (`PSPRECOMP_FRAMES`) showed the hatch in full at frames 44-45, between the
     New Game press and the settings panel: a single huge triangle covering
@@ -3339,3 +3351,165 @@ faithful execution of that test.
     one came from the game measuring something no test covers, and it took
     fixing two instruments before the game could say it. The tests found the
     rules; the game found the gap.
+
+29. **The clipper, the scissor, and what the GE does with w** (2 Sep). With
+    the text fixed, Sif pointed at the background: "white pixels in lines
+    that feel wrong". The final frame's draw log (`PSPRECOMP_GE_DRAWLOG`
+    now takes a `_SKIP` count so it can be aimed at the end of a run) showed
+    the 3D backdrop's strips with screen bounding boxes like x -377752..-1093:
+    vertices between the eye and the near plane, small positive w, projected
+    to positions in the hundreds of thousands. The old rule dropped a
+    triangle only when a vertex had w <= 0 and drew everything else as-is,
+    and the slivers those triangles left were the pixels.
+
+    `gpu/clipping` -- two tests, forty data points -- fit one model, and it
+    is not the textbook one. **The hardware divides by w first, whatever its
+    sign, and applies its rules in NDC.**
+
+    - A triangle with every vertex at w <= 0 draws nothing (`Flat W=0: 0`,
+      `Flat W=-1: 0`). Mixed signs just divide: `Linear W 1->-1->-1` lights
+      the same 16,384 pixels as `1->1->2`, because (-w,-w,-w,w) is the same
+      NDC point for either sign. There is no eye-plane clip.
+    - With `DEPTH_CLIP_ENABLE` (0x1C) clear, near and far *reject*: any
+      vertex with z/w outside -1..1 drops the whole triangle. guardband's
+      `TRIANGLE_OUT_NEG_Z` has one vertex at -1.2 and two inside and is
+      DRAW=0; `Flat W=0.001 (noclamp)` is 0 because its other vertices sit at
+      z/w = 499.
+    - With the flag set the hardware clamps rather than rejects, and what it
+      does is exact: it clips the near plane geometrically, in NDC, and the
+      far plane not at all. `Z outside near` (one vertex at z = -2) lights
+      171 of 255 pixels on the wide edge -- the cut at t = 1/3 -- and
+      `Z outside both` 192, the cut at t = 1/4, while `Z outside far` alone
+      keeps all 255. On this hardware the flag means clamp, not clip, and
+      the GU library's `GU_CLIP_PLANES` name is the wrong way round.
+    - The guard band: a triangle with **any** vertex outside the 4096-square
+      box placed by `OFFSET_X/Y` is not drawn, with or without the flag.
+      `TRIANGLE_OUT_NEG_X` puts one vertex at x = -1809 against a -1808 edge,
+      leaves the other two well inside, and reads DRAW=0. (This was later
+      relaxed to "all three beyond the same edge" on a theory about the
+      hangar's missing walls, and the sweep caught it the same day: the rule
+      is per-vertex, and the hangar was dark for other reasons. Recorded
+      because the wrong version reached a commit message.)
+
+    Two wrong models preceded the right one, and both were *measured* wrong
+    within minutes rather than argued about: Sutherland-Hodgman against the
+    near plane gave `Z outside near (noclamp)` 171 pixels where hardware
+    gives 0, and a clip-space -w <= z <= w reject gave `Linear W 1->1->-1` 0
+    where hardware gives 16,384. The `.expected` numbers are cheap to test
+    against and there is no reason to hold a theory for longer than that.
+
+    And a bug the same test found on the way: the rasterizer's bounds were a
+    hardcoded 480x272 -- `sw_tri`'s bounding box was clamped at 479 --
+    and the scissor registers (`SCISSOR1/2`, 0xD4/0xD5) were never decoded.
+    homogeneous draws into a 512-wide target with a 512-wide scissor and lost
+    its last 32 columns (`X outside: 478` for 510, `X outside (right): 0`
+    for 128). The scissor is now a backend call and the only bound.
+
+    **Both clipping tests match hardware on every value.** homogeneous's
+    remaining 92 differing lines are all the checkpoint column.
+
+30. **Mipmapping, and the dots in the backdrop** (2 Sep). With the clipper in,
+    the background band Sif pointed at was pixel-for-pixel unchanged -- the
+    clipper was right and measured, and it was not this. A map of every pixel
+    brighter than 40 outside the panel showed the thing itself: trails of
+    single pixels, one per row and seven columns apart along straight
+    diagonals, their colour grading along the line. The draw log aimed at the
+    final frame (`PSPRECOMP_GE_DRAWLOG_SKIP`) put the 3D backdrop's strips
+    over them: hangar wall panels, CLUT8, 64x64 and 128x128, full of fine
+    seams and bright rivets, stretched over strips thousands of pixels tall,
+    sampled with linear-mipmap-linear minification. Twenty-fold minification
+    of a one-texel seam, point-sampled from level 0 because levels 1..7 were
+    never decoded, is exactly a trail of dots.
+
+    `gpu/textures/mipmap` gives the rule in its own numbers, each level of
+    its test texture filled with 0x10 times the level:
+    - **AUTO**: level of detail = log2 of the texel-per-pixel ratio, the
+      *larger* axis ("Minify 4x W", width only, lands on level 2), plus the
+      bias, a signed count of sixteenths from `TEX_LEVEL` (0xC8); floored,
+      capped at `TEX_MODE`'s top level, never below 0.
+    - **CONST**: the bias alone. **SLOPE**: the slope register (0xD0) plus
+      the bias -- a slope of 2.0 reads level 2, which log2 would not give.
+      The undefined mode 3 measures exactly like CONST.
+    - With a mip-linear filter the next level is blended in by the fraction,
+      exact to the sixteenth: bias +07 at 1:1 reads 07 between 00 and 10;
+      +87 (−7 9/16) at 256x reads 07 again; "Magnify" (¼) at +70 reads 50.
+      The blend is per channel, `a + (b − a) · f / 16`, truncated.
+    - A filter without mipmapping stays on level 0 whatever the ratio.
+      Within a level the min filter applies when minifying and the mag
+      filter when magnifying. Mip-nearest's rounding is unmeasured -- the
+      test was compiled with the linear variant -- and rounds half up.
+
+    The level is chosen once per primitive from its own texture gradient
+    (the affine map from pixels to texels, solved on two edges for
+    triangles; the corner ratio for sprites), not per pixel. 190 value
+    differences to **0; the test matches hardware.** One trap on the way:
+    `scripts/07-autotests.sh` takes a directory, and handed a `.prx` it
+    prints an error and leaves the previous `.got` in place, so two "runs"
+    of the test measured nothing and the third measured the stale file.
+
+31. **Lighting, and what it does not explain** (2 Sep). Sif's PPSSPP
+    reference for the settings screen shows a full hangar behind the menu --
+    grey walls, floor grating, hazard stripes -- where ours is nearly black
+    with faint dotted trails. `LIGHTING_ENABLE` (0x17) was set for 17.4
+    million vertices of that scene and never read: with lighting on the
+    vertex colour is not a colour, it feeds whichever material components
+    `MATERIAL_COLOR` selects, and the shaded colour is computed from the
+    lights. We used the raw field.
+
+    Implemented from `gpu/commands/light`, whose two-pixel boxes carry a
+    known normal and a red ambient, green diffuse, blue specular light, so
+    every reading decomposes:
+
+    - The light's ambient always contributes, and attenuation and the spot
+      factor scale it with everything else ("Diffuse 0.5 - Spot A + D:
+      7f3f00" halves the ambient and quarters the diffuse).
+    - Diffuse is max(N.L, 0), or `pow(N.L, specular coefficient)` for a
+      powered-diffuse light.
+    - Specular is `pow(N.H, coefficient)` with **H = normalize(L + (0,0,1))**
+      -- a fixed eye direction, not the view position. With N.L = 0 the test
+      reads 0xb5, and 1/sqrt(2) is exactly what a fixed +Z eye gives. It
+      contributes when N.L >= 0 and not below ("Diffuse 0.0" 0xb5, "Diffuse
+      -0.5" 0x00).
+    - The spot factor is **dot(L, D)** -- the *vertex-to-light* direction
+      against the spot direction, not the usual dot(-L, D): with the light
+      overhead and a direction of +Z the test reads a full-strength spot,
+      and the conventional sign would switch it off.
+    - A directional light ignores attenuation and reads its position field
+      as a direction.
+
+    A fixed (0,0,1) eye direction is only meaningful where the viewer looks
+    down -Z, so lighting is done in **eye space** and the light positions
+    are transformed by the view matrix. The test cannot tell -- its view
+    matrix is identity -- and the game turned out not to either, which is a
+    reminder that agreeing with a test is not the same as being right.
+
+    **And it is not the cause of the dark hangar.** Dumping the game's own
+    light state at the wall draw settles it arithmetically. Three
+    directional lights, diffuse only, no specular; global ambient and
+    emissive zero; `MATERIAL_COLOR` = 3 so ambient and diffuse both come
+    from the vertex colour, which is 0x80. Their ambients sum to 0.20 and
+    their diffuses to 0.90, so the shaded colour cannot exceed
+
+        0.5 x (0.20 + 0.90) = 0.55, or 0x8C
+
+    however the surfaces face -- and the same ceiling holds if the material
+    bits select the registers rather than the vertex, which is the one part
+    of the encoding the test does not pin down. Modulated against a 0x70
+    texel that is at most 0x26, and the one doubling pass in the composite
+    (measured: 0x10110D became 0x20221A exactly) takes it to 0x4C. The
+    reference's walls are near 0x90. **So the missing brightness is in the
+    compositing passes, not in the geometry, the textures or the lighting**
+    -- the pixel watch shows the wall then tinted by an alpha blend, a
+    reverse-subtract against a fixed colour, and that doubling. The oracle
+    for those is `gpu/commands/blend` (128 lines) and `blend565` (140).
+
+    One obstruction to note: `gpu/commands`'s own harness does not survive
+    our GE. Its tests draw a row of small boxes and read them back at the
+    end, and a full-screen black clear appears between one box and the next,
+    so only the last box is still on screen when the readback happens --
+    `cull` reads 0x00000000 where hardware has 0x001f1fff, and `light` reads
+    black or white for all but its first box. The first box is drawn
+    correctly and exactly (`ffff00`, hardware's value), which is what makes
+    the lighting above measurable at all. The mechanism behind the extra
+    clears is not identified yet; until it is, those two tests are not
+    usable as oracles beyond their first reading.

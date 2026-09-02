@@ -298,6 +298,17 @@ All are off by default and cost nothing when off.
 | `scripts/07-autotests.sh <dir>` | One pspautotests directory at the real instruction budget, against recorded hardware output. What you work a suite with. |
 | `scripts/08-autotest-sweep.sh` | All 432 tests, reduced budget and a per-test wall timeout, into `reports/08-sweep.tsv`. A map, not a verdict: the reduced budget truncates tests that legitimately run long. Rank by the differing-line column — one line away is one bug, five hundred is an unimplemented library. |
 
+**The GE list count doubles as a cost signal, and it earned that on 2 Sep.**
+New Game sits at 18,006 lists and 6,003 finishes. It fell to 17,200-17,500
+across several runs while the guard band was wrongly relaxed -- the replay is
+keyed on pad polls and the game paces against elapsed time, so letting
+enormous off-screen triangles reach the rasterizer cost enough frames to show
+here. With the rule restored it is back at 18,006 exactly, lighting and all.
+So a drop in this number without a change in what the run reaches means
+something got dramatically more expensive, and is worth chasing rather than
+shrugging at.
+
+
 **`scripts/05-oracle.sh` now refuses to run against stale generated C.** It
 rebuilds the interpreter every time but links C emitted whenever
 `04-emit-build.sh` last ran, so editing the emitter and re-running only the
@@ -1283,6 +1294,7 @@ and cannot see anything past it. Measured 1 Sep on `3f402c5`.
 | `scripts/09-replay.sh --decode scenarios/title-idle.pad` | `stop` at poll 1800, 0 bad mem, 5,406 lists, 874,060 commands |
 | `scripts/09-replay.sh --decode scenarios/skip-intro.pad` | `stop` at poll 2500, 0 bad mem, 7,506 lists, 2,280,256 commands, the menu in the displayed frame |
 | `scripts/09-replay.sh --decode scenarios/new-game.pad` | **`stop` at poll 6000, 0 bad mem**, 70/70 events, 18,006 lists, 50,813,097 commands, the sound-settings panel in the displayed frame (1 Sep, night — M1's gate); **every glyph on it exact** since indexed draws were fixed (2 Sep) |
+| `scripts/08-autotest-sweep.sh` | **137 MATCH** of 432, 3 NOOUTPUT, no per-test regression against the 1 Sep baseline (2 Sep, after the clipper and scissor); diff per test, the total is not a goal |
 
 A replay without `--decode` is the default run with a script attached; see
 the configuration note at the top of this file.

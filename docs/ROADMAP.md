@@ -158,6 +158,32 @@ exactly. Seven sampling fixes preceded it, each real, none this — see
 autotests item 28's retraction and cause. Found by `PSPRECOMP_GE_WILDUV=1`,
 which logs textured draws whose coordinates cannot be right.
 
+**The clipper (2 Sep).** The "white pixels in lines" in the backdrop were
+3D strips with vertices between the eye and the near plane, drawn as-is.
+`gpu/clipping` gave the hardware's actual rules — divide by w first; with
+`DEPTH_CLIP_ENABLE` **clear**, reject whole triangles with any vertex outside
+z/w ∈ [−1, 1]; with it **set** the flag means *clamp*, so clip the near plane
+geometrically in NDC, leave the far plane alone and pin the depth; and drop
+any triangle with a vertex outside the 4096 guard band — and both tests now
+match on every value. The same
+test found the rasterizer's hardcoded 480 bound; the scissor registers are
+decoded and are the only bound now. Findings item 29.
+
+**Mipmapping (2 Sep).** Levels 1–7 were never decoded. The chain,
+`TEX_LEVEL`'s three modes and bias, and the per-sixteenth blend now follow
+`gpu/textures/mipmap`, which matches on every value (190 → 0). It did **not**
+change the game: no draw in the settings scene carries a mip chain, and the
+frame came back pixel-identical, so the backdrop's dotted trails were not
+this. Findings item 30.
+
+**Lighting (2 Sep).** `LIGHTING_ENABLE` was ignored, so 17.4M vertices of the
+hangar scene were shaded with their raw vertex colour instead of the lit one.
+Implemented from `gpu/commands/light` — a fixed (0,0,1) eye direction for the
+half vector, `dot(L, D)` for the spot factor, and eye space throughout. It is
+**not** why the hangar is dark: the game's own three lights cap the shaded
+colour at 0x8C, so the missing brightness is in the compositing passes.
+Next oracle there: `gpu/commands/blend`. Findings item 31.
+
 ## M3 — Sound
 
 **Gate.** Music and effects audible in a windowed run on the garage screen.
