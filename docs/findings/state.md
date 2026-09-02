@@ -14,6 +14,12 @@ document contradict itself:
 
 - **default** — `PSPRECOMP_MPEG_DECODE` unset. sceMpeg refuses playback.
 - **decoder** — `PSPRECOMP_MPEG_DECODE=1`. Demuxer and openh264 video path on.
+- **pad-driven** — the decoder configuration plus a scenario from `scenarios/`,
+  replayed by `scripts/09-replay.sh --decode`. The only configuration that
+  gets past the intro: without the decoder the game parks at the movie gate
+  and never polls the pad again, so a scenario run without `--decode` measures
+  the default run with a script attached — 211 polls, 1 of 3 events delivered,
+  639 lists, checked 1 Sep.
 
 The switch landed in `4462226`. Every doc commit after it recorded numbers
 without saying which side of it they came from, so by the time anyone read them
@@ -108,6 +114,72 @@ reports nothing free.
 
 **`Movie Sync` receives zero signals in this configuration too.** An earlier
 summary claimed both never-signalled semaphores now fire; only Movie Start does.
+
+### pad-driven — the title menu renders, and New Game faults
+
+Measured 1 Sep on `3f402c5`, decoder on, three scenarios. Every run is
+deterministic (`clock virtual`) and ends at its own `stop` or at the first bad
+access, so the numbers compare between runs of the same build.
+
+| | `title-idle.pad` | `skip-intro.pad` | `new-game.pad --stop 1` |
+|---|---|---|---|
+| ends | `stop` at poll 1800, t=48.3s | `stop` at poll 2500, t=40.2s | **bad access #1** at poll 2567 |
+| bad mem | **0** | **0** | 1, stopped there |
+| GE lists / commands | 5,406 / 874,060 | 7,506 / 2,280,256 | 7,707 / 2,356,535 |
+| pixels | 716,878,913 | 1,499,561,979 | 1,543,165,451 |
+| 3d draws textured / flat | 12,864 / 2,064 | 41,753 / 4,983 | 43,073 / 5,131 |
+| formats | 5650 8888 clut8, modulate, cull off | same, 40,954 CLUT loads, cull ccw | same |
+| disc read | 27,060,224 (the movie) | 5,310,464 | 5,588,992 |
+| events delivered | 3/3 | 50/50 | 51/70 |
+| unimplemented calls | 11 | 17 | 19 |
+
+**The title menu renders, headless.** `skip-intro`'s displayed frame is the
+ARMORED CORE LR / LAST RAVEN Portable logo over the mech artwork, the
+CONVERT / NEW GAME / LOAD GAME menu and the copyright line — 127,050 of
+130,560 pixels differing from the corner, legible. That is real 3D: culling
+on, 41,753 textured draws, 8888 textures alongside the clut8 ones.
+
+**New Game faults exactly as recorded on 30 Aug.** The register dump at the
+first bad access matches that session to the register:
+
+```
+read32 at 0x461CC570
+a0=0x461CC578 a1=0x00000046 a2=0x4612ED37 a3=0x461CC570
+s0=0x4612ED37 s1=0x4680C36A sp=0x09FB9980 ra=0x0002E2F8
+vfpu cc at the fault: 0x0C
+```
+
+One distinct call site, `ra=0x0002E2F8` — `psp_func_0002E1D8`'s call into the
+vertex decoder `psp_func_0002E790` — 67 polls after the cross on NEW GAME.
+`title-idle` goes further in polls and touches nothing: it is the press, not
+the elapsed time.
+
+**What the game was told on the way, in order.** stderr keeps the ordering;
+the 16-deep zero ring captured at the fault holds only semaphore and
+interrupt noise, which is the ring's depth showing, not an absence.
+
+- boot: `sceImposeSetLanguageMode`, `sceUtilityLoadModule` ×6, the unnamed
+  scePower NID `0xEBD177D6` (45 candidate names hashed, none match),
+  `__sceSasGetOutputmode` ×3 — every one answered 0 with nothing written;
+- after the intro is skipped: `sceUtilityUnloadModule`, then **the title BGM
+  is started** — `sceAtracGetAtracID`, `SetData`, `GetRemainFrame`,
+  `SetLoopNum`, `GetStreamDataInfo`, each once, each answered 0 with **none of
+  its out-parameters written**;
+- cross on NEW GAME: `0xEBD177D6` again, `sceAtracReleaseAtracID`, and the
+  fault.
+
+The ATRAC calls bracket the title screen and the release lands right before
+the fault. That is why "the 13 sceAtrac NIDs fail honestly" is first in
+[../ROADMAP.md](../ROADMAP.md) M1 — not because it is proven to be the cause,
+but because it is the cheapest lie on the path and it sits exactly there.
+
+**Read the best-frame heuristic with care here.** `frame(best)` on every
+decoder run picks the same washed intro shot (peak 218, mean 195), which
+outscores the menu on variation. For a run that ends at `stop`, the
+*displayed* frame is the one to look at.
+
+Logs: `reports/09-<scenario>-<stamp>.{txt,err}`, frames `reports/m0-*.ppm`,
+both gitignored. Reproduce with the commands in the regression table.
 
 ### The picture
 
@@ -387,15 +459,15 @@ reports failures it does not already expect.
   pointer-scan artifact rather than live code."** It is live and it runs.
 - **"Both never-signalled semaphores now fire."** Only Movie Start does.
 
-## Open work, in the order it is worth doing
+## The open-work list, kept as history
 
-**This list is the source of truth.** Anything worth picking up next session goes
-here, in the repository, with enough context to act on without the conversation
-that produced it.
-
-**Start at item 8.** The numbering is chronological, not a priority order — 1
-and 3 are closed and 0 is a status entry — and 8 is the piece with the clearest
-next step and the most behind it.
+**The plan of attack lives in [../ROADMAP.md](../ROADMAP.md).** It says what
+to build next, in what order, and what each step has to produce. This list is
+the history of the items that fed it, kept because the measurements and the
+retractions are the reusable part. The numbering is chronological, not a
+priority order; 1, 3 and 8 are closed and 0 is a status entry. Nothing new is
+added here — a new piece of work is a milestone step in ROADMAP.md, and its
+measurements land in this file once they exist.
 
 0. **There is a picture.** The FromSoftware logo renders — 13,156 of 130,560
    pixels varying, 28 distinct colours, in a 360×48 band across the middle of
@@ -1026,8 +1098,12 @@ next step and the most behind it.
    blocker — only twelve sites in the whole module read `r_k0`.
 
 8. **Make kernel waits block, then implement the five missing object types.**
-   This is the next substantial piece, and the diagnosis is already done — do
-   not re-derive it.
+   *(Closed 31 Aug — [autotests.md](autotests.md) item 26 and the entries
+   after it. Waits block on the real scheduler, every object type the suite
+   exercises exists, and `threads` went 0 → 89 of 127. Kept for the diagnosis,
+   which was right.)*
+
+   This was the next substantial piece, and the diagnosis was already done.
 
    `threads` is **0 of 127** matching hardware. Four real gaps were closed
    getting there (see [autotests.md](autotests.md) item 25: the entry thread's
@@ -1118,8 +1194,11 @@ next step and the most behind it.
   because that path is textured — 462M of its 1.47bn pixels sample a texture,
   against 2M of 93M in the default run. Do not read the two as the same
   workload measured twice.
-- **The behavioural oracle.** Scaffolded — see
-  [autotests.md](autotests.md) and `scripts/07-autotests.sh`. The differential
+- **The behavioural oracle.** Built, and at 129 of 432 tests matching hardware
+  — see [autotests.md](autotests.md), `scripts/07-autotests.sh` and
+  `scripts/08-autotest-sweep.sh`. When it is worked is now a rule in
+  [../ROADMAP.md](../ROADMAP.md): a suite a milestone names, or one a game bug
+  points at; otherwise it is a regression map, diffed per test. The differential
   oracle validates *translation*, and everything left is *environment*, which is
   missing from both sides and so agrees perfectly. The GE queue bug is the proof:
   the oracle held at 3110/3108/2 throughout, because both sides called the same
@@ -1173,7 +1252,7 @@ the submodule's remotes are the conventional pair:
 ## The regression checks, with the numbers they should produce
 
 ```bash
-ctest --test-dir build/psprecomp -C Release --output-on-failure   # 12/12
+ctest --test-dir build/psprecomp -C Release --output-on-failure   # 13/13
 scripts/05-oracle.sh 4000
 ```
 
@@ -1181,6 +1260,20 @@ scripts/05-oracle.sh 4000
 attempted: 3957 functions
 compared:  3073      match: 3071      differ: 2      dispatch miss: 0
 ```
+
+**And the game, four ways.** The headless run is the bar the project had; the
+three replays are the bar it needs, because the headless run ends at the logo
+and cannot see anything past it. Measured 1 Sep on `3f402c5`.
+
+| command | expect |
+|---|---|
+| `scripts/06-boot.sh` (default) | 639 lists, 106,762 commands, 93,875,406 pixels, 0 bad mem; frames 0 / 751 / 9,020 |
+| `scripts/09-replay.sh --decode scenarios/title-idle.pad` | `stop` at poll 1800, 0 bad mem, 5,406 lists, 874,060 commands |
+| `scripts/09-replay.sh --decode scenarios/skip-intro.pad` | `stop` at poll 2500, 0 bad mem, 7,506 lists, 2,280,256 commands, the menu in the displayed frame |
+| `scripts/09-replay.sh --decode --stop 1 scenarios/new-game.pad` | bad access #1 at poll 2567, `ra=0x0002E2F8`, 7,707 lists — **the M1 gate is this row reading 0 bad mem at its `stop`** |
+
+A replay without `--decode` is the default run with a script attached; see
+the configuration note at the top of this file.
 
 **This moved again, from 3006/3003/3, and both halves of the move are
 explained.** More functions *compare* because more of the firmware they call is

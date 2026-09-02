@@ -5,11 +5,13 @@ the game's Allegrex MIPS code into C ahead of time, linked against a native
 runtime, to produce a real PC executable rather than an emulated one. Same model
 as N64Recomp / *Zelda 64: Recompiled*.
 
-**Status: Phase 0 complete — feasibility measured, verdict GO. The game boots
-and reaches its frame loop; the intro movie is the current blocker.** Phase 0's
-numbers are in [docs/findings/phase0.md](docs/findings/phase0.md); where things
-stand right now, and how to measure them, is
-[docs/findings/state.md](docs/findings/state.md).
+**Status: the game boots, plays its intro movie, and renders the title menu;
+New Game faults in the game's own software clipper.** Translation is done —
+the differential oracle agrees on every function it can compare — and 154 of
+the 218 firmware imports are implemented. What comes next, in order, is
+[docs/ROADMAP.md](docs/ROADMAP.md); where things stand right now, and how to
+measure them, is [docs/findings/state.md](docs/findings/state.md); Phase 0's
+numbers are in [docs/findings/phase0.md](docs/findings/phase0.md).
 
 Phase 1 added the differential oracle: an Allegrex interpreter sharing the
 toolkit's decoder, runtime and HLE, so a disagreement with the recompiled C
@@ -68,18 +70,27 @@ against a scheduler, a software GE and the HLE:
 scripts/06-boot.sh
 ```
 
+Then a scripted run — the intro skipped, the title menu reached, and stop:
+
+```bash
+scripts/09-replay.sh --decode scenarios/skip-intro.pad
+```
+
 Stage 04 emits ~2.1M lines of C, compiles it, and links it against the runtime.
-It takes a couple of minutes. The boot host runs the game today: it reaches its
-frame loop and stalls on the intro movie — see
-[docs/findings/state.md](docs/findings/state.md) for exactly where and why.
+It takes a couple of minutes. The boot host runs the game today: with the
+decoder on it plays the intro and renders the title menu headless, and a
+scenario drives it from there — see
+[docs/findings/state.md](docs/findings/state.md) for exactly where it stops
+and why.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `scripts/` | the pipeline, one stage per file — 00–06 bring-up, `07-autotests.sh` the behavioural-oracle scaffold |
+| `scripts/` | the pipeline, one stage per file — 00–06 bring-up, 07–08 the behavioural oracle (pspautotests), `09-replay.sh` scripted play |
 | `host/` | the native host: `boot` (module load, scheduler, GE rasterizer, HLE) and the link probe |
-| `docs/` | decisions and findings |
+| `scenarios/` | pad-input scripts the host can replay — the title menu, the New Game fault, and the control run |
+| `docs/` | [the roadmap](docs/ROADMAP.md), decisions and findings |
 | `tools/psprecomp` | submodule — the recompiler, runtime and interpreter (MIT) |
 | `tools/pspdecrypt` | submodule — decryption, for the mode-9 path psprecomp lacks |
 | `game/`, `reports/` | gitignored working directories |
