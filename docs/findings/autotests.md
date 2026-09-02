@@ -2847,3 +2847,50 @@ faithful execution of that test.
      — its `entry=`/`gpReg=` USER classification depends on the module living in
      the user partition — so the two are one question, and it is worth about 30
      lines whenever something else makes rebasing necessary anyway.
+
+     ### `ctrl/ctrl`: Read waits for a sample, and Peek does not
+
+     128 to **129 of 432**. Two findings, and the first one moves nothing on its
+     own.
+
+     `sceRtc` was not implemented at all, and `ctrl/ctrl` measures with it:
+
+         sceRtcGetCurrentTick(&tick0);
+         for (n = 0; n < 5; n++) sceCtrlReadBufferPositive(&pad_data, 1);
+         sceRtcGetCurrentTick(&tick1);
+         printf("%d\n", (tick1 - tick0 > 5000));
+
+     Unimplemented, the call returned zero and never wrote either variable, so
+     the subtraction was of two pieces of uninitialised stack. Only the tick
+     counter is added here: the rest of sceRtc is calendar work and
+     `rtc/arithmetic` alone differs by more than a thousand lines. A tick is a
+     microsecond, which the tests state rather than a header — `rtc/rtc` delays
+     2000us between two reads and checks the difference is at least 2000. Both
+     users take differences, so our epoch of "since the module started" is not a
+     problem.
+
+     The second is the real one. **Read waits for a controller sample it has not
+     already been given; Peek takes whatever is there.** That is the whole
+     difference between the two, and the registration here said as much while
+     pointing them at the same handler -- "nothing samples here, so the two are
+     the same call". That was true until the vblank grid existed to sample
+     against. Now it does, and the test measures the difference three ways: five
+     Reads span four vblanks and answer 1, `ReadLatch` answers 0, five Peeks
+     answer 0 against a `< 5000` threshold. We had the second and third right
+     and the first wrong.
+
+     Waiting *unconditionally* would have been the expensive mistake. A frame
+     loop is `WaitVblank(); ReadBufferPositive();`, and the sample it wants
+     arrived at the vblank it just waited out -- charging another frame would
+     halve the frame rate of every game that reads the pad. So what is tracked
+     is when the next unread sample falls due, and a read that already has one
+     does not wait. The game confirms it: unchanged at 639 GE lists, 106,762
+     commands, 93,875,406 pixels, same frame comparisons to the pixel.
+
+     One process note, because it nearly cost the finding. An intermediate run
+     reported `ctrl/ctrl` matching with only the clock added, which would have
+     meant the sampling change was unnecessary. It was a stale binary — the
+     result came from a build that had not finished. Re-checked against a build
+     confirmed to have succeeded, the clock alone still prints 0. This is the
+     same rule as never trusting a ctest result printed after a failed build,
+     and it applies to attribution runs just as much.
