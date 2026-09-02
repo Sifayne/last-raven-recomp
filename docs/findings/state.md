@@ -181,6 +181,16 @@ outscores the menu on variation. For a run that ends at `stop`, the
 Logs: `reports/09-<scenario>-<stamp>.{txt,err}`, frames `reports/m0-*.ppm`,
 both gitignored. Reproduce with the commands in the regression table.
 
+**Later the same day the fault was gone and a wait stood in its place.**
+Registering `sceAtrac3plus` as a stand-in decoder took NEW GAME from 1.2
+billion bad accesses to **zero**, at the same poll; the wait behind it was a
+SAS voice this runtime never ended, and the wait behind *that* is the title
+track's stop request, whose completion needs a stream-feeder word only a
+normal run-out clears. The whole chain, with the numbers, is
+[autotests.md](autotests.md) item 27; the next step is
+[../ROADMAP.md](../ROADMAP.md) M1 step 1c. Title screen and headless bar
+unchanged throughout.
+
 ### The picture
 
 The FromSoftware logo renders, cleanly. See open item 0 for how, and for the
@@ -1270,7 +1280,7 @@ and cannot see anything past it. Measured 1 Sep on `3f402c5`.
 | `scripts/06-boot.sh` (default) | 639 lists, 106,762 commands, 93,875,406 pixels, 0 bad mem; frames 0 / 751 / 9,020 |
 | `scripts/09-replay.sh --decode scenarios/title-idle.pad` | `stop` at poll 1800, 0 bad mem, 5,406 lists, 874,060 commands |
 | `scripts/09-replay.sh --decode scenarios/skip-intro.pad` | `stop` at poll 2500, 0 bad mem, 7,506 lists, 2,280,256 commands, the menu in the displayed frame |
-| `scripts/09-replay.sh --decode --stop 1 scenarios/new-game.pad` | bad access #1 at poll 2567, `ra=0x0002E2F8`, 7,707 lists — **the M1 gate is this row reading 0 bad mem at its `stop`** |
+| `scripts/09-replay.sh --decode --stop 1 scenarios/new-game.pad` | **0 bad mem** since the atrac stand-in (1 Sep, evening); parks at poll 2567 in the sound system's shutdown loop, 7,707 lists — **the M1 gate is this row reaching its `stop`** |
 
 A replay without `--decode` is the default run with a script attached; see
 the configuration note at the top of this file.

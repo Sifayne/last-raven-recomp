@@ -2894,3 +2894,116 @@ faithful execution of that test.
      confirmed to have succeeded, the clock alone still prints 0. This is the
      same rule as never trusting a ctest result printed after a failed build,
      and it applies to attribution runs just as much.
+
+27. **New Game: a fault, then two hangs, each a firmware lie -- and the
+    third is still ours.** The 30 Aug fault behind NEW GAME reproduced on
+    1 Sep to the register (state.md, *pad-driven*), and removing lies from
+    the path in the order the roadmap gave has moved the stop three times in
+    one afternoon. What follows is what each move measured.
+
+    ### The honest refusal the game does not survive
+
+    All 13 `sceAtrac3plus` imports were unimplemented, so every one returned
+    zero and wrote nothing: zero from `GetAtracID` is a valid ID, and the
+    game's music pump advances a ring cursor by a sample count it is never
+    handed. The first repair -- `GetAtracID` fails with NO_ATRACID, every
+    other call refuses a bad ID -- hung the game before the title screen:
+    **336 pad polls, 890 million semaphore operations, a black screen.**
+
+    Read from the emitted C: the player thread (`CSoundAtrac3Player`,
+    priority 16) ticks in a lock / pump / unlock loop whose only throttle is
+    a delay taken when the player is idle or has PCM buffered, and the game's
+    own open-failure path leaves the player *enabled* with `remainFrame`
+    still zero -- the one state in which the pump does nothing and delays
+    nothing. A `SetData` failure lands in the same state. Over a priority-40
+    main thread, a priority-16 spin is a hang. On hardware neither call ever
+    fails, so the game has no working failure path for either.
+
+    What it does handle is a decoder that opens and then cannot decode: a
+    negative return from `DecodeData` takes its stop path. So `atrac.c` is
+    now that -- IDs two per codec as `ids.expected` shows, the RIFF header
+    parsed with `setdata.expected`'s codes, `remainFrame` -1 for a whole
+    file and frames-present-minus-one for a partial one (all six sizes in
+    `getremainframe.expected`), `GetStreamDataInfo`'s count ending on a
+    frame boundary (0x7800 of free buffer is hardware's 0x76B0), `SetLoopNum`
+    refused on a file with no `smpl` chunk -- and `DecodeData` failing. The
+    title screen came back: 7,506 GE lists, 0 bad accesses, the menu.
+
+    ### The fault is gone, and the wait behind it was a sound effect
+
+    With the stand-in, NEW GAME no longer faults -- **0 bad accesses** where
+    there were 1.2 billion -- and the run parks at the same poll, 2567. An
+    HLE log of the transition (`--drain 75`, stderr capped at 1.5 GB)
+    showed the main thread finishing 67 frames of fade and then looping on
+    two locks -- `Sound Player Sema` and the `CSoundSasPlayer`'s
+    `CommandThread Sema` -- with a 100us delay, forever. Not the ATRAC
+    player: the SAS mixer.
+
+    `__sceSasGetEndFlag` said why. Before the press it alternated between
+    voice 0 playing and all voices ended, as menu sounds came and went.
+    At the press the game keyed on one more voice -- the same 46,560-byte
+    VAG sample it had already started for START -- and from then on every
+    one of 86,816 polls reported both voices still playing. The game waits
+    for that "decide" sound to finish before it leaves the title screen.
+
+    Our `decode_block` never finished it. With the voice's loop argument
+    set it restarted from byte 0 at the buffer end and at a block flagged
+    7. Hardware does neither: `audio/sascore/vag.expected` plays 16-block
+    samples in loop mode 1, and a sample of plain blocks **ends when its
+    buffer does**; only a block flagged exactly 3 keeps it playing. The same
+    test also shows the check is on exact values, not bit 0 -- it plays
+    `music.vag` with its file header in front, so block 0's flag byte is the
+    'A' of "VAGp", and the voice is still playing a grain later. (An earlier
+    version of the fix tested bit 0 and moved `vag` 422 -> 442; that is how
+    the header block was noticed.)
+
+    The same test exposed `__sceSasSetGrain` as unregistered: the tests set
+    a grain of 512 and ours stayed at 256, so one core call rendered half a
+    sample and the buffer end was never reached. Registered, with
+    `GetGrain`, `SetOutputmode` and `GetOutputmode` (the last called three
+    times by this game at boot), and the codes `sascore.expected` and
+    `vag.expected` pin: grain outside 64..2048 or off a multiple of 32
+    `80420001`, voice count `80420002`, output mode `80420003`, sample rate
+    `80420004`, null or unaligned core `80420005`, voice index `80420010`,
+    a sample size that is zero or not a multiple of 16 `80420014`.
+    `audio/sascore/vag` 422 -> **404**, every `Ended` line matching; eight
+    of the twelve `sascore` tests moved down, `sascore` itself 149 -> 55;
+    the title screen and the headless bar unchanged. One test moved up:
+    `audio/reverb/volume` 59 -> 68. It builds its voice with
+    `__sceSasSetVoicePCM`, still unregistered, and measures the output
+    level; with the grain stuck at 256 part of its buffer went unwritten
+    and the level check happened to land "near 1x". With the grain honoured
+    the whole grain is written, silently, and reads zero. An accidental
+    match lost, not a fault gained -- it passes once `SetVoicePCM` exists.
+
+    ### What is left, and it is ours again
+
+    With the sound effect ending, the main thread runs the fade, issues two
+    seeks, three async reads and five polls, and then sits in the sound
+    system's shutdown loop, `psp_func_00267298`: run the sound managers'
+    update, sleep one frame, repeat while the sum of three request-list
+    counts (`[sys+16] + [sys+544] + [sys+1072]`) is above zero. The
+    per-slot locks are gone from the loop now -- the effect requests
+    drained -- and no `sceAtrac` call is made after the press, so what
+    remains is the stop of the title track it opened before it.
+
+    That request completes through `psp_func_0026A900`: the player idle
+    (`[player+40]` set and `[player+76]` below 8192 -- both true after our
+    stop path) **and** the stream-feeder object's busy word clear
+    (`arr2[idx][+0]`, cleared by `psp_func_0026C104` via `0026BC24`).
+    Nothing on the decode-error path clears it, and only a normal run-out
+    of the track does. **Next:** read who calls `0026BC24` and when, and
+    take a TRACE build with `PSPRECOMP_WATCH=0x00267298` to name `sys`, then
+    `PSPRECOMP_PEEK` on the three counts and the feeder word at the stop.
+    The durable answer is probably a stand-in that *plays* -- silence, at
+    the right sample count -- so that every path the game takes is the
+    normal one; M3 needs that bookkeeping regardless.
+
+    ### The pattern, again
+
+    Three stops at one poll, three different firmware lies: an import that
+    answered zero and wrote nothing, a refusal the game's own error path
+    could not survive, a voice that never ended. Each was invisible until
+    the one before it was removed, and each was found the same way -- the
+    call histogram to see the shape, the HLE log to see the order, the
+    `.expected` files to see what hardware does.

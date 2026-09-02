@@ -64,13 +64,27 @@ path — each is a candidate cause and each is cheap. An unimplemented import
 returns 0 and writes **nothing** to its out-parameters; the game proceeds on
 whatever was on the stack.
 
-1. **The 13 `sceAtrac3plus` calls fail honestly.** The game's music pump
-   (`psp_func_00269BEC`) is a SetHalfwayBuffer → GetStreamDataInfo →
-   AddStreamData → DecodeData loop that advances a ring cursor by the sample
-   count it is handed — which today it is not. Register the NIDs (hash
-   candidate names from the pspautotests `audio/atrac` sources against the
-   import table; `test_hle.c` verifies) and return an ATRAC error so the pump
-   stops. Interim until M3.
+1. ~~**The 13 `sceAtrac3plus` calls fail honestly.**~~ **Done 1 Sep, and
+   corrected on the way** ([findings/autotests.md](findings/autotests.md)
+   item 27). Refusing `GetAtracID` hung the game: its own open-failure path
+   leaves the player thread spinning at priority 16 over the main thread.
+   What shipped is a stand-in that opens the stream, answers the bookkeeping
+   with hardware's numbers, and fails the decode — the one failure the game
+   handles. The fault is gone: **0 bad accesses** on `new-game.pad`.
+   - **1b. Done.** The wait that replaced the fault was ours too: the SAS
+     mixer never ended a one-shot voice started in loop mode, and the game
+     waits for its "decide" sound before leaving the title. Fixed to
+     hardware's rule from `audio/sascore/vag.expected`; `SetGrain`,
+     `GetGrain`, `SetOutputmode`, `GetOutputmode` registered with the codes
+     the suite pins.
+   - **1c. Next.** The run now parks in the sound system's shutdown loop
+     (`psp_func_00267298`) waiting for the title track's stop request, whose
+     predicate needs the stream feeder's busy word clear — which only a
+     normal run-out clears, not the decode-error stop. Read who calls
+     `psp_func_0026BC24`; TRACE build, `PSPRECOMP_WATCH=0x00267298` for
+     `sys`, `PSPRECOMP_PEEK` on `[sys+16]`, `[sys+544]`, `[sys+1072]` and the
+     feeder word. The likely durable fix is a stand-in that *plays* silence
+     at the right sample count, so every path is the normal one.
 2. **`sceUtilityMsgDialog*` gets the savedata ratchet.** Four calls, same
    lifecycle (`src/hle/utility.c`). Unregistered, `GetStatus` is a permanent
    `NONE` — the non-terminating poll the savedata fix just removed, one
