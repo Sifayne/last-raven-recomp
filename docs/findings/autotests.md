@@ -3099,3 +3099,92 @@ faithful execution of that test.
     ended; a decoder that wrote nothing back on failure -- and underneath all
     four, the codegen bug that was there from the first run. Every one of the
     audio findings was real and needed fixing. None of them was the fault.
+
+28. **M2, first pass: the GPU suite was blind to texturing, and what it saw
+    once it could see.** M2's gate is a mission rendering, and its first
+    frames past the title -- the sound-settings panel -- showed smeared
+    glyphs and a screen-wide hatched sheet with texture coordinates of
+    `-inf..inf`. The roadmap says to let the suite drive the renderer, so
+    the textured GPU directories were run first. Every one of them printed
+    the test's own preset fill at every sampled pixel.
+
+    ### The readback
+
+    The GPU tests clear the framebuffer and read pixel (0,0) back through
+    `sceDmacMemcpy`. It was unimplemented: it returned zero and copied
+    nothing, so the test's buffer still held the 44444444 it had written,
+    and every textured test in the corpus reported "nothing drawn" whatever
+    the GE had done -- 811 calls in one test. The suite was blind to
+    texturing by the readback, not by the rasterizer. Implemented with the
+    contract `dmac/dmactest.expected` gives (size checked before pointers:
+    zero size 80000104, null with a length 80000103), and the three cache
+    range operations the same tests call registered as the no-ops the flat
+    memory model makes them. With that, the suite measured texturing for the
+    first time, and four things were wrong at once.
+
+    ### Four things, each with its test
+
+    - **Texturing without texture coordinates.** `gpu/texfunc` draws sprites
+      with `GU_COLOR_8888 | GU_VERTEX_32BITF` -- no texcoords -- over a solid
+      texture and reads the texture's colour back. Our GE required texcoords
+      in the vertex before binding a texture, reasoning that geometry without
+      them would otherwise be painted with a stale texture sampled at texel
+      zero. That is what hardware does. The guard is gone; a vertex without
+      coordinates samples (0,0). A game that wants flat geometry disables
+      texturing, and this one does: its frames did not change.
+    - **The texture functions.** Only MODULATE existed, hardcoded at both
+      call sites, so DECAL, BLEND, REPLACE and ADD all drew as MODULATE.
+      All five now match `gpu/texfunc` on every value, with the RGB/RGBA
+      flag (under RGB the fragment alpha is the vertex's -- measured through
+      the tests' blended lines) and colour doubling ("Half x2 + Half"
+      saturates). The five files still differ by 540-1568 lines each: every
+      remaining line is the `[x]`/`[r]` reschedule column, hardware
+      rescheduling during a draw-and-readback where we do not. A scheduler
+      matter, recorded here so it is not read as a rendering one.
+    - **The framebuffer's alpha byte is the stencil.** Hardware reads
+      44ffffff back from a 44444444 fill after every draw; an ordinary draw
+      does not write it, a clear does when its stencil bit is set. Three
+      `gpu/texcolors` tests matched the moment this was right. The raster
+      unit tests asserted the old behaviour and now observe a sampled alpha
+      the only way hardware allows, through a blend.
+    - **16- and 32-bit palette indices.** `gpu/clut/shifts` and `masks`
+      index the palette with whole 16- and 32-bit texels; the formats were
+      refused, so the quads drew flat white. Added: `masks` matches, `shifts`
+      164 -> 12, `offset` 394 -> 162, `address` 44 -> 24.
+
+    And one more from `gpu/filtering/precisionnearest2d`: **a sprite with
+    exactly one axis flipped runs u along y and v along x.** The corners the
+    GE generates take u from the vertex that gave them their y and v from
+    the one that gave them their x; TR->BL reads texel (0,1) at the top-left
+    pixel where the standard mapping reads (1,0). All four orientations
+    match now.
+
+    Sweep 129 -> **135 of 432**: `clut/masks`, `rendertarget/depal`,
+    `simple` and the three 16-bit `texcolors` crossed; `rendertarget/copy`
+    3,906 -> 1,706. Two moved the other way: DXT5 by eight lines, a format
+    this game does not use, and `clipping/guardband` 16 -> 20, where hardware
+    culls triangles entirely outside its guard band and we now draw them
+    textured -- the clipper item, unchanged in substance.
+
+    ### What it did not change, and what that says
+
+    The game: title screen 7,506 GE lists, headless 639, New Game 18,006,
+    all 0 bad accesses, frames the same to the eye (the title frame's
+    corner count moved 127,050 -> 126,299 with the alpha byte). The smeared
+    glyphs on the settings panel are exactly as they were. So they are not
+    the texture function, not the palette, not the alpha. What remains open
+    in the suite is what they are: `gpu/filtering`'s precision tests differ
+    on sub-pixel and half-texel rules -- hardware draws a through-mode sprite
+    starting at x=1 from pixel 0, and picks a different texel at a
+    half-texel offset -- and `nearest` differs on 269 of 549 value lines the
+    same way. Text at 1:1 is the case those rules decide. **Next:** derive
+    hardware's through-mode coverage and sampling rule from
+    `precisionnearest2d` and `nearest`, then look at the glyphs again.
+
+    Also open from the same runs, in the order they matter to a mission:
+    `gpu/textures/size` -- in 3D mode a 16-bit texture coordinate of 32768
+    reads as the far end of the texture on hardware and the far edge pixel
+    is drawn; `gpu/texmtx` -- vertices with skinning weights are not stepped
+    over by the decoder, and there is no texture matrix at all;
+    `gpu/clipping` -- no near-plane clipper and no guard-band cull. The
+    hatched sheet's `-inf` coordinates are unchanged and unexplained.

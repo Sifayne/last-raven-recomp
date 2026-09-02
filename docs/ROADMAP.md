@@ -124,13 +124,22 @@ the reusable part:
 **Gate.** A recorded `scenarios/mission-1.pad` reaches a sortie; frame dumps
 compared against PPSSPP reference shots, the way the logo was; `bad mem: 0`.
 
-- **Let the GE census drive it, not the test list.** `PSPRECOMP_GE` already
-  reports which texture functions and formats the stream used. Implement what
-  the mission scene uses; do not implement what it does not.
-- Likely needed: the four texture functions besides modulate (`render.c`
-  hardcodes modulate at both call sites; `gpu/texfunc` is the oracle), the
-  16-bit texture formats (`gpu/texcolors`, eight lines each), and CLUT16/32
-  or DXT only if the census names them.
+- **Done 1 Sep, first pass** ([findings/autotests.md](findings/autotests.md)
+  item 28): the GPU suite's readback (`sceDmacMemcpy`) implemented, so the
+  textured tests measure anything at all; texturing whenever enabled (texel
+  0,0 without texcoords); the five texture functions with RGB/RGBA and
+  doubling; the framebuffer alpha byte kept as the stencil; CLUT16/32; the
+  one-axis-flipped sprite mapping. Sweep 129 -> 135. The game's frames did
+  not change, so the smeared glyphs are none of those.
+- **Next: the sampling precision rules.** `gpu/filtering/precisionnearest2d`
+  and `nearest` differ on sub-pixel coverage and half-texel selection; text at
+  1:1 is the case they decide. Derive hardware's through-mode rule from those
+  two, then look at the glyphs again.
+- Then, in the order a mission needs them: 16-bit texcoord range and far-edge
+  pixel (`gpu/textures/size`), skinning weights in the vertex decoder and a
+  texture matrix (`gpu/texmtx`), the near-plane clipper and guard-band cull
+  (`gpu/clipping`), and the `-inf` texture coordinates seen on the settings
+  panel. DXT only if the census names it.
 - **A near-plane clipper and perspective-correct interpolation.** The camera
   is inside a large world; affine texturing skews on oblique geometry and
   `ge.c` currently drops any triangle touching the near plane whole.
