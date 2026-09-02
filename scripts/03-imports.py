@@ -94,11 +94,17 @@ def implemented():
     """NIDs psprecomp registers, by exact call site — not a loose hex grep,
     which would count unrelated constants as coverage."""
     pat = re.compile(r'psp_hle_register\(\s*0x([0-9A-Fa-f]{8})\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"')
+    # A NID whose name is not known is registered without one; it is still
+    # implemented, and leaving it out here once understated coverage by two.
+    pat_unnamed = re.compile(r'psp_hle_register_unnamed\(\s*0x([0-9A-Fa-f]{8})\s*,\s*"([^"]+)"')
     have = {}
     for p in glob.glob(os.path.join(ROOT, "tools/psprecomp/src/hle/*.c")):
         with open(p) as f:
-            for nid, lib, name in pat.findall(f.read()):
-                have[int(nid, 16)] = (lib, name)
+            src = f.read()
+        for nid, lib, name in pat.findall(src):
+            have[int(nid, 16)] = (lib, name)
+        for nid, lib in pat_unnamed.findall(src):
+            have[int(nid, 16)] = (lib, "<unnamed>")
     return have
 
 
