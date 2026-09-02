@@ -3188,3 +3188,108 @@ faithful execution of that test.
     over by the decoder, and there is no texture matrix at all;
     `gpu/clipping` -- no near-plane clipper and no guard-band cull. The
     hatched sheet's `-inf` coordinates are unchanged and unexplained.
+
+    ### The precision rules, and what they were worth
+
+    Item 28 ended by naming sub-pixel coverage and half-texel selection as
+    what the filtering tests still measured. Four rules came out of them, each
+    read off hardware's numbers rather than assumed, and all four precision
+    tests are now exact on every value.
+
+    **Screen positions are 12.4 fixed point.** The GE truncated them to whole
+    pixels, so every edge and every texel boundary moved by up to a pixel.
+    `gpu/filtering/precisionnearest2d` places a two-pixel sprite at
+    x = -i/16 for i in 0..15 and reads which texel each pixel gets; whole
+    pixels answered one of those sixteen cases and lost the other fifteen.
+    `psp_vertex` now carries `PSP_SUBPX` units per pixel, both fillers work in
+    them, and a pixel is covered when its centre -- `16*i + 8` -- lies inside
+    the primitive, which is `(v + 7) >> 4` at each end. Both nearest-precision
+    tests went to exact, and `gpu/primitives` stayed at all thirteen matching.
+
+    **Texture scale and offset were never decoded**, and narrow texture
+    coordinates are unsigned. `precisionnearest3d` scales by 0.5 and its texel
+    boundary landed at a quarter of the sprite; `gpu/textures/size` draws with
+    16-bit coordinates from 0 to 32768, which read as signed is -1.0, so the
+    right-hand edge sampled texel 0 instead of the last one. Both fixed in
+    `read_uv_model`; `size` 141 value-differences to 41, `rotate` to zero.
+
+    **Bilinear weights are sixteenths, floored, and the blend truncates.**
+    `precisionlinear2d` stretches two texels over 256 pixels: a continuous
+    filter starts changing colour at pixel 64 by one step, and hardware first
+    changes it at pixel 72 by 0x10 -- sixteen levels, and the ramp does not
+    begin until a full sixteenth has accumulated. The blend then truncates:
+    a quarter of the way from 00 to ff is 0x3f, not the 0x40 rounding gives,
+    and the halfway point is 0x7f. Both linear-precision tests went to exact
+    and `linear` 488 to 335.
+
+    One epsilon is ours, not hardware's, and is marked as such in the code.
+    Our interpolated coordinate carries a few ULP of error; at a 1:1 blit that
+    puts it just below a texel boundary, the weight becomes fifteen sixteenths
+    on the texel below, and truncation drops a whole texel -- linear stopped
+    agreeing with nearest at the one scale where they must agree, which
+    `test_raster` catches. A thousandth of a texel absorbs it, four orders of
+    magnitude below the sixteenth being measured.
+
+    **Texture dimensions saturate at 512.** `gpu/textures/size` asks for 1024
+    up to 8192 and every one reads texel 511 at its far edge.
+
+    Sweep 135 -> **136 of 432**, `textures/rotate` crossing. The game is
+    unchanged in every count -- headless 639 GE lists, title 7,506, New Game
+    18,006, all 0 bad accesses -- and the frames are the same picture, with
+    the FromSoftware logo and the title screen slightly crisper at the glyph
+    edges where the coverage rule moved.
+
+    **The glyphs on the settings panel are still smeared.** Six rendering
+    findings in, that is now a strong negative result: it is not the texture
+    function, the palette, the alpha, the sub-pixel coverage, the filter
+    weights or the coordinate range. What is left in the suite that text
+    could turn on is `gpu/filtering/nearest` and `linear`, which still differ
+    on 262 and 335 values about *which* texel a magnified sample lands on at
+    half-texel offsets, and `gpu/textures/mipmap` at 190. That, and the
+    unexplained `-inf` texture coordinates the panel's own draws report.
+
+    ### The glyphs are not a sampling problem, and the overlay was texgen
+
+    Six rendering fixes in, the settings panel's text was still wrong, so the
+    next move was to stop inferring from tests and look at the game's own
+    draws. Two instruments had to be corrected first, and both had been
+    answering plausibly about the wrong thing:
+
+    - **The texture dumper capped at 16 distinct textures.** The title screen
+      alone binds that many, so every dump taken to look at a later menu
+      contained the title's textures. At 256, the New Game run yields 49, and
+      the files now carry each texture's address, size and format so a dump
+      can be matched against the GE summary.
+    - **The draw log counts down from the first draws of the run**, which is
+      the wrong end of a question about a menu three screens in.
+      `PSPRECOMP_GE_TEXDRAW=<hex>` asks it the other way round: show me the
+      draws that bind this texture, with each vertex's position and
+      coordinates.
+
+    The glyph atlas is texture 45, 512x512 CLUT4, and it **decodes perfectly**
+    -- Latin, Greek, Cyrillic, kana and kanji, every glyph crisp. The draws
+    are perfect too: each glyph is a pair of triangles spanning 5x13 pixels
+    with texture coordinates spanning exactly 5x13 texels, a 1:1 blit. So the
+    text is neither the texture, nor the palette, nor the sampler, nor the
+    filter, nor the coordinates. It is something in the fill, and it is the
+    open question.
+
+    What the same log did explain is the hatched sheet. Interleaved with the
+    glyph draws are **full-screen quads using the glyph atlas with texture
+    coordinates of -512 and NaN**. That is texture coordinate *generation*:
+    `TEX_MAP_MODE` was never decoded, so mode 1 -- coordinates from the
+    generation matrix -- read the vertex's coordinate field anyway, and a game
+    using generation leaves that field uninitialised. It is also where the GE
+    summary's `u -inf..inf` came from. Decoded now, with the generation matrix
+    (PSPSDK: `TEX_MAP_MODE` 0xC0, `TGEN_MATRIX_NUMBER` 0x40,
+    `TGEN_MATRIX_DATA` 0x41), for the position and UV sources; the two normal
+    sources fall back to position because the vertex decoder does not read
+    normals, which is what `gpu/texmtx`'s remaining differences are. The
+    streaks across the panel are gone and `texmtx/source` went 40 value
+    differences to 15, `uvs` 4 to 2.
+
+    **The pattern is worth keeping.** Every one of the seven rendering
+    findings so far came from a test measuring something the game does; this
+    one came from the game measuring something no test covers, and it took
+    fixing two instruments before the game could say it. The tests found the
+    rules; the game found the gap.

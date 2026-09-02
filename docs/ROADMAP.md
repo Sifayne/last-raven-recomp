@@ -131,15 +131,20 @@ compared against PPSSPP reference shots, the way the logo was; `bad mem: 0`.
   doubling; the framebuffer alpha byte kept as the stencil; CLUT16/32; the
   one-axis-flipped sprite mapping. Sweep 129 -> 135. The game's frames did
   not change, so the smeared glyphs are none of those.
-- **Next: the sampling precision rules.** `gpu/filtering/precisionnearest2d`
-  and `nearest` differ on sub-pixel coverage and half-texel selection; text at
-  1:1 is the case they decide. Derive hardware's through-mode rule from those
-  two, then look at the glyphs again.
-- Then, in the order a mission needs them: 16-bit texcoord range and far-edge
-  pixel (`gpu/textures/size`), skinning weights in the vertex decoder and a
-  texture matrix (`gpu/texmtx`), the near-plane clipper and guard-band cull
-  (`gpu/clipping`), and the `-inf` texture coordinates seen on the settings
-  panel. DXT only if the census names it.
+- **Done 2 Sep: the precision rules** (same item, second half). Screen
+  positions are 12.4 fixed point; texture scale and offset are real registers
+  and narrow texcoords are unsigned; bilinear weights are floored sixteenths
+  and the blend truncates; texture dimensions saturate at 512. All four
+  `gpu/filtering` precision tests exact, `textures/rotate` matching, `size`
+  141 value-differences to 41, sweep 136. The game is unchanged in every
+  count; the glyphs are still smeared, which now rules out six causes.
+- **Next.** `gpu/filtering/nearest` and `linear` still differ on which texel a
+  magnified sample lands on at half-texel offsets (262 and 335 values), and
+  `gpu/textures/mipmap` at 190; that is the last sampling rule text could turn
+  on. Then, in the order a mission needs them: skinning weights in the vertex
+  decoder and a texture matrix (`gpu/texmtx`), the near-plane clipper and
+  guard-band cull (`gpu/clipping`), and the `-inf` texture coordinates the
+  settings panel reports. DXT only if the census names it.
 - **A near-plane clipper and perspective-correct interpolation.** The camera
   is inside a large world; affine texturing skews on oblique geometry and
   `ge.c` currently drops any triangle touching the near plane whole.
