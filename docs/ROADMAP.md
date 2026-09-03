@@ -269,7 +269,9 @@ ATRAC3+ substream goes through the same decoder (item 40), so cutscenes have
 sound; their pops were ring starvation and their drift a picture clock
 invented at 25 fps (items 40, 41), and the host's remaining 1.5% is paid by
 dropping a late picture rather than showing it, which holds the two together
-within a frame across the whole intro. Still to do here: the context structure stream.prx prints
+within a frame across the whole intro. A movie can now reach its end, which
+nothing had done before: the player waits for the ring buffer to read empty
+and deadlocks if it never does (item 42). Still to do here: the context structure stream.prx prints
 (`_sceAtracGetContextAddress`), which would turn on the streaming oracle; the
 seek tests; then SAS. And a cleanup worth doing once: with libavcodec linked,
 its H.264 decoder can replace openh264 for the video and leave one optional

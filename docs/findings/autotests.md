@@ -4118,3 +4118,49 @@ faithful execution of that test.
     and the hangar keep their exact baseline command counts, so the
     replays that matter are untouched.
 
+42. **The end of a movie: the ring has to read empty, or the player never
+    finishes** (3 Sep). Sif watched the intro to its end and the game hung
+    there and never came back. The first suspicion was the frame dropping
+    of item 41, since that walks the elementary stream ahead of the
+    player -- and it was wrong. Three controls, each hanging identically
+    at the same poll: dropping switched off with the new
+    `PSPRECOMP_MPEG_NODROP=1`; an unpaced replay, where dropping never
+    runs at all; and the fork's own mpeg.c from before dropping existed,
+    swapped in and built. The hang was there all along and nothing had
+    ever reached a movie's end to find it.
+
+    What it looks like: eight guest threads alive, the module's main
+    thread blocked on `sceKernelWaitThreadEnd`, everything else in a
+    timed wait, and one thread spinning -- 850 million
+    `sceMpegRingbufferAvailableSize` calls in a run that never left the
+    movie, with pad polls stopped for three minutes.
+
+    Reading the spinning thread in the emitted C settles the mechanism.
+    Its loop exits only when its next step returns non-zero, and that
+    step first asks a small helper for a free frame buffer -- a
+    produced-minus-consumed count over a pool -- and returns zero
+    without doing anything when the pool is empty. So it never reaches
+    the `sceMpegAvcDecodeStop` that would report no frames left and let
+    it exit. The pool is empty because the player's display side has
+    finished and will not hand a buffer back; the player has finished
+    because the movie is over. Its main thread waits for that spinning
+    thread to end, and so the whole game stops.
+
+    What the player wants first is an empty ring. Item 40 gave the ring
+    an occupancy derived from what the decoders had consumed, with one
+    packet always held so the game could not read an entirely free ring
+    as nothing buffered -- correct during playback, and a deadlock at the
+    end, because the player stops fetching about three seconds before the
+    data runs out (the stream's tail is padding it does not want), so
+    those last packets are never accounted consumed. The rule now: hold
+    by consumption while the file is still arriving, and once it has been
+    fully delivered the ring is empty. That is also true -- the ring is a
+    transport, and everything it ever carried is on our side by then.
+
+    With it the run goes on past the movie: 8,480 pad polls where it
+    stopped at 4,770, GE work from 2.3 to 4.8 million commands, the spin
+    gone from the census (255 thousand semaphore signals against 294
+    million). The intro plays, ends, and the game carries on. Unpaced,
+    title-idle, skip-intro, the hangar and the garage all keep their
+    exact baseline command counts at 0 bad accesses; ctest 13/13.
+
