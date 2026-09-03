@@ -4337,3 +4337,46 @@ faithful execution of that test.
     linear one prints none, so a near-miss can score far worse than a gross
     miss -- an earlier pass of this work read as a threefold regression while
     being strictly closer to hardware. Count the sweeps that match exactly.
+
+46. **The arguments SAS refuses, and the six files that go byte-exact**
+    (3 Sep). With the curves derived, what was left in the small files was
+    not rendering at all: it was calls this accepted that hardware turns
+    away. Each rule below is read straight off an `.expected` file, and
+    together they take `sascore`, `pitch`, `keyoff` and `noise` to zero
+    differing lines.
+
+    - **The pitch ceiling is 0x4000 and the compare is unsigned.**
+      pitch.expected refuses 0x4001, 0x80000001 and 0xFFFFFFFF alike with
+      0x80420012, which is what says -1 is not a sentinel here but simply a
+      very large pitch. 8 lines to 0.
+    - **A noise frequency is 0..63**, refused with 0x80420011 on the same
+      unsigned footing. `__sceSasSetNoise` had been a bare accept; it now
+      checks and still does not generate noise, so a voice set to it keeps
+      playing its sample. 16 lines to 0.
+    - **A key-off needs a key that is down.** keyoff.expected refuses a
+      key-off on an idle voice with 0x80420016 -- the code an already-on
+      key-on gets -- and refuses it while the core is paused too. 6 lines
+      to 0.
+    - **`__sceSasSetVoice`'s fifth argument is a loop mode, not a
+      position.** It takes 0 or 1 and refuses everything else, -1 included,
+      with 0x80420015 -- the same code `__sceSasSetVoicePCM` uses for a bad
+      loop position, which is what made the two look interchangeable. vag
+      from 308 lines to 272.
+    - **The only sample rate is 44100.** This accepted 48000 as well, on the
+      reasoning that it is a rate the mixer can run at. sascore.expected
+      refuses it with 0x80420004 along with every other rate it tries;
+      hardware has one.
+    - **A volume is bounded at plus or minus 0x1000, and all four are
+      checked** -- the two channel volumes and the two reverb sends, whether
+      or not this renderer uses them. Outside that is 0x80420018. Together
+      with the rate, sascore goes from 47 differing lines to 0.
+
+    **Where the suite stands.** Six of the twelve sascore files are
+    byte-exact: `sascore`, `getheight`, `keyoff`, `noise`, `pause`, `pitch`.
+    What remains is rendering rather than argument checking -- `setadsr` at
+    304 lines wants the guest-side SasCore struct written back, `vag` at 272
+    and `outputmode` at 50 are decoded samples, `pcm` at 10 is a re-key
+    inside one core, and `adsrcurve` at 24 is the two boundary rules in 45.
+    The game is unchanged across title-idle, the hangar, the garage and New
+    Game: exact baseline command counts, 0 bad accesses, audio on all three
+    channels, ctest 13/13.
