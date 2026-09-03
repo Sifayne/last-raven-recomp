@@ -112,6 +112,15 @@ process by `scripts/01-extract-decrypt.sh`. That keeps it at arm's length. Do no
 link its code into the host or copy routines out of it without deciding what that
 means for this project's own license first.
 
+Two system libraries are optional and found at build time, never vendored:
+**openh264** (BSD) decodes the intro movie for sceMpeg, and **FFmpeg's
+libavcodec** (LGPL-2.1) decodes ATRAC3+ music for sceAtrac3plus. Both are
+linked dynamically and the build and the headless host work without either.
+One caveat on FFmpeg: a distribution build configured with `--enable-gpl`
+(most are) makes the whole library GPL, and a binary linked against it
+inherits that. Build without it, or against an LGPL-configured FFmpeg, if
+that matters to you.
+
 ## Upstream
 
 `tools/psprecomp` is our fork, tracked as an ordinary submodule. What we have

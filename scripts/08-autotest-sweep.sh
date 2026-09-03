@@ -62,7 +62,13 @@ while read -r f; do
     [ -f "$exp" ] || continue
     rel="${f#"$TESTS"/}"
     total=$((total + 1))
-    rm -rf "$SWEEPFS"; mkdir -p "$SWEEPFS/host"
+    rm -rf "$SWEEPFS"; mkdir -p "$SWEEPFS/host" "$SWEEPFS/disc"
+    # The test's data files, by bare name -- see 07-autotests.sh.
+    for d in "$(dirname "$f")"/*; do
+        case "$d" in *.prx|*.expected|*.c|*.cpp|*.h|*.S|*.compile|*/Makefile) ;;
+                     *) ln -sf "$d" "$SWEEPFS/disc/" ;;
+        esac
+    done
     # An `if`, not a bare subshell followed by `rc=$?`: under `set -e` a
     # failing subshell ends the run before the assignment executes, and most
     # of these tests exit non-zero. 07-autotests.sh has the same construct for

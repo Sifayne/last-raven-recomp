@@ -19,6 +19,13 @@ HOST_LIBS=""
 if pkg-config --exists openh264 2>/dev/null; then
     HOST_LIBS="$(pkg-config --libs openh264)"
 fi
+# Likewise FFmpeg's libavcodec, behind sceAtrac3plus: optional, and the
+# decision is CMake's (find_library in tools/psprecomp/CMakeLists.txt), so
+# ask its cache rather than probing twice and disagreeing.
+if grep -q '^AVCODEC_LIBRARY:FILEPATH=/' "$ROOT/build/psprecomp/CMakeCache.txt" 2>/dev/null &&
+   pkg-config --exists libavcodec libavutil 2>/dev/null; then
+    HOST_LIBS="$HOST_LIBS $(pkg-config --libs libavcodec libavutil)"
+fi
 PSPDECRYPT="$ROOT/tools/pspdecrypt/pspdecrypt"
 
 GAME_DIR="$ROOT/game"

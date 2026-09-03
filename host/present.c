@@ -187,46 +187,94 @@ static void publish_pad(void) {
 
 /* ---- audio ---------------------------------------------------------------- */
 
+/* A mixer, not a queue.
+ *
+ * This used to hand every channel's buffer to SDL_QueueAudio, which is one
+ * stream: two channels playing at once -- the music on one, the SAS effects
+ * on another -- came out interleaved block by block, each at the wrong
+ * moment. The PSP has eight hardware channels and sums them, so this keeps a
+ * ring of stereo frames per channel and the device callback sums whatever
+ * each ring holds, silence for an empty one. The volumes are applied on the
+ * way in, on the 0..0x8000 scale the output call was given.
+ *
+ * Pacing: each blocking output call is told how far its own channel is ahead
+ * of the speaker, and the scheduler delays it by that. The target depth is
+ * how far a channel may run ahead before it is made to wait -- short enough
+ * that an effect is heard when it happens, long enough to ride out a frame
+ * that rasterizes slowly. */
+enum { MIX_CHANNELS = 8, MIX_RING_FRAMES = 44100 * 8 };
+typedef struct { int16_t *pcm; uint32_t head, tail, count, dropped; } mix_ring;
+
 static SDL_AudioDeviceID g_audio_dev;
-static int64_t  g_audio_bytes_per_us_hi;   /* bytes per microsecond, scaled 2^20 */
-static uint32_t g_audio_target_bytes;      /* keep the queue near this depth */
-static int16_t *g_audio_scratch;
-static uint32_t g_audio_scratch_samples;
+static mix_ring g_mix[MIX_CHANNELS];
+static uint32_t g_audio_target_frames = 44100 / 2;   /* half a second ahead */
 static int      g_audio_warned_fmt;
+
+/* The device callback: runs on SDL's audio thread with the device lock held,
+ * which is the lock present_audio takes to push. */
+static void audio_callback(void *ud, Uint8 *stream, int len) {
+    (void)ud;
+    int16_t *out = (int16_t *)stream;
+    const int frames = len / 4;
+    for (int i = 0; i < frames; i++) {
+        int32_t l = 0, r = 0;
+        for (int ch = 0; ch < MIX_CHANNELS; ch++) {
+            mix_ring *m = &g_mix[ch];
+            if (!m->count) continue;
+            l += m->pcm[m->tail * 2];
+            r += m->pcm[m->tail * 2 + 1];
+            m->tail = (m->tail + 1) % MIX_RING_FRAMES;
+            m->count--;
+        }
+        if (l > 32767) l = 32767; else if (l < -32768) l = -32768;
+        if (r > 32767) r = 32767; else if (r < -32768) r = -32768;
+        out[i * 2] = (int16_t)l;
+        out[i * 2 + 1] = (int16_t)r;
+    }
+}
 
 /* The audio hook. Runs on the guest audio thread, inside the output call:
  * the buffer is complete -- the game filled it before calling -- so read it
- * out and queue it. Returns the backlog in microseconds for the blocking
- * calls to pay. */
+ * out, scale it, and push it. Returns the backlog in microseconds for the
+ * blocking calls to pay. */
 static int64_t present_audio(int ch, uint32_t samples, uint32_t fmt,
-                             uint32_t buf) {
-    (void)ch;
-    if (!g_audio_dev || !samples) return 0;
-
-    /* PSP audio output is interleaved stereo S16 at 44100Hz; the format
-     * argument distinguishes bit depths in the reserve call, and anything
-     * unusual is reported once rather than misplayed forever. */
-    if (fmt != 0x10 && !g_audio_warned_fmt++) {
-        fprintf(stderr, "present: channel format 0x%X is not 16-bit stereo; "
-                        "queueing it as if it were\n", fmt);
+                             uint32_t buf, uint32_t lvol, uint32_t rvol) {
+    if (!g_audio_dev || !samples || ch < 0 || ch >= MIX_CHANNELS) return 0;
+    mix_ring *m = &g_mix[ch];
+    if (!m->pcm) {
+        m->pcm = malloc(sizeof(int16_t) * 2 * MIX_RING_FRAMES);
+        if (!m->pcm) return 0;
     }
 
-    if (samples > g_audio_scratch_samples) {
-        free(g_audio_scratch);
-        g_audio_scratch = malloc(sizeof(int16_t) * samples * 2);
-        if (!g_audio_scratch) { g_audio_scratch_samples = 0; return 0; }
-        g_audio_scratch_samples = samples;
-    }
-    for (uint32_t i = 0; i < samples * 2; i++)
-        g_audio_scratch[i] = (int16_t)psp_read16(buf + i * 2u);
-    SDL_QueueAudio(g_audio_dev, g_audio_scratch,
-                   (uint32_t)samples * 2u * sizeof(int16_t));
+    /* PSP_AUDIO_FORMAT_STEREO is 0 and MONO is 0x10; the mono form carries
+     * one sample per frame and plays on both sides. Anything else in the
+     * format word is reported once and treated as stereo. */
+    const int mono = (fmt & 0x10) != 0;
+    if ((fmt & ~0x10u) && !g_audio_warned_fmt++)
+        fprintf(stderr, "present: channel format 0x%X is unfamiliar; treating it as %s\n",
+                fmt, mono ? "mono" : "stereo");
+    if (lvol > 0x8000) lvol = 0x8000;
+    if (rvol > 0x8000) rvol = 0x8000;
 
-    const int64_t queued = (int64_t)SDL_GetQueuedAudioSize(g_audio_dev);
-    const int64_t over   = queued - (int64_t)g_audio_target_bytes;
+    SDL_LockAudioDevice(g_audio_dev);
+    for (uint32_t i = 0; i < samples; i++) {
+        int32_t sl, sr;
+        if (mono) { sl = sr = (int16_t)psp_read16(buf + i * 2u); }
+        else      { sl = (int16_t)psp_read16(buf + i * 4u); sr = (int16_t)psp_read16(buf + i * 4u + 2u); }
+        sl = (sl * (int32_t)lvol) >> 15;
+        sr = (sr * (int32_t)rvol) >> 15;
+        if (m->count >= MIX_RING_FRAMES) { m->dropped++; continue; }
+        m->pcm[m->head * 2] = (int16_t)sl;
+        m->pcm[m->head * 2 + 1] = (int16_t)sr;
+        m->head = (m->head + 1) % MIX_RING_FRAMES;
+        m->count++;
+    }
+    const int64_t queued = m->count;
+    SDL_UnlockAudioDevice(g_audio_dev);
+
+    const int64_t over = queued - (int64_t)g_audio_target_frames;
     if (over <= 0) return 0;
-    /* bytes_per_us = 44100 * 4 / 1e6, scaled 2^20 to stay in integers. */
-    const int64_t us = over * g_audio_bytes_per_us_hi >> 20;
+    const int64_t us = over * 1000000 / 44100;
     return us > 100000 ? 100000 : us;          /* never claim more than 100ms */
 }
 
@@ -263,6 +311,7 @@ static void *sdl_thread(void *arg) {
     want.format   = AUDIO_S16SYS;
     want.channels = 2;
     want.samples  = 1024;
+    want.callback = audio_callback;
     SDL_AudioSpec have;
     g_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (g_audio_dev) SDL_PauseAudioDevice(g_audio_dev, 0);
@@ -353,8 +402,6 @@ int present_start(void) {
 
     /* Queue depth target: two buffers -- deep enough that jitter never
      * underruns, shallow enough that the backlog tracks real playback. */
-    g_audio_bytes_per_us_hi = ((int64_t)44100 * 4 << 20) / 1000000;
-    g_audio_target_bytes    = (uint32_t)(44100 * 4 * 2 * 2);
 
     if (pthread_cond_init(&g_frame_cv, NULL) != 0) return -1;
     if (pthread_create(&g_thread, NULL, sdl_thread, NULL) != 0) {

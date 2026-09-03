@@ -258,6 +258,16 @@ speed, both M5's.
   (no-ops), real `SetSimpleADSR` curves (it currently ignores its arguments),
   grain and output mode. Reverb last, or never.
 
+**ATRAC3+ (3 Sep).** libavcodec behind sceAtrac3plus, optional and dynamic,
+the openh264 shape. The game holds each track whole and loops it forever;
+decoded music comes out of the title and main-menu tracks headless. The
+priming, first-decode, total, loop-point and ID rules are from the oracle
+(findings item 39); decode, setdata, addstreamdata and atractest match on
+every value once the runners let the tests open their data files. The host
+mixes channels now instead of queueing them in turn. Still to do here: the
+context structure stream.prx prints (`_sceAtracGetContextAddress`), which
+would turn on the streaming oracle; the seek tests; then SAS.
+
 ## M4 — Saves
 
 **Gate.** Save in the garage, quit, relaunch, load. `utility/savedata` worked

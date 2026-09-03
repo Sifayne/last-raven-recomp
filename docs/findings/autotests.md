@@ -3867,3 +3867,93 @@ faithful execution of that test.
     the sampling texture above, and speed: the mission replay rasterizes
     at 58 ns a pixel, sixteen times slower than real time.
 
+39. **The music plays: ATRAC3+ through libavcodec, and the rules the oracle
+    gave for free** (3 Sep). M3's first half. FFmpeg's libavcodec is found
+    by CMake and linked dynamically when present -- `find_library`, the
+    openh264 shape, `PSPRECOMP_HAVE_FFMPEG` -- and `scripts/common.sh` reads
+    the CMake cache so the hand-linked hosts agree with it. Its ATRAC3+
+    decoder wants a block_align and a channel count and nothing else
+    (read from atrac3plusdec.c; plain ATRAC3 wants the fourteen bytes after
+    the fmt chunk's cbSize as extradata, and gets them). Planar float out,
+    2048 samples a frame, converted to the interleaved stereo the hardware
+    always produces.
+
+    The game's own use is the simple one: `GetAtracID(AT3+)`, `SetData` with
+    the whole track in one buffer (0x81000 bytes for the title track,
+    0xB1800 for the main menu's, and a 14 KB jingle on a second ID at the
+    same time), `SetLoopNum(-1)`, then `DecodeData` per frame with
+    `GetLoopStatus` after each -- logged with the new
+    `PSPRECOMP_ATRAC_LOG=1`. No streaming, no seeking. The first decoded
+    audio, dumped headless with `PSPRECOMP_AUDIO_DUMP=<prefix>` (raw guest
+    PCM per channel, whatever the game hands sceAudio), is the title
+    track's opening fading in: RMS 568, 791, 1210 over its first 1.4 s.
+
+    What audio/atrac's `.expected` files fixed on the way, each a rule this
+    file's stand-in had wrong or absent:
+    - Setting the data decodes the first frame at once. The stream's first
+      frame is encoder warm-up and output begins 368 samples into the
+      second ("firstValidSample: 0970" = 2416), so the first DecodeData
+      answers 1680 and the total is the fact chunk's first word exactly:
+      247,501 for sample.at3 as 1680 + 120 x 2048 + 61, the 61 being the
+      last decode (replay.expected). decode.expected's "Drained in 121
+      calls" follows once ResetPlayPosition(0) lands the same way.
+    - `GetSoundSample`'s end is that total less one; the smpl chunk's loop
+      points read back 2048 lower (a loop written at 0 reads -2048).
+    - IDs come in pairs by codec: 0 and 1 for ATRAC3+, 2 and 3 for ATRAC3
+      (ids.expected). Handing out the lowest free ID regardless made
+      setdata's "Unallocated (1)" allocated.
+    - AddStreamData on a buffer that holds the whole file answers
+      80630009, even for zero bytes; a streamed file that has all been read
+      keeps answering OK to zero-byte adds (replay.expected).
+    - Streaming is a ring with frames contiguous in it -- the lap ends at
+      the last whole-frame boundary, a partial frame's head moves to the
+      ring's start, and the free run is reported from the write position
+      to the lap's end or to the decoder's next frame. Read off
+      stream.expected's numbers (0x34 / 0x1E8 after a 0x4000 load, 0x350
+      after the first wrap); the game never streams, so this is for the
+      oracle and for a track that does not fit.
+
+    The suite also wanted its data files: every test does
+    `fopen("sample.at3")`, which iofilemgr resolves under the working
+    directory's `disc/`, and the runners never put anything there -- so
+    every audio/atrac test had been failing on the open, and the sweep's
+    numbers for the whole directory measured that. Both runners now link
+    the test's directory into `disc/`. With that and the rules above:
+    decode, setdata, addstreamdata and atractest match on every value;
+    getremainframe and getsoundsample differ only on sceAtracReinit's
+    states and a streaming seek; the seek tests (resetting, reset2,
+    resetpos) want GetBufferInfoForResetting, not modelled; stream.prx
+    stops at once on `_sceAtracGetContextAddress`, which it uses to print
+    the hardware's own context structure -- the layout is in the suite's
+    atrac.h, and a synthetic one is the next oracle to turn on. In the
+    sweep's own terms (raw lines, prefix and all, at its reduced budget)
+    the directory reads addstreamdata, atractest and replay MATCH, decode
+    8, setdata 6, getremainframe 30, getsoundsample 10 -- measured by
+    sweeping the audio subtree alone; a full sweep run while another
+    session was rebuilding the tree still showed the old numbers for these
+    rows and is not trusted here. The map file keeps the full sweep's rows
+    until the next quiet full run.
+
+    Two things on the host side. `present.c` was queueing every channel
+    into one SDL stream in turn, so music and effects together would have
+    played as alternating blocks; it is a mixer now, a ring per channel
+    summed in the device callback, volumes applied on the way in, each
+    channel paced by its own depth (half a second). And
+    `sceAudioSetChannelDataLen` -- called by this game before nearly every
+    output -- was accepted and ignored, so a channel whose count the game
+    changed was read at its reserve length; it and ChangeChannelConfig are
+    real now.
+
+    A caution on this session's regression numbers. Every replay made
+    after the decoder went in reports one GE list per frame where the
+    rows say three -- the hangar at 432 or 433 against 1,296, title-idle
+    at 1,803 against 5,406 -- with commands within a tenth of a percent,
+    finishes within one, and the hangar frame byte-identical. That is not
+    the audio: the fork's ge.c carried another session's uncommitted
+    change throughout (lists counted once at enqueue rather than once per
+    stall-resumed run), and the builds here picked it up. Nothing in the
+    audio path touches the GE. The rows keep their counts until that
+    change lands with its own measurements; what this session vouches for
+    is 0 bad accesses and every stop reached on title-idle, skip-intro,
+    main-menu, garage, mission-1 and New Game, and the hangar frame.
+
