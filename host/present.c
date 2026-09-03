@@ -202,8 +202,21 @@ static void publish_pad(void) {
  * how far a channel may run ahead before it is made to wait -- short enough
  * that an effect is heard when it happens, long enough to ride out a frame
  * that rasterizes slowly. */
-enum { MIX_CHANNELS = 8, MIX_RING_FRAMES = 44100 * 8 };
-typedef struct { int16_t *pcm; uint32_t head, tail, count, dropped; } mix_ring;
+/* A channel does not play until it holds a pre-roll, and after running dry it
+ * waits for one again. A stream the game paces itself -- the movie's sound
+ * thread waits on the movie's own clock, not on our backlog -- arrives one
+ * block at a time at exactly the rate it is consumed, so the ring hovers near
+ * empty and every push that lands a few milliseconds late is a gap the
+ * callback fills with silence: the popping Sif heard through the intro. A
+ * pre-roll of 4096 frames is 93 ms of slack against that jitter, paid once as
+ * latency at the start of each stream. */
+enum { MIX_CHANNELS = 8, MIX_RING_FRAMES = 44100 * 8, MIX_PREROLL = 4096 };
+typedef struct {
+    int16_t *pcm;
+    uint32_t head, tail, count;
+    int      playing;          /* holds a pre-roll, or has not run dry since */
+    uint32_t pushed, dropped, underruns;
+} mix_ring;
 
 static SDL_AudioDeviceID g_audio_dev;
 static mix_ring g_mix[MIX_CHANNELS];
@@ -220,7 +233,14 @@ static void audio_callback(void *ud, Uint8 *stream, int len) {
         int32_t l = 0, r = 0;
         for (int ch = 0; ch < MIX_CHANNELS; ch++) {
             mix_ring *m = &g_mix[ch];
-            if (!m->count) continue;
+            if (!m->playing) {
+                if (m->count < MIX_PREROLL) continue;
+                m->playing = 1;
+            } else if (!m->count) {
+                m->playing = 0;
+                m->underruns++;
+                continue;
+            }
             l += m->pcm[m->tail * 2];
             r += m->pcm[m->tail * 2 + 1];
             m->tail = (m->tail + 1) % MIX_RING_FRAMES;
@@ -268,6 +288,7 @@ static int64_t present_audio(int ch, uint32_t samples, uint32_t fmt,
         m->pcm[m->head * 2 + 1] = (int16_t)sr;
         m->head = (m->head + 1) % MIX_RING_FRAMES;
         m->count++;
+        m->pushed++;
     }
     const int64_t queued = m->count;
     SDL_UnlockAudioDevice(g_audio_dev);
@@ -358,6 +379,19 @@ static void *sdl_thread(void *arg) {
         while (SDL_PollEvent(&e)) {
             switch (e.type) {
             case SDL_QUIT:
+                /* What the mixer saw, per channel: frames pushed, dropped
+                 * for a full ring, and the times the ring ran dry -- each
+                 * of those a gap the listener heard. */
+                if (g_audio_dev) {
+                    SDL_LockAudioDevice(g_audio_dev);
+                    for (int ch = 0; ch < MIX_CHANNELS; ch++) {
+                        const mix_ring *m = &g_mix[ch];
+                        if (m->pushed)
+                            fprintf(stderr, "present: audio ch %d  %u frames pushed  %u dropped  %u underruns\n",
+                                    ch, m->pushed, m->dropped, m->underruns);
+                    }
+                    SDL_UnlockAudioDevice(g_audio_dev);
+                }
                 /* Stop the run the way the host already stops one, rather than
                  * _exit(0): that killed the process mid-drain and took the
                  * whole end-of-run report with it. This is not a guest thread,

@@ -3998,3 +3998,16 @@ faithful execution of that test.
     four shared calls (`psp_at3_open/decode/flush/close`) so the two
     users have one copy.
 
+    Sif then heard popping through the intro. The dump acquits the
+    decode: across the 893 frame seams of the full intro the sample jump
+    is the same as inside the frames (median 111 against 109, 99th
+    percentile 1974 against 2045), two blocks repeat and six are silent,
+    all near the start. So the gaps are the host's. The movie's sound
+    thread is paced by the movie's own clock, not by the mixer's backlog,
+    so its ring hovers near empty and a push a few milliseconds late is a
+    gap filled with silence. The mixer now holds each channel until it
+    has a 4096-frame pre-roll, 93 ms, and waits for one again after
+    running dry, and it prints per-channel pushed, dropped and underrun
+    counts when the window closes -- the number to read after the next
+    windowed run.
+
