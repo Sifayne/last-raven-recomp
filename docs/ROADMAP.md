@@ -278,7 +278,8 @@ within a frame across the whole intro. A movie can now reach its end, which
 nothing had done before: the player waits for the ring buffer to read empty
 and deadlocks if it never does (item 42). Still to do here: the context structure stream.prx prints
 (`_sceAtracGetContextAddress`), which would turn on the streaming oracle; the
-seek tests; then SAS. And a cleanup worth doing once: with libavcodec linked,
+seek tests; and the SAS curves in the bullet below. And a cleanup worth doing
+once: with libavcodec linked,
 its H.264 decoder can replace openh264 for the video and leave one optional
 dependency instead of two.
 
