@@ -264,9 +264,13 @@ decoded music comes out of the title and main-menu tracks headless. The
 priming, first-decode, total, loop-point and ID rules are from the oracle
 (findings item 39); decode, setdata, addstreamdata and atractest match on
 every value once the runners let the tests open their data files. The host
-mixes channels now instead of queueing them in turn. Still to do here: the
-context structure stream.prx prints (`_sceAtracGetContextAddress`), which
-would turn on the streaming oracle; the seek tests; then SAS.
+mixes channels now instead of queueing them in turn. The intro movie's
+ATRAC3+ substream goes through the same decoder (item 40), so cutscenes have
+sound. Still to do here: the context structure stream.prx prints
+(`_sceAtracGetContextAddress`), which would turn on the streaming oracle; the
+seek tests; then SAS. And a cleanup worth doing once: with libavcodec linked,
+its H.264 decoder can replace openh264 for the video and leave one optional
+dependency instead of two.
 
 ## M4 — Saves
 

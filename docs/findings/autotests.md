@@ -3957,3 +3957,44 @@ faithful execution of that test.
     is 0 bad accesses and every stop reached on title-idle, skip-intro,
     main-menu, garage, mission-1 and New Game, and the hangar frame.
 
+40. **The movie has a voice: sceMpeg's audio through the same decoder**
+    (3 Sep). Sif: "cutscene audio doesn't appear to play, but as soon as
+    I make it to the title menu and in the hanger it does". The intro is
+    a PSMF, and its sound is ATRAC3+ inside the program stream's private
+    stream 1 -- a path sceMpegGetAtracAu and sceMpegAtracDecode had
+    answered with a running clock and silence since there was no decoder
+    to hand the frames to. With libavcodec linked for item 39 there is.
+
+    The layout, read off the game's own intro with a temporary dump of the
+    first audio PES payloads: each begins with a 4-byte private header --
+    the substream number, two bytes, and the offset of the first frame
+    header in the payload -- and then ATRAC3+ frames back to back, each
+    behind 8 bytes: `0F D0`, two bytes of parameters, four zero bytes. The
+    parameters are the OMA/AA3 container's: three bits of sample-rate
+    index, three of channel configuration, ten of payload size in 8-byte
+    units less one. This intro's `0F D0 28 5C` is 44.1kHz, stereo, 744
+    bytes, and the next PES's fourth byte, 0xF3, is exactly where the
+    fourth frame lands when frames are 752 bytes with their headers --
+    the check that settled whether the size counts the header (it does
+    not) and that frames span PES boundaries (they do). The demuxer now
+    keeps the audio substream the way it keeps the video, one buffer of
+    payload with the private headers taken off; GetAtracAu walks it by the
+    `0F D0` headers, copies the whole frame into the caller's ES buffer
+    and advances the audio clock one frame; AtracDecode reads the frame
+    back from that buffer, opens the decoder from the frame's own
+    parameters, and writes 2048 stereo samples. A frame that has not
+    arrived is NO_DATA -- the "go round again" the header comment on this
+    file documents, which now means exactly that, since the frame will
+    come with the next ring-buffer put -- and once the ring has
+    short-delivered and the frames are gone, the stream is over.
+
+    The first three seconds of the intro come out of a headless
+    skip-intro replay: RMS rising 0, 2022, 2557, 12071 and a zero-crossing
+    rate of 0.09-0.22, which is music, not noise. The WAV is what Sif
+    hears. title-idle, which lets the intro run, decodes 41.5 s of it
+    without a gap, and both title-idle and skip-intro land on their
+    baseline command counts to the digit (874,060 and 2,280,256) with 0
+    bad accesses. The decoder wrapper moved out of atrac.c's statics into
+    four shared calls (`psp_at3_open/decode/flush/close`) so the two
+    users have one copy.
+
