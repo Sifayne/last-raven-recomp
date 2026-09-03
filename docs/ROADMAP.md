@@ -267,8 +267,9 @@ every value once the runners let the tests open their data files. The host
 mixes channels now instead of queueing them in turn. The intro movie's
 ATRAC3+ substream goes through the same decoder (item 40), so cutscenes have
 sound; their pops were ring starvation and their drift a picture clock
-invented at 25 fps, both fixed (items 40, 41), leaving the picture path's own
-speed -- 98.5% of real time here, a second over the intro -- to M5. Still to do here: the context structure stream.prx prints
+invented at 25 fps (items 40, 41), and the host's remaining 1.5% is paid by
+dropping a late picture rather than showing it, which holds the two together
+within a frame across the whole intro. Still to do here: the context structure stream.prx prints
 (`_sceAtracGetContextAddress`), which would turn on the streaming oracle; the
 seek tests; then SAS. And a cleanup worth doing once: with libavcodec linked,
 its H.264 decoder can replace openh264 for the video and leave one optional

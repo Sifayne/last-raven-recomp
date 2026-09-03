@@ -4088,14 +4088,33 @@ faithful execution of that test.
     per call ran the sound at 91% -- and is a virtual speaker now, drained
     at 44.1kHz, the call waiting only for the excess over two buffers.
 
-    Where it stands, measured twice with PPSSPP and a browser running
-    beside it: picture 53.1 s of stamps over 53.9 s of wall clock (98.5%),
-    sound 54.3 s over the same, frame 33.40 ms; the audio clock leads the
-    picture by -8 ms at the first frame, 550 ms at picture 250 and then
-    150 ms more per 250 pictures, 1.3 s at the last. The first step is the
-    player's own pre-buffer -- it fetches half a second of sound before it
-    starts the picture, and would on hardware -- and the slope is the
-    picture path's 1.5%, which is the host's speed and M5's. What this
-    item closes is the 12% and the 28%; what it leaves is a second over
-    the length of the intro.
+    That left the picture at 98.5% of real time against sound at 100%,
+    and the lead climbing -8 ms, 550, 737, 908, 1007, 1085, 1196 across
+    the intro -- which Sif watched and saw. (An earlier reading of that
+    first step as the player's own audio pre-buffer was wrong: with the
+    drift closed below, the lead stays near zero from the first picture,
+    so there is no pre-buffer. The 550 was the same drift, steeper while
+    the decoder and the first draws were cold.)
+
+    **A late picture is dropped rather than shown.** The sound plays at
+    its own rate whatever the host does, so the only way to hold them
+    together on a machine that is 1.5% short is to give the picture less
+    to do. sceMpegGetAvcAu now decodes and discards a picture that is
+    already late, and the game draws the next one instead -- a trade that
+    is lopsided in our favour, since decoding a 480x272 frame costs about
+    2 ms and drawing it about 6. Measured against the lead at the first
+    picture rather than against zero, with two frames of slack so
+    ordinary jitter drops nothing, and at most two in a row so a much
+    slower machine would show a slow picture rather than a frozen one.
+    Only under real-time pacing: an unpaced replay has no real time to be
+    late against, and dropping there would make a replay depend on how
+    fast the host is.
+
+    Two runs, with PPSSPP and a browser running beside them: 45 and 44 of
+    about 1,635 pictures dropped, 2.7%, and the lead now reads -8, 23,
+    -6, -21, -15, -30, -12 ms across the same seven samples -- flat
+    within a frame instead of climbing to 1.3 s. Both streams fetch 54.6 s
+    of stamps over 54.2 s of wall clock. Unpaced, title-idle, skip-intro
+    and the hangar keep their exact baseline command counts, so the
+    replays that matter are untouched.
 
