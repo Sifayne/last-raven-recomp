@@ -3784,3 +3784,45 @@ faithful execution of that test.
     title-idle 5,406, skip-intro 7,506, New Game 18,006 with its stop,
     all 0 bad; ctest 13/13.
 
+37. **The blend arithmetic, and the stencil that is the alpha byte** (3 Sep).
+    Item 33 left three findings against `gpu/commands/blend`: doubling
+    factors saturating where hardware doubles, products rounding where
+    hardware truncates, the stencil byte unmodelled. All three are one
+    reading of the test's 64 rows. Every plain factor -- source and
+    destination colour, their inverses, the alphas, the fixed colours --
+    fits a single term, `((c + 1) * f) >> 8`, and nothing over 255 does:
+    "Zero + Inverse src alpha" reads 28 from 64 x 111 (exact 27.86) and
+    "Inverse src alpha + Zero" reads 55 from 128 x 111 (exact 55.72), which
+    no one rounding of c*f/255 gives. The doubling factors are twice that
+    term, clamped: 0xFF707070 under double source alpha reads 0xE0, an
+    exact 2x, so the factor was never saturated at 255 as this renderer
+    had it. The inverse-doubling ones take 255 - 2a, clamped at zero, as an
+    ordinary factor: 0x40808080 reads 0x3F and 0x7FFFFFFF reads 0x01. A
+    script over the test's own operand list confirms 0 of 192 channel
+    values off under that rule set, then the rasterizer does the same.
+
+    The alpha byte of every blended row reads 0xAA, and 0xAA is the ref of
+    the stencil test the harness turns on around each draw: ALWAYS, ref
+    0xAA, REPLACE on every outcome. So the stencil is implemented where it
+    lives -- the framebuffer's alpha byte, the value this renderer already
+    knew an ordinary draw leaves alone -- with the test before the depth
+    test, the three operations (KEEP, ZERO, REPLACE, INVERT, INCR, DECR)
+    on fail, depth-fail and pass, and only the pass writing colour. The
+    GE decodes 0x24, 0xDC and 0xDD. A 5650 target has neither alpha nor
+    stencil, and the blend reads its destination alpha as zero: that is
+    the 565 variant's last 14 rows, "Double dest alpha" black and
+    "Inverse double dest alpha" the source colour whole.
+
+    Both oracles match on every value; the runner still counts them as
+    differing on the `[r]`/`[x]` prefix alone, which is a scheduling fact
+    (hardware runs the checkpoint helper's equal-priority thread across a
+    sceGuSync; this scheduler does not), not a renderer one. The game's
+    compositing passes use plain alpha blends and a doubling pass, so the
+    corrected doubling reaches the screen. With it the option-menu hangar
+    measures the same as the PPSSPP frame at t=12 s: mean 25 against 24
+    over the whole frame, 32 against 31 in a patch of the floor -- the
+    "nearly black" hangar of items 31 and 33 is closed. The mission's end
+    frame is 91 against 89. Sweep 138 MATCH with no row moved; title-idle
+    5,406, skip-intro 7,506, mission-1 5,376, New Game 18,006 with its
+    stop, all 0 bad; ctest 13/13.
+

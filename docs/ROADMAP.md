@@ -186,6 +186,13 @@ eye-space depth with an infinite range reading as fully fogged. The oracle's
 decoded now too. fog.prx matches on every row; the mission's sky and far
 field are the reference's light blue. Findings item 36.
 
+**Blend and stencil (3 Sep).** `gpu/commands/blend`'s 64 rows fit one term,
+`((c+1)·f) >> 8`, doubling as twice it clamped and inverse-doubling as the
+factor 255−2a clamped at zero; the alpha byte every row reads is the
+stencil REPLACE the test runs, so the stencil test and its operations now
+exist in the rasterizer. Both blend oracles match on every value. Findings
+item 37.
+
 **Mipmapping (2 Sep).** Levels 1–7 were never decoded. The chain,
 `TEX_LEVEL`'s three modes and bias, and the per-sixteenth blend now follow
 `gpu/textures/mipmap`, which matches on every value (190 → 0). It did **not**
@@ -219,8 +226,9 @@ lighting reporting no lights on and fog absent entirely. Since the `vidt`
 fix (3 Sep, findings item 33) the mission renders at mean 84 with 4,200
 colours -- mech, buildings, smoke, lit horizon -- so the geometry gap is
 closed and what is left is the passes. Fog is in (3 Sep, item 36) and the
-mission's end frame sits at mean 92 against the reference's 89; what remains
-is the blend-factor findings in item 33 and the frame comparison itself.
+mission's end frame sits at mean 92 against the reference's 89; the blend
+factors and the stencil are in (item 37). What remains is the frame
+comparison itself, at the three moments the gate names.
 
 ## M3 — Sound
 
