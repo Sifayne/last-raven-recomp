@@ -4278,39 +4278,62 @@ faithful execution of that test.
     unchanged on every replay.
 
     **The shapes, from adsrcurve.expected** (grain 64, so a core is 64
-    samples and the first after a key-on is 32 -- item 44):
+    samples and the first after a key-on is 32 -- item 44). All six are
+    stepped now, and 48 of the file's 53 sweeps come out byte-exact.
 
-    - Linear increase and decrease are exactly plus or minus the rate a
-      sample, at every rate the test tries.
+    - Linear increase and decrease are plus or minus the rate a sample.
     - Bent is the rate below three-quarter height and a quarter of it above.
-      That reproduces every core of its sweep but the one where it crosses:
-      hardware moves 0x028C0000 there and the rule gives 0x02800000, and no
-      split of 64 samples between those two rates yields hardware's number,
-      so the crossing sample does something a single measurement cannot
-      name.
-    - Exponent falling is the height scaled by the rate with a floor of one:
-      rate 1 steps exactly 1 a sample, and `Decay exponent 0` and
-      `Decay exponent 1` both come out right.
-    - Exponent rising approaches the maximum geometrically, and behaves as
-      though bit 16 of the rate were set: rate 0 and rate 1 both step
-      0x4000, rate 5 steps 0x4001, rate 0x100000 steps 0x110000/4. That is
-      within a hundredth of a percent of hardware over the first core --
-      0x00877C84 against 0x00877452 at rate 0x100000 -- and no model tried
-      closes the last of it. Solving for the exact multiplier per rate finds
-      one for the small rates (rate + 0x10011) and none at all for the large
-      ones, so the true form carries a term that does not scale with the
-      remaining distance.
-    - Direct jumps to where the phase ends. Attack refuses it, and
-      exponent-rev, by the parity rule above.
+      Exact on every core of its sweeps but the one where it crosses:
+      hardware moves 0x028C0000 there and this moves 0x02800000, and no split
+      of 64 samples between those two rates gives hardware's number, so the
+      crossing sample does something one measurement cannot name. The 0x43
+      it leaves behind is carried to the end of that sweep.
+    - The rising exponent, mode 4, is **0x4000 a sample plus the room left
+      scaled by the rate**: `0x4000 + ((MAX - h) * rate >> 32)`. The fixed
+      part is why a small rate climbs in a straight line -- rate 0 and rate 1
+      both step exactly 0x4000, with no curvature anywhere in their sweeps --
+      and the scaled part is what bends the large ones. Exact on all twelve
+      attack sweeps, from rate 0 to 0x7FFFFFFF.
+    - The falling exponent, mode 3, is the height scaled by the rate and
+      **rounded up**: `ceil(h * rate / 2^32)`. From the top at rate 9
+      hardware steps 3 a sample where truncation gives 2; a product that is
+      exact keeps its value; and rounding up is what stops a small height
+      from never falling. Exact on twelve of the fourteen decay sweeps.
+    - Direct jumps to where the phase ends. Attack refuses it, and the
+      falling exponent, by the parity rule.
 
-    **Stepping by those shapes is not switched on.** It was written and
-    measured and does not yet pay: with it, the sections that match exactly
-    go from 11 of 53 to 12, while adsrcurve's line count triples -- an
-    exponential prints a change line per core where a linear one prints
-    none, so a near-miss scores far worse than a gross one and the count
-    stops being a useful measure. One section, `Attack exponent 0x0`, came
-    out an order of magnitude wrong in a way not explained, which is the
-    thread to pull first. What is committed is the part that is certain:
-    the validation, and the modes stored against each voice ready for the
-    stepping to use. The numbers above are what the next pass has to beat.
+    **The naming trap that cost the most time.** The test calls its decay
+    sweeps "Decay exponent", and the mode they pass is not EXPONENT. It
+    cannot be: the parity rule refuses mode 4 for a decay, and the sweeps
+    have data rather than refusals. Mode 4 is the *rising* exponential and
+    mode 3, named EXPONENT_REV, is the falling one -- which is what the
+    parity rule was saying all along. Reading the section titles as the mode
+    names left the decays stepping linearly and looking like an unexplained
+    curve mismatch.
 
+    **Two invented defaults, removed.** Keying a voice on used to default its
+    attack rate when it was zero, and keying it off used to default its
+    release rate. Neither is hardware's: adsrcurve's rate-0 attack sweep
+    climbs at exactly 0x4000 a sample under the exponent curve and not at all
+    under linear increase, which is what a voice with no rate should do. The
+    unit test that asserted audio after a bare key-on was asserting that
+    default rather than the mixer, and now sets an envelope first.
+
+    **Where it lands.** adsrcurve goes from 1,988 differing lines to 24, and
+    from 12 of its 53 sweeps matching exactly to 48; setadsr from 378 to 304.
+    getheight stays byte-exact and keyon, keyoff, pcm, vag and pause are
+    unmoved. The game is unchanged on title-idle, the hangar, the garage and
+    New Game -- exact baseline command counts, 0 bad accesses, and the same
+    audio out of every channel -- and ctest is 13/13.
+
+    What is left in this file is the bent crossing above, and four
+    high-rate decay sweeps that differ only where the height meets the
+    sustain level: hardware's step carries it to 0 and this one stops at the
+    level the test set, which is 1. Both are single-sample boundary rules
+    that one more measurement each would settle.
+
+    A note on the metric, since it misled once: the line count is a poor
+    measure here. An exponential prints a change line every core where a
+    linear one prints none, so a near-miss can score far worse than a gross
+    miss -- an earlier pass of this work read as a threefold regression while
+    being strictly closer to hardware. Count the sweeps that match exactly.
