@@ -3741,3 +3741,46 @@ faithful execution of that test.
     MATCH, 3 NOOUTPUT, every other row byte-identical. The hangar replay
     is unchanged to the pixel (1,296 lists, 0 bad).
 
+36. **Fog, and the immediate-mode vertices that let the oracle measure it**
+    (3 Sep). The GE decoded FOG1/FOG2/FOG_COLOR since item 33 and counted
+    fogged vertices without applying them; the mission's sky and far field
+    were dark grey against the reference's light blue. `gpu/commands/fog` is
+    the oracle: nine "Common" rows draw with sceGuFog(near, far) at depth
+    0, and 256 "Rounding" rows draw a box under every coefficient byte
+    with the vertex at 0x881100 and the fog at 0xFF33FF, 768 channel
+    values in all. A brute-force search over blend arithmetics finds
+    exactly one that reproduces every value: `(c*f + fog*(255-f) + 255)
+    >> 8` -- a divide by 256 with a +255 bias, not by 255 in any rounding.
+    The distinguishing rows are blue at f=1 (hardware 254, exact 254.53)
+    and green at f=6 (hardware 51, exact 50.2): no single rounding of the
+    exact value gives both. The Common rows fix the coefficient: `f = (end
+    - depth) * range`, depth the eye-space distance (w of the clip
+    position under a standard projection), clamped to 0..1 and quantised
+    to the byte with 255 unfogged; near == far makes sceGuFog's range 1/0
+    and the hardware reads the infinite product as fully fogged whichever
+    its sign ("Basic" and "Both neg" both read the fog colour). Applied
+    after the texture function and before blending, alpha untouched;
+    interpolated across the triangle like a colour channel; through-mode
+    and clear-mode geometry carry 255.
+
+    The 256 rounding rows draw through immediate mode -- registers
+    0xF0..0xF9, one per vertex component, 0xF7 committing a vertex with
+    its alpha in the low byte, the primitive type in bits 8..10 (7 meaning
+    the one in progress) and bit 22 saying the fog byte in 0xF8 applies --
+    which nothing had decoded, so 256 of the test's 272 values were
+    unmeasurable before. Now decoded: screen-space 12.4 positions on the
+    4096 grid with OFFSET_X/Y subtracted, 16-bit depth, lists and strips
+    and fans, untextured (0xF3..0xF5 are accepted and not applied; the
+    game never uses the path). The draw-time state push is factored out
+    of draw_prim so both paths share it, and the backend gains set_fog
+    for the colour and the enable.
+
+    fog.prx matches hardware on all 272 rows. The mission's end frame goes
+    from mean 83 to 92 against the reference's 89 at the same moment, and
+    the sky and far field are its light blue (fog colour 2DA8FF, end
+    18000, range 1/10000: fog starts 8000 units out). The hangar is
+    byte-identical, as it must be -- its fog starts at 2167 units and the
+    room is thirty across. Sweep 138 MATCH, fog.prx the only row moved;
+    title-idle 5,406, skip-intro 7,506, New Game 18,006 with its stop,
+    all 0 bad; ctest 13/13.
+

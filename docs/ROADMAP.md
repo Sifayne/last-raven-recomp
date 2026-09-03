@@ -178,6 +178,14 @@ across the frame — the "vertex problems" in the option menu, and the black
 floor. Cutting in clip space before the divide is the fix: the floor grid,
 hazard stripes, pillars and doorway all appear. Findings item 34.
 
+**Fog (3 Sep).** Decoded since item 33, applied now: `gpu/commands/fog`'s
+768 channel values fit exactly one arithmetic, `(c·f + fog·(255−f) + 255) >> 8`,
+and its Common rows give the coefficient, `(end − depth)·range` on the
+eye-space depth with an infinite range reading as fully fogged. The oracle's
+256 rounding rows draw through immediate-mode vertices (0xF0–0xF9), which are
+decoded now too. fog.prx matches on every row; the mission's sky and far
+field are the reference's light blue. Findings item 36.
+
 **Mipmapping (2 Sep).** Levels 1–7 were never decoded. The chain,
 `TEX_LEVEL`'s three modes and bias, and the per-sixteenth blend now follow
 `gpu/textures/mipmap`, which matches on every value (190 → 0). It did **not**
@@ -210,8 +218,9 @@ darker and less detailed than the reference (mean 38 against ~100), with
 lighting reporting no lights on and fog absent entirely. Since the `vidt`
 fix (3 Sep, findings item 33) the mission renders at mean 84 with 4,200
 colours -- mech, buildings, smoke, lit horizon -- so the geometry gap is
-closed and what is left is the passes: fog above all (decoded, counted, never
-applied), then the blend-factor findings in the same item.
+closed and what is left is the passes. Fog is in (3 Sep, item 36) and the
+mission's end frame sits at mean 92 against the reference's 89; what remains
+is the blend-factor findings in item 33 and the frame comparison itself.
 
 ## M3 — Sound
 
