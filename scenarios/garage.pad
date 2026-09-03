@@ -1,21 +1,15 @@
-# The main menu, and the mech that should be standing behind it.
+# The garage's AC: the sortie launch, where the game shows the whole mech
+# standing in the hangar with no menu over it.
 #
-# mission-1.pad cut at poll 748: past the logo, intro, title and name entry,
-# onto the main menu with GARAGE highlighted, where the PPSSPP reference
-# shows an AC standing in the hangar behind the menu. The first place in the
-# game where a 3D *object* -- as opposed to a backdrop -- should be visible,
-# and so the cheapest place to ask what happens to one. One of M2's three
-# frames.
+# mission-1.pad cut after the "Commence mission? Ok" at @881: past the main
+# menu, mission select and world map, stopping in the three seconds the
+# camera spends on the AC before the load. The PPSSPP reference has this at
+# t=49-51 s of the capture. One of M2's three frames.
 #
-# The cut used to be at 800, past the cross at @778 that enters MISSION
-# select, so the frame it dumped was the world map over the hangar's edges,
-# with no mech in it to judge. 748 is before the down at @751 as well, so the
-# highlight sits on GARAGE as in the reference frame at t=38 s.
-#
-#   scripts/09-replay.sh --decode --env PSPRECOMP_PIXWATCH=240,150 \
-#                        scenarios/main-menu.pad
+#   scripts/09-replay.sh --decode --env PSPRECOMP_FRAME=reports/garage.ppm \
+#                        scenarios/garage.pad
 
-drain 120
+drain 200
 
 @76     state circle 128 128   # t=3.080s
 @78     state none 128 128   # t=3.160s
@@ -79,6 +73,20 @@ drain 120
 @642    state none 128 128   # t=34.853s
 @733    state circle 128 128   # t=39.075s
 @735    state none 128 128   # t=39.222s
+@751    state down 128 128   # t=40.234s
+@752    state none 128 128   # t=40.297s
+@778    state cross 128 128   # t=41.900s
+@781    state none 128 128   # t=42.079s
+@817    state cross 128 128   # t=44.676s
+@818    state none 128 128   # t=44.769s
+@849    state cross 128 128   # t=47.916s
+@850    state none 128 128   # t=48.025s
+@863    state triangle 128 128   # t=49.218s
+@864    state none 128 128   # t=49.333s
+@876    state left 128 128   # t=50.540s
+@878    state none 128 128   # t=50.749s
+@881    state cross 128 128   # t=51.061s
+@882    state none 128 128   # t=51.139s
 
-@745   mark "main menu, GARAGE highlighted"
-@748   stop
+@920   mark "garage AC, sortie launch"
+@925   stop

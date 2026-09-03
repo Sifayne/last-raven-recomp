@@ -119,7 +119,7 @@ the reusable part:
    behind them occur in `psp_func_0002E790` or `0002E1D8` before touching
    either.
 
-## M2 — A mission renders, in software
+## M2 — A mission renders, in software ✅ 3 Sep
 
 **Gate.** A recorded `scenarios/mission-1.pad` reaches a sortie; frame dumps
 compared against PPSSPP reference shots, the way the logo was; `bad mem: 0`.
@@ -227,8 +227,18 @@ fix (3 Sep, findings item 33) the mission renders at mean 84 with 4,200
 colours -- mech, buildings, smoke, lit horizon -- so the geometry gap is
 closed and what is left is the passes. Fog is in (3 Sep, item 36) and the
 mission's end frame sits at mean 92 against the reference's 89; the blend
-factors and the stencil are in (item 37). What remains is the frame
-comparison itself, at the three moments the gate names.
+factors and the stencil are in (item 37).
+
+**Gate — passed (3 Sep).** Three frames against the capture, ours from
+headless replays: the main menu's AC (`main-menu.pad`, recut to stop at 748),
+the sortie launch's AC in the hangar (`garage.pad`, new), the mission at its
+first chatter box (`mission-1.pad`). Layout agrees in the garage and the
+mission; the main menu's camera orbits the AC, so its angle depends on the
+second sampled, and everything else in the frame agrees. Brightness agrees to
+within one level in all three: means 36/36, 39/38, 91/91. The composites are in
+`reports/m2-gate/`. Findings item 38. What the comparison leaves is texture
+-- affine interpolation and no dithering against a compressed capture -- and
+speed, both M5's.
 
 ## M3 — Sound
 

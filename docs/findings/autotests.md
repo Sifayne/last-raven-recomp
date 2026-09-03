@@ -3826,3 +3826,44 @@ faithful execution of that test.
     5,406, skip-intro 7,506, mission-1 5,376, New Game 18,006 with its
     stop, all 0 bad; ctest 13/13.
 
+38. **M2's gate: three frames against the PPSSPP capture** (3 Sep). The gate
+    asks for frame dumps compared against PPSSPP reference shots at
+    matching moments, the way the logo was judged. The reference is Sif's
+    capture, `~/Videos/Screencasts/ppsspp-into-mission.webm`, and the three
+    moments are the main menu with the AC behind it (t=38 s), the sortie
+    launch where the camera holds on the AC in the hangar (t=50 s), and the
+    mission at its first chatter box (t=77 s). Ours are headless replays
+    with `PSPRECOMP_FRAME`: `main-menu.pad` recut to stop at 748 -- it
+    stopped at 810 before, past the cross into MISSION select, and dumped
+    the world map over the hangar's edges with no mech to judge --
+    `garage.pad`, new, cut from mission-1.pad at 925 in the three seconds
+    after the "Commence mission? Ok", and `mission-1.pad` at its stop.
+    Side by side, ours left, in `reports/m2-gate/*-ours-vs-ppsspp.png`
+    (gitignored with the rest of reports/; the commands above rebuild
+    them).
+
+    | frame | ours | PPSSPP |
+    |---|---|---|
+    | main menu, GARAGE highlighted | mean 36 | mean 36 |
+    | garage AC, sortie launch | mean 39 | mean 38 |
+    | mission, first chatter box | mean 91 | mean 91 |
+
+    Layout agrees in the garage and the mission: the mech's pose and the
+    camera, the crates and floor plates behind it, the camp, smoke and
+    sky. In the main menu the hangar, the menu and its caption and the
+    AC agree, and the AC's angle does not: the menu's camera orbits the
+    mech -- the capture has it front-on at t=35 s and turned away by
+    t=41 s -- so the angle is a matter of which second is sampled, and
+    the two sessions are not in phase. Brightness agrees to within one
+    level of 255 in all three. What differs is texture: the capture has three times our distinct colours on every
+    frame (13,700 against 3,600 on the garage), which is the reference's
+    video compression on one side and, on ours, affine rather than
+    perspective-correct interpolation and no dithering. Neither is what the
+    gate measures. Also in the mission frame, the translucent AC across
+    the foreground is in both -- the game's own effect, as item 34 noted.
+
+    **The gate passes.** M2's "a mission renders, in software" is met by
+    the software rasterizer on 3 Sep. What the comparison leaves for M5 is
+    the sampling texture above, and speed: the mission replay rasterizes
+    at 58 ns a pixel, sixteen times slower than real time.
+

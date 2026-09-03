@@ -103,6 +103,9 @@ they end at the same place, and `stop` is what makes that true.
 | `hanger.pad` | the option menu over the 3D hangar | 430 |
 | `new-game.pad` | the sound-settings panel | 6,000 |
 | `mission-1.pad` | name entry, garage, mission select, into a sortie | 1,790 |
+| `main-menu.pad` | the main menu with the AC behind it — M2's first frame | 748 |
+| `garage.pad` | the sortie launch, the AC alone in the hangar — M2's second frame | 925 |
+| `option.pad` | the option box, by taps rather than a recording | 3,900 |
 
 `hanger.pad` and `new-game.pad` reach the same scene; the short one exists
 because a run that takes fourteen seconds gets measured twenty times and one
