@@ -4164,3 +4164,45 @@ faithful execution of that test.
     title-idle, skip-intro, the hangar and the garage all keep their
     exact baseline command counts at 0 bad accesses; ctest 13/13.
 
+43. **M4 reviewed, and the gate met by the game rather than the suite**
+    (3 Sep). The savedata work came from the parallel session; this is what
+    re-measuring it found.
+
+    The suite half stands up. Of `utility/savedata`'s fourteen tests, eight
+    are byte-exact with the timing prefix stripped -- autosave, deletebroken,
+    deletedata, deleteemptyfilename, loadbroken, loademptyfilename, makedata,
+    saveemptyfilename -- which is exactly the eight its commit message
+    claims. The six that differ break down as stated there: `getsize` (6
+    lines) and `sizes` (16) report the host's disk where hardware reports a
+    16GB card, so those lines track whichever machine runs them; `idlist` (2)
+    and `filelist` (1) write `idList.resultCount` and `bind` at a different
+    point in the sequence; `secureversion` (684) measures PGD crypto that was
+    deliberately not attempted. No regressions anywhere: title-idle, the
+    hangar and the garage keep their exact baseline command counts at 0 bad
+    accesses, ctest 13/13.
+
+    One difference is not environment. `loaddata` (10 lines): when
+    `param.saveName` is empty, hardware falls back to the first
+    `saveNameList` entry and writes `TEST99901ABC`, while this writes to the
+    bare `TEST99901`. It bites only a caller that leaves the name to the
+    dialog, which may be no one here, but it is a behavioural gap rather
+    than a measurement artifact.
+
+    **The gate.** Both halves turned out to be the game's own. Sif saved from
+    the garage in a windowed run, and the card holds
+    `ms0:/PSP/SAVEDATA/NPUH10024ACLRSAVELIST00/` -- `SAVEDATA.BIN` 28,316
+    bytes, a `PARAM.SFO` with the correct `\0PSF` magic naming the title,
+    the pilot and the AC, and the game's own 22K icon and 198K background --
+    and a later launch loaded it and came up in the hangar. Nothing
+    automated covers this: across the garage, a complete new game and a
+    whole mission, the only savedata call a replay makes is the boot
+    free-space query, because `garage.pad` starts a new game every time. The
+    write path had never run under any test until Sif played it.
+
+    Two things found while looking. `ms/` was not gitignored, so the first
+    real save dropped a quarter-megabyte of the player's data into the
+    working tree -- now ignored, on the same grounds as `game/`. And the
+    roadmap's "no dialog UI" line was read as settling slot selection, which
+    it does not: see M4 there for what one slot actually costs and the
+    deferred fix.
+

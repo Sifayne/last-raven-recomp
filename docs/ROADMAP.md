@@ -277,10 +277,24 @@ seek tests; then SAS. And a cleanup worth doing once: with libavcodec linked,
 its H.264 decoder can replace openh264 for the video and leave one optional
 dependency instead of two.
 
-## M4 — Saves
+## M4 — Saves ✅ 3 Sep
 
-**Gate.** Save in the garage, quit, relaunch, load. `utility/savedata` worked
-targeted.
+**Gate — passed.** Save in the garage, quit, relaunch, load. `utility/savedata`
+worked targeted.
+
+Both halves are the game's, not the suite's. Sif saved from the garage in a
+windowed run and the card took
+`ms0:/PSP/SAVEDATA/NPUH10024ACLRSAVELIST00/`: 28,316 bytes of `SAVEDATA.BIN`,
+a well-formed `PARAM.SFO` carrying the title, the pilot name and the AC name,
+and the game's own `ICON0.PNG` and `PIC1.PNG`. A later launch loaded it and
+came up in the hangar. The suite half is 8 of 14 tests byte-exact once the
+`[r]`/`[x]` timing prefix is stripped, with the rest accounted for: free space
+is the host's disk rather than a 16GB card (`getsize`, `sizes`), `idList` and
+`bind` are written at a different point in the sequence (`idlist`, `filelist`),
+`secureversion` measures the PGD crypto nobody attempted, and `loaddata` has
+the one real divergence -- an empty `saveName` should fall back to the first
+`saveNameList` entry and instead writes to the bare game directory. Findings
+item 43.
 
 - `ms0:` as a host directory, a PARAM.SFO writer, the savedata modes the game
   uses (measured from the HLE log, not the enum), the result codes, and the

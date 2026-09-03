@@ -1305,6 +1305,7 @@ and cannot see anything past it. Measured 1 Sep on `3f402c5`.
 | command | expect |
 |---|---|
 | `scripts/06-boot.sh` (default) | 639 lists, 106,762 commands, 93,875,406 pixels, 0 bad mem; frames 0 / 751 / 9,020 |
+| save and load (windowed, by hand) | Save from the garage writes `ms0:/PSP/SAVEDATA/NPUH10024ACLRSAVELIST00/` -- `SAVEDATA.BIN` 28,316 B, a valid `PARAM.SFO`, `ICON0.PNG`, `PIC1.PNG` -- and a later launch loads it into the hangar (3 Sep, M4's gate). No scenario covers it: `garage.pad` starts a new game every time, so a replay only makes the boot free-space call. `ms/` is gitignored; the save is the player's |
 | `scripts/09-replay.sh --decode scenarios/title-idle.pad` | `stop` at poll 1800, 0 bad mem, 5,406 lists, 874,060 commands |
 | `scripts/09-replay.sh --decode scenarios/skip-intro.pad` | `stop` at poll 2500, 0 bad mem, 7,506 lists, 2,280,256 commands, the menu in the displayed frame |
 | `scripts/09-replay.sh --decode scenarios/hanger.pad` | **`stop` at poll 430, 0 bad mem**, 1,296 lists, 1,613,365 commands, the option menu over the hangar — the same scene as new-game.pad in 14 seconds rather than minutes (2 Sep); **the room renders since the `vidt` fix** (3 Sep, findings item 33) — walls, grating, doorway, light shafts — where it was nearly black; **floor, pillars and hazard stripes since the clip-space near clipper** (3 Sep, item 34), where they were shards — 7,944 near-cut vertices and 12,300 split-added in the summary, was 84 / 4,780 |
