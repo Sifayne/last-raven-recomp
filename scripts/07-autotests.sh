@@ -29,10 +29,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 DIR="${1:-$GAME_DIR/pspautotests/tests/cpu/vfpu}"
 # A cap, not a cost: a test that finishes stops on its own, so raising this
 # only changes what happens to the ones that do not. At 100M, cpu/vfpu/vector
-# was reported as "instruction budget exhausted" when what it actually does is
-# run 180M instructions and then hit an instruction we do not implement -- a
-# misleading reason, and the wrong thing to go and investigate.
+# was reported as "instruction budget exhausted" when what it actually needs is
+# more than 100M -- a misleading reason, and the wrong thing to go and
+# investigate. (This note used to go on to say the test then hit an
+# unimplemented instruction. It did not: it was cut off by the interp's 10 s
+# drain, see DRAIN_S below, and runs to its last line at this budget.)
 BUDGET="${BUDGET:-800000000}"
+DRAIN_S="${DRAIN_S:-600}"
 [ -d "$DIR" ] || die "no autotest directory at $DIR — build pspautotests and point this at it"
 
 shopt -s nullglob
@@ -62,7 +65,13 @@ for f in "${ELFS[@]}"; do
     # --dispatch: a test's main thread is started by HLE and its callbacks
     # dispatch into guest code; serving them is what makes anything past
     # module_start execute at all. See docs/findings/autotests.md.
-    if (cd "$HOSTFS" && "$AR" interp "$f" --dispatch --budget "$BUDGET") > "$out" 2>&1; then
+    # --drain: how long the interp waits for the test's threads after
+    # module_start returns, in wall seconds. Its own default of 10 is sized
+    # for the sweep's per-test timeout and is wrong here: at the real budget a
+    # test is bounded by its instructions, not the clock, and cpu/vfpu/vector
+    # needs well over 10 s on the interpreter -- it was cut mid-line at 4452
+    # of 5329 for a week and reported as an unimplemented instruction.
+    if (cd "$HOSTFS" && "$AR" interp "$f" --dispatch --budget "$BUDGET" --drain "$DRAIN_S") > "$out" 2>&1; then
         PASS=$((PASS + 1))
     else
         FAIL=$((FAIL + 1))

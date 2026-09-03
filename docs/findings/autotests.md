@@ -3687,3 +3687,57 @@ faithful execution of that test.
     bisect leaves HEAD's binaries in `build/` after the pop; rebuild before
     measuring anything else.
 
+35. **vector.prx was never dying on an instruction: the interp's drain
+    deadline, and a teardown that raced the threads it gave up on** (3 Sep).
+    Item 34 left `utility/msgdialog/dialog.prx` and `cpu/vfpu/vector.prx`
+    segfaulting the interpreter in `psp_read32` and guessed at
+    `psp_mem_ptr`'s bounds. Wrong guess. Every backing store there is a
+    plain calloc, so a pointer inside RAM can only fault after the RAM is
+    freed -- and the run's own stderr had said when: "guest threads still
+    running after 10s; 2 alive, not waiting further". The interp's
+    `psp_sched_drain` gives the test's threads ten wall seconds after
+    module_start returns, sized for the sweep's per-test timeout, and on
+    the deadline it takes the token back by fiat and returns. The thread
+    that held it does not know; between firmware calls nothing looks at
+    the token, and a VFPU test between two printfs has no firmware calls
+    for seconds. main.c then printed its summary and called
+    `psp_mem_free`, and the thread's next load was from freed memory. The
+    guest's output file is written in chunks, so the crash left vector.prx
+    cut mid-line at 4452 of 5329 -- which the 07 runner's own comment, and
+    item 33, had read as an unimplemented instruction past that point.
+    Under gdb the timing shifted and the thread parked first, which is
+    why the crash "came and went".
+
+    Three pieces. `psp_os_thread_join` in os.c, both halves, since the
+    threads were always joinable and nothing joined them.
+    `psp_sched_join_all` in the scheduler, walked without the lock (the
+    threads take it on their way out) over every slot that ever started a
+    host thread, `used` or not, and a `psp_sched_stopping` flag that
+    `psp_sched_stop_all` raises. The interpreter polls that flag once per
+    instruction, after the budget check, and returns a new `I_STOPPED` --
+    or `I_EXIT` if the guest itself asked -- so a stop reaches a thread in
+    pure computation within the instruction rather than at its next
+    firmware call; the nested-run bookkeeping counts it as a finish, not a
+    failure. main.c stops and joins after printing its summary, so the
+    "still alive" list on stdout still names who was alive, and before
+    the free. The boot host is untouched: recompiled code has no poll, its
+    threads make a firmware call every few microseconds anyway, and the
+    window there was never wide enough to hit. `07-autotests.sh` now
+    passes `--drain 600` (DRAIN_S): at the real budget a test is bounded
+    by its instructions, not the clock. The sweep keeps the 10 s default
+    and its `timeout 25`, and a test that hits the deadline there now
+    prints its summary instead of a core.
+
+    cpu/vfpu runs in thirteen seconds, all eight tests to their last
+    line. `vector.prx` differs on 16 lines of 5,329, every one of them
+    `vasin` in the sixth decimal (0.621185 for hardware's 0.621184 -- an
+    approximation the hardware makes that libm does not), and all 64
+    `vrot` and `vidt` lines match: item 33's fix is now hardware-verified,
+    not just game-verified. `prefixes.prx` is one line, the sign of a NaN.
+    `vregs.prx` keeps its 34: `inf` where hardware has 201.001 and the like
+    in its "Upgrade" and "Combine" rows, a real bug in something those
+    register combinations exercise, not looked at. `dialog.prx` is back
+    to its 139-line DIFFER, and that is the sweep's only movement: 137
+    MATCH, 3 NOOUTPUT, every other row byte-identical. The hangar replay
+    is unchanged to the pixel (1,296 lists, 0 bad).
+
