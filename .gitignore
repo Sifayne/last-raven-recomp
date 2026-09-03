@@ -51,6 +51,12 @@ out/
 reports/*
 !reports/.gitkeep
 
+# The Memory Stick. ms0: resolves to <run root>/ms, so a save the game writes
+# lands here -- a real one is 250K of save data, icon and background, and it
+# is the player's, not ours. Same rule as game/: media and save data never
+# enter the repository.
+ms/
+
 # --- Build ------------------------------------------------------------------
 build/
 cmake-build-*/

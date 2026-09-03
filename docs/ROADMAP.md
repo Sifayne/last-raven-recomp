@@ -303,12 +303,22 @@ targeted.
   already defined and unread. Do it when a save appears that the game
   cannot reach, or before anyone calls this feature-complete.
 
-  Whether this game is even affected is unmeasured. Its only savedata call
-  in the garage, a full new game and a whole mission is the boot free-space
-  query, carrying `save=ACLRSAVELIST00` -- a name with a slot index, which
-  suggests the game numbers its own slots and passes each explicitly, the
-  harmless case. One windowed save from the garage settles it, and settles
-  the gate above at the same time.
+  Whether this game is even affected is still open, though less so since
+  Sif saved from the garage in a windowed run on 3 Sep: the game wrote
+  `ms0:/PSP/SAVEDATA/NPUH10024ACLRSAVELIST00/` complete with 28K of save
+  data, a well-formed PARAM.SFO naming the title, the pilot and the AC, and
+  the game's own ICON0 and PIC1. So the writing half of the gate is met, by
+  the game rather than by the suite. The slot-indexed name suggests the game
+  numbers its own slots and passes each explicitly, which is the harmless
+  case -- but a LISTSAVE whose list begins with that name produces the same
+  directory, so it is not settled. Saving once more with
+  `PSPRECOMP_SAVEDATA_LOG=1` prints the mode and whether `saveName` is set,
+  and settles it in one line.
+
+  **What is left of the gate: the load.** No scenario reaches it -- the
+  garage recording starts a new game every time, so a replay only ever makes
+  the boot free-space call. It wants a windowed relaunch that picks continue
+  or load, or a recording that does.
 
 ## M5 — A GPU backend, and real time
 
