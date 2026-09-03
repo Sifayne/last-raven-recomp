@@ -258,10 +258,13 @@ speed, both M5's.
   (3 Sep, findings item 44) -- the only two of the game's 27 `sceSasCore`
   imports that were missing -- along with `SetSL`, the already-on refusal,
   and the 32-sample delay between keying a voice on and it starting.
-  `getheight` is byte-exact. What is left: the four non-linear ADSR curve
-  modes, which `SetADSRmode` still accepts and ignores, and with them
-  `adsrcurve` (2,032 lines) and `setadsr` (378); then `SetSimpleADSR`'s own
-  curves, grain and output mode. Reverb last, or never.
+  `getheight` is byte-exact. `SetADSRmode` validates and stores its four
+  curves (item 45): the parity rule that decides which phase takes which
+  curve is measured exactly, taking `setadsr` from 378 lines to 304. What is
+  left is stepping the envelope by those curves -- the shapes are derived in
+  item 45, with bent's crossing sample and the rising exponent's last
+  hundredth of a percent still open -- and then `SetSimpleADSR`'s own curves,
+  grain and output mode. Reverb last, or never.
 
 **ATRAC3+ (3 Sep).** libavcodec behind sceAtrac3plus, optional and dynamic,
 the openh264 shape. The game holds each track whole and loops it forever;

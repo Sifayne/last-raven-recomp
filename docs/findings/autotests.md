@@ -4257,3 +4257,60 @@ faithful execution of that test.
     number -- the closest, 32 and 32, gives 0x02800000. The rule is
     something else, and the sections at rate 1 are where it will show.
 
+45. **The ADSR curve modes: the rule that decides them, and how far the
+    shapes are derived** (3 Sep). `__sceSasSetADSRmode` names one of six
+    curves for each of attack, decay, sustain and release, and had been
+    accepted and ignored. What it accepts is now measured and enforced, and
+    the shapes themselves are derived here as far as the corpus takes them.
+
+    **Which curve a phase will accept comes down to the curve's parity.**
+    setadsr.expected sweeps every mode against every phase, and the matrix
+    is exact: the even curves -- linear increase 0, bent 2, exponent 4 --
+    are the rising shapes, and only attack and sustain take them; the odd
+    ones -- linear decrease 1, exponent-rev 3, direct 5 -- are the falling
+    shapes, and only decay, sustain and release take them. Sustain takes
+    either, since it may go up or down. Anything above 5 is refused, and so
+    is any bit outside the low three and the sign: 0x80000001 is accepted as
+    mode 1 while 0x40000001 is not, which is what says the mask is
+    `~0x80000007` and not simply a range. Everything is checked before
+    anything is stored. That is 0x80420013, and it takes setadsr from 378
+    differing lines to 304 and adsrcurve from 2,032 to 1,988, with the game
+    unchanged on every replay.
+
+    **The shapes, from adsrcurve.expected** (grain 64, so a core is 64
+    samples and the first after a key-on is 32 -- item 44):
+
+    - Linear increase and decrease are exactly plus or minus the rate a
+      sample, at every rate the test tries.
+    - Bent is the rate below three-quarter height and a quarter of it above.
+      That reproduces every core of its sweep but the one where it crosses:
+      hardware moves 0x028C0000 there and the rule gives 0x02800000, and no
+      split of 64 samples between those two rates yields hardware's number,
+      so the crossing sample does something a single measurement cannot
+      name.
+    - Exponent falling is the height scaled by the rate with a floor of one:
+      rate 1 steps exactly 1 a sample, and `Decay exponent 0` and
+      `Decay exponent 1` both come out right.
+    - Exponent rising approaches the maximum geometrically, and behaves as
+      though bit 16 of the rate were set: rate 0 and rate 1 both step
+      0x4000, rate 5 steps 0x4001, rate 0x100000 steps 0x110000/4. That is
+      within a hundredth of a percent of hardware over the first core --
+      0x00877C84 against 0x00877452 at rate 0x100000 -- and no model tried
+      closes the last of it. Solving for the exact multiplier per rate finds
+      one for the small rates (rate + 0x10011) and none at all for the large
+      ones, so the true form carries a term that does not scale with the
+      remaining distance.
+    - Direct jumps to where the phase ends. Attack refuses it, and
+      exponent-rev, by the parity rule above.
+
+    **Stepping by those shapes is not switched on.** It was written and
+    measured and does not yet pay: with it, the sections that match exactly
+    go from 11 of 53 to 12, while adsrcurve's line count triples -- an
+    exponential prints a change line per core where a linear one prints
+    none, so a near-miss scores far worse than a gross one and the count
+    stops being a useful measure. One section, `Attack exponent 0x0`, came
+    out an order of magnitude wrong in a way not explained, which is the
+    thread to pull first. What is committed is the part that is certain:
+    the validation, and the modes stored against each voice ready for the
+    stepping to use. The numbers above are what the next pass has to beat.
+
