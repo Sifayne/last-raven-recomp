@@ -4380,3 +4380,84 @@ faithful execution of that test.
     The game is unchanged across title-idle, the hangar, the garage and New
     Game: exact baseline command counts, 0 bad accesses, audio on all three
     channels, ctest 13/13.
+
+47. **The two clocks inside a voice, and a seek that was never registered**
+    (3 Sep). With the argument rules in, what was left in the sascore files
+    was rendering, and it came apart into six rules and one missing import.
+    Nine of the twelve files are byte-exact now.
+
+    **`sceIoLseek32` had never been registered.** vag.expected's sections
+    against a real `music.vag` were silence here, with no error anywhere to
+    explain it: the test seeks to the end to size the file, and an
+    unregistered import left `$v0` holding whatever was there -- zero. So it
+    allocated nothing, read nothing, and handed sceSasCore a buffer of
+    zeroes, which duly rendered silence. The 32-bit seek is not the 64-bit
+    one with a smaller argument: its offset is `$a1` and its whence `$a2`,
+    where the 64-bit call's offset is register-aligned into `$a2:$a3`.
+    Registered now, with the async variant beside it. A whole class of bug
+    to keep in mind: a *missing* import fails silently and plausibly, where
+    a wrong one usually crashes.
+
+    **The envelope is read before it is stepped.** Every file that prints
+    the first sample of a voice prints zero for it -- pcm's [020] is 0000
+    where the source sample is 0xFFFF at full volume. The envelope starts at
+    zero and the first sample is multiplied by that, then the envelope takes
+    its step. Stepping first put every voice one sample ahead of hardware.
+
+    **A key-off lifts the key at once; only the release waits.** pcm and vag
+    both key a voice off and straight back on with no core between, and
+    hardware restarts it. Holding the key down until the core -- which is
+    where the release starts -- made the second key-on fail with
+    ALREADY_ON, so each of those sections played the previous section's
+    sound and every sample in it was wrong. The two halves of a key-off
+    happen at different times.
+
+    **A paused voice takes no key.** keyon.expected keys a voice off,
+    pauses, and is still refused with 0x80420016. That is not the
+    already-on case in disguise; pause alone is enough.
+
+    **A VAG's source starts one sample after its envelope.** The envelope
+    goes live 32 samples after the key-on for every voice (item 44), but a
+    VAG's first decoded sample lands at output 33 where a PCM voice's lands
+    at 32 -- and that sample comes out at full scale, which is only possible
+    if the envelope had already taken its step during the sample the ADPCM
+    path spends on the block header. Two delays, not one.
+
+    **The VAG filter table, and what hardware does when a block indexes past
+    it.** Five filters are documented and a block header can name sixteen.
+    This used to clamp anything above 4 to no prediction; hardware instead
+    reads past the end of its table. The coefficients live as two contiguous
+    runs of five int16 -- the first weight then the second, stored positive
+    and subtracted -- and filter i takes `W[i]` and `W[i + 5]`. That shape is
+    what makes the numbers check out against each other: filter 7's first
+    weight is 52, which is filter 2's second weight, and filter 9's second
+    weight is 125, which is filter 14's first. vag.expected sweeps all
+    sixteen and every coincidence holds, which is the evidence that the
+    overrun is the rule rather than eleven numbers that happen to fit.
+    Entries past the ninth are measured, not derived -- they are whatever
+    the module keeps after its table -- and one of them, W[19], the corpus
+    cannot pin closer than 82..85 because filter 14 clamps. Nothing an
+    encoder emits reaches past filter 4.
+
+    **`__sceSasCoreWithMix`'s volumes scale the buffer, not the render.**
+    outputmode.expected passes 0 for both and gets the rendered samples back
+    unchanged, which is only possible if the zero applies to what was
+    already there. And in output mode 1 the call is refused outright with
+    0x80000004 -- not a sascore code at all -- leaving the buffer untouched.
+
+    **Where it lands.** `pcm`, `vag` and `keyon` join `sascore`, `getheight`,
+    `keyoff`, `noise`, `pause` and `pitch` at zero differing lines: nine of
+    twelve byte-exact. `outputmode` goes 50 to 24, `setadsr` and `adsrcurve`
+    are unmoved at 304 and 24. The game is unchanged -- title-idle, the
+    hangar, the garage and New Game at their baseline command counts with 0
+    bad accesses, and New Game's three audio channels identical in length
+    and level -- and ctest is 13/13.
+
+    **What is left, and why.** `outputmode`'s 24 lines are output mode 1,
+    which writes four blocks where mode 0 writes one and resamples what it
+    writes: the samples printed are not the mode-0 stream at any offset, and
+    twelve values across two sections are not enough to name the resampler.
+    `setadsr`'s 304 want the guest-side SasCore struct written back rather
+    than kept here. `adsrcurve`'s 24 are the two boundary rules in item 45.
+    The game reaches none of them: it runs in mode 0 and reads nothing back
+    out of the struct.
