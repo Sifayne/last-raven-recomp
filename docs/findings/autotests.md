@@ -4206,3 +4206,54 @@ faithful execution of that test.
     it does not: see M4 there for what one slot actually costs and the
     deferred fix.
 
+44. **SAS: the two calls the game makes, and the 32 samples before a voice
+    starts** (3 Sep). M3's last piece. The import census names the gap
+    exactly: of 27 `sceSasCore` functions the module imports, 25 were
+    implemented and two were not -- `__sceSasSetVoicePCM` and
+    `__sceSasGetAllEnvelopeHeights` -- so both returned zero from the
+    unimplemented path and the game's PCM voices played nothing at all.
+
+    `__sceSasSetVoicePCM` is raw signed 16-bit samples rather than ADPCM,
+    and its refusals are all signed comparisons (pcm.expected): a size at or
+    below zero or above 0x10000 samples is 0x8042001A, a loop position at or
+    past the size is 0x80420015 -- which lets -1 and even 0x80000001 through
+    while turning 0x40000001 away -- and a null address is accepted and
+    plays silence. `__sceSasGetAllEnvelopeHeights` writes exactly 32 entries;
+    the test reads the 33rd back as the 0xCCCCCCCC it seeded.
+    `__sceSasSetSL` sets the sustain level rather than being accepted and
+    ignored. And keying on a voice that is already on is refused with
+    0x80420016, where key-off alone does not clear the state: keyon.expected
+    refuses it after a key-off and a pause, then accepts it after one core,
+    so what clears it is the release actually reaching zero.
+
+    **A voice does not start when it is keyed on. It starts 32 samples
+    later.** Three measurements, two of them independent of the third.
+    keyon.expected reads the envelope as 0 before a core and 0x60000 after
+    one, which at rate 0x1000 is 96 steps of a 128-sample grain -- 32 short.
+    getheight.expected reads 0x1e0000 after four such cores, which is
+    96 + 128 + 128 + 128: the same 32 missing once, not once per core. And
+    pcm.expected's rendered output settles it from the other side, with the
+    sample the voice starts from landing at output index 32 and the loop
+    point arriving 32 samples late to match. So both the sound and the
+    envelope are held for 32 samples after key-on, together.
+
+    With those: `getheight` is byte-exact, `keyon` 8 lines to 2, `keyoff` 8
+    to 6, `pcm` 44 to 10, `vag` 330 to 308, `setadsr` 390 to 378. The game
+    keeps its exact baseline command counts on title-idle, the hangar, the
+    garage and New Game -- the last of which is the run that once hung on a
+    menu sound -- at 0 bad accesses, with the effects channel carrying
+    signal throughout; ctest 13/13.
+
+    `adsrcurve` rose from 1,916 lines to 2,032, and that is the curves, not
+    a regression: with PCM voices actually playing, sections of it that used
+    to produce nothing now produce numbers from the wrong curve. What is
+    left there is the four non-linear modes, and a start on them: the two
+    linear modes are confirmed as plus or minus the rate per sample;
+    EXPONENT_REV is refused outright for attack with 0x80420013; and
+    LINEAR_BENT does **not** fit the obvious model of full rate to
+    three-quarter height and then a quarter of it. Its twelfth core, from
+    0x2E000000 with rate 0x100000 over 64 samples, moves 0x028C0000, and no
+    integer split of 64 samples between those two rates produces that
+    number -- the closest, 32 and 32, gives 0x02800000. The rule is
+    something else, and the sections at rate 1 are where it will show.
+

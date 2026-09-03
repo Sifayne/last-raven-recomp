@@ -254,9 +254,14 @@ speed, both M5's.
   is what feeds it. Implement the 13 calls to the streaming contract the game
   actually uses. The `.expected` files carry exact buffer-info numbers; read
   the layout out of them as `vpl/order`'s was.
-- **SAS:** `__sceSasSetVoicePCM` (missing), `SetSL` and `SetADSRmode`
-  (no-ops), real `SetSimpleADSR` curves (it currently ignores its arguments),
-  grain and output mode. Reverb last, or never.
+- **SAS:** `__sceSasSetVoicePCM` and `__sceSasGetAllEnvelopeHeights` are in
+  (3 Sep, findings item 44) -- the only two of the game's 27 `sceSasCore`
+  imports that were missing -- along with `SetSL`, the already-on refusal,
+  and the 32-sample delay between keying a voice on and it starting.
+  `getheight` is byte-exact. What is left: the four non-linear ADSR curve
+  modes, which `SetADSRmode` still accepts and ignores, and with them
+  `adsrcurve` (2,032 lines) and `setadsr` (378); then `SetSimpleADSR`'s own
+  curves, grain and output mode. Reverb last, or never.
 
 **ATRAC3+ (3 Sep).** libavcodec behind sceAtrac3plus, optional and dynamic,
 the openh264 shape. The game holds each track whole and loops it forever;
