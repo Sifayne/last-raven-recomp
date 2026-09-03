@@ -286,6 +286,29 @@ targeted.
   uses (measured from the HLE log, not the enum), the result codes, and the
   five `sceIo` directory calls from M1 made real.
 - No dialog UI. The dialog auto-completes, as it does now.
+- **One save slot, for now** (decided 3 Sep). "No dialog UI" above is about
+  not drawing Sony's system dialog -- a list of slots with icons and a
+  confirm prompt, firmware UI this project has no layer for. Choosing a slot
+  is a separate matter that the phrase hid. Where the game names the slot in
+  `param.saveName` we honour it and any number of slots work; AUTOSAVE
+  already walks `saveNameList` for the first free one. The single slot is
+  what is left when a caller leaves `saveName` empty and delegates the choice
+  to the dialog: we take the first list entry every time.
+
+  **Deferred, not dismissed.** The parameter block carries `focus`, which
+  says which entry hardware's dialog would highlight -- first, latest,
+  oldest, first empty, last empty. Reading it, together with the list,
+  picks the slot the dialog would have defaulted to without drawing
+  anything: about forty lines in `hle/utility.c`, where the offset is
+  already defined and unread. Do it when a save appears that the game
+  cannot reach, or before anyone calls this feature-complete.
+
+  Whether this game is even affected is unmeasured. Its only savedata call
+  in the garage, a full new game and a whole mission is the boot free-space
+  query, carrying `save=ACLRSAVELIST00` -- a name with a slot index, which
+  suggests the game numbers its own slots and passes each explicitly, the
+  harmless case. One windowed save from the garage settles it, and settles
+  the gate above at the same time.
 
 ## M5 — A GPU backend, and real time
 
