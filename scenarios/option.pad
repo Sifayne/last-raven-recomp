@@ -1,0 +1,49 @@
+# OPTION menu stop: same path as new-game.pad (skip intro, START to main
+# menu, cross into NEW GAME) but halting on the small "Option menu"
+# box instead of continuing into Sound setup.
+#
+# Frame survey (reports/opt-seq/opt-NNNN.ppm, EVERY=30, parent 48b1063):
+#   seq ~150-172  title screen
+#   seq ~174-192  OPTION header + small Sound/Key-assign/Next box
+#   seq ~193+     wide Sound-setup panel (BGM/SE/Voice bars)
+# Taps after @3600 are dropped: @3750/@3900 drive Option -> Sound.
+# If the verify run lands on the wrong screen, move the stop / restore
+# taps -- the survey above says where each screen lives in present order.
+#
+#   PSPRECOMP_REPLAY=scenarios/option.pad PSPRECOMP_MPEG_DECODE=1 \
+#     PSPRECOMP_FRAME=reports/opt-seq/verify.ppm \
+#     ./build/host/boot game/extracted/ACLR_App.elf "game/Armored Core - Last Raven Portable.iso"
+
+drain 300
+minhold 4
+
+  mark "circle: skip the intro movie"
+  @50 tap circle
+  @150 tap circle
+  @250 tap circle
+  @350 tap circle
+  @450 tap circle
+  @550 tap circle
+  @650 tap circle
+  @750 tap circle
+  @850 tap circle
+  @950 tap circle
+  @1050 tap circle
+  @1150 tap circle
+  @1250 tap circle
+  @1350 tap circle
+  @1500 mark "start: title screen -> main menu"
+  @1550 tap start
+  @1650 tap start
+  @1750 tap start
+  @1850 tap start
+  @1950 tap start
+  @2050 tap start
+  @2150 tap start
+  @2250 tap start
+  @2350 tap start
+  @2500 mark "cross: NEW GAME -- option survey stops on the Option menu"
+  @2550 tap cross
+  @2700 tap cross
+  @2850 tap cross
+  @3000 stop

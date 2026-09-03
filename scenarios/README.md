@@ -102,6 +102,7 @@ they end at the same place, and `stop` is what makes that true.
 | `skip-intro.pad` | the title menu via circle-skip | 2,500 |
 | `hanger.pad` | the option menu over the 3D hangar | 430 |
 | `new-game.pad` | the sound-settings panel | 6,000 |
+| `mission-1.pad` | name entry, garage, mission select, into a sortie | 1,790 |
 
 `hanger.pad` and `new-game.pad` reach the same scene; the short one exists
 because a run that takes fourteen seconds gets measured twenty times and one

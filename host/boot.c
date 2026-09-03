@@ -193,15 +193,22 @@ static void watch_hit(uint32_t addr) {
             fprintf(stderr, "\n");
         }
     }
-    /* Argument 2 as a matrix, when it points at RAM. The uploader takes the
-     * source matrix there, and "what did the game actually build" is the only
-     * way to tell a bad matrix from a bad upload of a good one. */
+    /* Arguments 0-2 as a matrix, when they point at readable memory. The
+     * uploader takes the source matrix in a2, the matrix multiply takes its
+     * operands in a1/a2 and writes a0 -- and "what did the game actually
+     * build" is the only way to tell a bad matrix from a bad upload of a
+     * good one. All three because which argument matters depends on which
+     * function is watched, and a second run to see the other one costs more
+     * than the lines. */
     {
-        const uint32_t m = psp_arg(2);
-        /* Module data as well as the heap: a static matrix buffer lives in the
-         * loaded image, and excluding it printed nothing at all. */
-        if (m > 0x1000u && m + 64 < PSP_RAM_BASE + PSP_RAM_SIZE) {
-            fprintf(stderr, "         [a2 as 4x4]");
+        const uint32_t ms[3] = { psp_arg(0), psp_arg(1), psp_arg(2) };
+        static const char *mn[3] = { "a0", "a1", "a2" };
+        for (int j = 0; j < 3; j++) {
+            const uint32_t m = ms[j];
+            /* Module data as well as the heap: a static matrix buffer lives
+             * in the loaded image, and excluding it printed nothing at all. */
+            if (m <= 0x1000u || m + 64 >= PSP_RAM_BASE + PSP_RAM_SIZE) continue;
+            fprintf(stderr, "         [%s as 4x4]", mn[j]);
             for (int i = 0; i < 16; i++) {
                 union { uint32_t u; float f; } c; c.u = psp_read32(m + (uint32_t)i * 4);
                 fprintf(stderr, "%s%.2f", (i % 4) ? " " : " | ", (double)c.f);

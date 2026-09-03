@@ -160,14 +160,23 @@ which logs textured draws whose coordinates cannot be right.
 
 **The clipper (2 Sep).** The "white pixels in lines" in the backdrop were
 3D strips with vertices between the eye and the near plane, drawn as-is.
-`gpu/clipping` gave the hardware's actual rules — divide by w first; with
-`DEPTH_CLIP_ENABLE` **clear**, reject whole triangles with any vertex outside
-z/w ∈ [−1, 1]; with it **set** the flag means *clamp*, so clip the near plane
-geometrically in NDC, leave the far plane alone and pin the depth; and drop
-any triangle with a vertex outside the 4096 guard band — and both tests now
-match on every value. The same
-test found the rasterizer's hardcoded 480 bound; the scissor registers are
-decoded and are the only bound now. Findings item 29.
+`gpu/clipping` gave the hardware's actual rules — with `DEPTH_CLIP_ENABLE`
+**clear**, reject whole triangles with any vertex outside z/w ∈ [−1, 1]; with
+it **set** the flag means *clamp*, so clip the near plane geometrically,
+leave the far plane alone and pin the depth; and drop any triangle with a
+vertex outside the 4096 guard band — and both tests now match on every value.
+The same test found the rasterizer's hardcoded 480 bound; the scissor
+registers are decoded and are the only bound now. Findings item 29.
+
+**The clipper, in clip space (3 Sep).** The first clipper divided by w and
+cut the near plane in NDC, which the oracle cannot distinguish from cutting
+`z + w = 0` in clip space — every mixed-w vertex it poses sits exactly on the
+plane. The hangar can: its wall pieces are drawn with the camera inside them,
+so vertices behind the eye reach the GE at w < 0, and divided they land
+mirrored with z/w inside the range, survive the NDC cut, and draw as shards
+across the frame — the "vertex problems" in the option menu, and the black
+floor. Cutting in clip space before the divide is the fix: the floor grid,
+hazard stripes, pillars and doorway all appear. Findings item 34.
 
 **Mipmapping (2 Sep).** Levels 1–7 were never decoded. The chain,
 `TEX_LEVEL`'s three modes and bias, and the per-sixteenth blend now follow
@@ -183,6 +192,26 @@ half vector, `dot(L, D)` for the spot factor, and eye space throughout. It is
 **not** why the hangar is dark: the game's own three lights cap the shaded
 colour at 0x8C, so the missing brightness is in the compositing passes.
 Next oracle there: `gpu/commands/blend`. Findings item 31.
+
+**A mission, at last (2 Sep, night).** Sif recorded `scenarios/mission-1.pad`
+— name entry, garage, mission select, a sortie, 108 seconds of play — the file
+this gate has named since it was written. Its first replay showed every 3D
+scene flat white with the 2D layer correct on top, and the pixel watch put
+the cause in one line: a full-screen fade sprite whose vertex type carries
+**no colour field**, which the decoder defaulted to opaque white. Hardware
+gives a colourless vertex the material ambient colour and alpha (what
+`sceGuColor` sets); with that, the mission renders. Findings item 32.
+
+**Gate status.** The recording exists and reaches a sortie with `bad mem: 0`.
+What remains is the comparison the gate specifies: frame dumps against the
+PPSSPP capture at matching moments — the garage's AC, the main menu's mech,
+the mission itself — and closing what they show. The first look said ours is
+darker and less detailed than the reference (mean 38 against ~100), with
+lighting reporting no lights on and fog absent entirely. Since the `vidt`
+fix (3 Sep, findings item 33) the mission renders at mean 84 with 4,200
+colours -- mech, buildings, smoke, lit horizon -- so the geometry gap is
+closed and what is left is the passes: fog above all (decoded, counted, never
+applied), then the blend-factor findings in the same item.
 
 ## M3 — Sound
 

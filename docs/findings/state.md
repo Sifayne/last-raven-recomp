@@ -321,6 +321,16 @@ exactly like a codegen regression. It cost one this session. Run
 `scripts/04-emit-build.sh` after touching `emit.c`, `decode.c`, `decode.h` or
 `recomp_rt.h`.
 
+**The trace build goes stale the same way, and louder.** `build/host-trace`
+holds its own `aclr_funcs.o`, and `06-boot.sh` reuses it without rebuilding,
+so a trace run against last night's objects links a different program than
+the plain build runs. It cost one this session too: a trace build from Sep 1
+22:44 against a plain build from 22:54 diverged at poll 333 with 1.3 billion
+bad accesses, which reads exactly like a tracing-instrumentation bug and is
+nothing of the sort. Refresh with `TRACE=1 scripts/04-emit-build.sh` whenever
+the plain objects move; the run is faithful again when polls, bad accesses
+and the pixel count all agree with the plain build.
+
 The boot summary also reports, without any flag: the firmware-call histogram,
 the GE state, a VRAM survey, and the live thread list with what each is parked
 on.
@@ -1297,9 +1307,10 @@ and cannot see anything past it. Measured 1 Sep on `3f402c5`.
 | `scripts/06-boot.sh` (default) | 639 lists, 106,762 commands, 93,875,406 pixels, 0 bad mem; frames 0 / 751 / 9,020 |
 | `scripts/09-replay.sh --decode scenarios/title-idle.pad` | `stop` at poll 1800, 0 bad mem, 5,406 lists, 874,060 commands |
 | `scripts/09-replay.sh --decode scenarios/skip-intro.pad` | `stop` at poll 2500, 0 bad mem, 7,506 lists, 2,280,256 commands, the menu in the displayed frame |
-| `scripts/09-replay.sh --decode scenarios/hanger.pad` | **`stop` at poll 430, 0 bad mem**, 1,296 lists, 1,580,603 commands, the option menu over the hangar — the same scene as new-game.pad in 14 seconds rather than minutes (2 Sep) |
-| `scripts/09-replay.sh --decode scenarios/new-game.pad` | **`stop` at poll 6000, 0 bad mem**, 70/70 events, 18,006 lists, 50,813,097 commands, the sound-settings panel in the displayed frame (1 Sep, night — M1's gate); **every glyph on it exact** since indexed draws were fixed (2 Sep) |
-| `scripts/08-autotest-sweep.sh` | **137 MATCH** of 432, 3 NOOUTPUT, no per-test regression against the 1 Sep baseline (2 Sep, after the clipper and scissor); diff per test, the total is not a goal |
+| `scripts/09-replay.sh --decode scenarios/hanger.pad` | **`stop` at poll 430, 0 bad mem**, 1,296 lists, 1,613,365 commands, the option menu over the hangar — the same scene as new-game.pad in 14 seconds rather than minutes (2 Sep); **the room renders since the `vidt` fix** (3 Sep, findings item 33) — walls, grating, doorway, light shafts — where it was nearly black; **floor, pillars and hazard stripes since the clip-space near clipper** (3 Sep, item 34), where they were shards — 7,944 near-cut vertices and 12,300 split-added in the summary, was 84 / 4,780 |
+| `scripts/09-replay.sh --decode scenarios/new-game.pad` | **`stop` at poll 6000, 0 bad mem**, 70/70 events, 18,006 lists, 51,603,655 commands, the sound-settings panel in the displayed frame (1 Sep, night — M1's gate); **every glyph on it exact** since indexed draws were fixed (2 Sep); gate reproduces exactly behind a wider drain (3 Sep — it renders more now, 288 s of raster, so the default drain expires first) |
+| `scripts/09-replay.sh --decode scenarios/mission-1.pad` | **`stop` at poll 1790, 0 bad mem**, 5,376 lists, 19,007,445 commands, the mission's opening with its chatter box; ~87 s wall, 56 ns/pixel (2 Sep, night — the first run into a sortie); **renders since the `vidt` fix** (3 Sep) — mean 84 against ~100, 4,200 colours, mech, buildings, smoke, lit horizon; **continuous ground since the clip-space near clipper** (3 Sep, item 34), where it was shards — same 5,376 / 19,007,445 |
+| `scripts/08-autotest-sweep.sh` | **137 MATCH** of 432, 4 NOOUTPUT (3 Sep, after the clip-space clipper): no MATCH lost; `utility/msgdialog/dialog.prx` moved DIFFER→NOOUTPUT, a pre-existing interpreter segfault that reproduces at the fork's HEAD (findings item 34); diff per test, the total is not a goal |
 
 A replay without `--decode` is the default run with a script attached; see
 the configuration note at the top of this file.

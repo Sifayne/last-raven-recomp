@@ -3513,3 +3513,177 @@ faithful execution of that test.
     the lighting above measurable at all. The mechanism behind the extra
     clears is not identified yet; until it is, those two tests are not
     usable as oracles beyond their first reading.
+
+32. **Into a mission: the white screen was a decoder default** (2 Sep, night).
+    Sif played past everything anyone had recorded -- name entry, main menu,
+    garage, mission select, a sortie -- and recorded it: `scenarios/
+    mission-1.pad`, 108 seconds of play, 1,751 polls, the file M2's gate has
+    named since the roadmap was written and nobody had made. The screencast
+    showed what was wrong: every 2D screen right, and every 3D scene either
+    empty (the garage's AC panel) or flat white (the mission -- 96% pure
+    `FFFFFF`, 80 distinct colours in the whole frame, the dialogue box
+    rendering correctly on top).
+
+    The obvious reading was "3D geometry is dropped", with skinning as the
+    prime suspect: `vertex_layout` refuses weighted vertex types and discards
+    the draw. It was not asserted, and the first headless replay said why
+    not: **no dropped-geometry line at all**, and 1.16 million textured 3D
+    draws, 21.7 billion textured pixels. The scene was being drawn, heavily.
+    The white was on top of it.
+
+    The pixel watch (`PSPRECOMP_PIXWATCH`) at (240,100) read the last frame
+    like a script: particles with a 32x32 texture, two additive passes, a
+    pass sampling the *other framebuffer* as a texture (a bloom), building
+    the pixel to about 0x62 -- then
+
+        2d: sprites  x -80..560 y -184..456  vaddr 004E0A9C
+            rgba FFFFFFFF  vtype 800102  tex no
+
+    an untextured full-screen sprite, alpha 0xFF, alpha-blended: opaque
+    white. Its alpha was 0xFF in all 1,103 frames it was drawn, so not a
+    slow fade but a stuck one. And `vtype 0x800102` says why: **bits 2..4
+    are zero -- the vertex has no colour field.** The 0xFF was never the
+    game's; it was `read_vertex`'s default for a colourless vertex,
+    `0xFFFFFFFF`.
+
+    Hardware does not default to white. A colourless vertex takes the
+    **material ambient colour and alpha**, registers 0x55 and 0x58 -- which
+    is what PSPSDK's `sceGuColor` writes (it is `sceGuMaterial` with every
+    component selected). That is how a game animates a fade without touching
+    a vertex: one register per frame, then a quad with no colour. Both
+    registers were already decoded for lighting; the fix is a
+    `current_colour()` that both vertex paths default to. The mission
+    renders: night sky, smoke, a lit horizon, 1,160 distinct colours where
+    there were 14.
+
+    Two workflow lessons the same evening. The first replay ran thirty
+    minutes for a 108-second recording: I chose the bound by guessing rather
+    than from the number in the file, and the scenario had no `stop`, so it
+    ran on for 70,000 polls drawing white after the last input at 1,716. It
+    now stops at 1,790 and takes 87 seconds. And the mission costs 56 ns a
+    pixel, 16x slower than real time -- your worry about the software
+    renderer, quantified; the docs' M5 conclusion stands, and it is separate
+    from every correctness question above, which is why a white screen was
+    never going to be "the renderer is slow".
+
+33. **The dark hangar was a collapsed rotation: `vidt` took the wrong lane**
+    (3 Sep). The hangar rendered nearly black (mean 10) behind a correct 2D
+    menu, and the mission ran dark (mean 38 against ~100) with no lights on.
+    Blending was suspected and acquitted: the pixel watch traces every
+    compositing pass arithmetically correct, the vertex colours and textures
+    are genuine game data (PEEK, and WATCHMEM shows the tile colours are
+    never rewritten), and the scene is frozen, not fading (1,070 extra polls
+    reproduce the pixel exactly). The `gpu/commands/blend` oracle did find
+    real bugs on the way -- the doubling factors saturate instead of
+    doubling (codes 6-9 clamp at 255), products round where hardware
+    truncates, and the stencil byte is unmodelled -- but all are ±2 LSB or
+    alpha-channel, not a 9x darkness. The `[r]`/`[x]` line prefixes are a
+    scheduling artifact (did the reschedule thread run?), not renderer
+    output; strip them before diffing.
+
+    The cause was upstream of every pixel: per-object world matrices arrived
+    as `[X,X,X,T]` -- three identical columns, rank 1 -- which folds the room
+    onto a line and mangles every normal it touches. The uploader
+    (`002B752C`) is faithful (WATCH shows healthy sources uploading
+    healthy), the composer chain multiplies healthy inputs, and the seed it
+    all reduces to is a scratchpad matrix reading `[(1,0,0,0)x4]`. That
+    scratchpad is staged by three rotation builders (`002B0020/007C/00D8`),
+    each verified healthy in turn -- until the second, whose output already
+    has column 1 equal to column 0. Its rows are built by `vrot` (correct)
+    and `vidt`, and `vidt` took bits 6-7 of vd as the lane, which reads 0
+    for every lane register the builders use (v0..v3). So two of the four
+    rows came out `(1,0,0,0)` and every rotation collapsed. The lane is
+    vd & 3 -- the element field this file's own register addressing uses
+    everywhere else -- under which all three builders produce orthonormal
+    X/Y/Z rotations (checked by hand, including the look-at builder's
+    homogeneous row at vd=39). No pspautotests suite covers `vidt`
+    (vector.prx dies at line 4452 of 5329, before the vrot cases, so both
+    were unverified); the game was the only oracle that could say it.
+
+    With one line changed the hangar renders -- walls, grating, doorway,
+    light shafts -- and the mission     reaches mean 84 with 4,200 colours: mech, buildings, smoke, lit horizon, chatter box on top. M1's gate reproduces
+    exactly (18,006 lists, stop at 6000, 0 bad) behind a wider drain, the
+    title runs are bit-identical in lists, the sweep holds at 137 with no
+    per-test movement, and the oracle sample agrees 316/0. What is left is
+    in the passes, not the geometry: fog is decoded and counted but never
+    applied (the mission's far field wants its light-blue fog), and the
+    blend-factor findings above. The ghostly foreground mech is depth func 1
+    (always) meeting submission order, not missing geometry.
+
+34. **The shards in the hangar: the near plane was cut after the divide**
+    (3 Sep). With the rotations fixed (item 33) the option menu's hangar
+    rendered its right wall and, where the floor should be, black with a
+    few dark triangles the size of the screen -- one of them wearing the
+    floor's hazard stripe. The mission's ground had the same disease. The
+    summary already said where: 117,060 vertices a run "all behind the
+    eye" and 73,404 "outside the guard band", in a room of 917,000, and
+    the draw log put the camera inside the geometry. The wall pieces are
+    16-bit positions (vertex type `0x13D`) filling a ±1 cube under a
+    world matrix of scale 17 and a translation 12-17 units away, so every
+    piece has vertices behind the eye, and the game submits them
+    unclipped: its own VFPU clipper (the one M1 fixed) is not run for the
+    room.
+
+    The clipper from item 29 divided by w first and cut z/w >= -1 in NDC.
+    That reading of `gpu/clipping` is not wrong about anything the test
+    measures -- every mixed-w vertex it poses sits at z = -w exactly, on the
+    plane, so cutting `z + w = 0` in clip space before the divide gives the
+    identical forty values, and "Linear W 1->-1->-1" lights the same
+    16,384 pixels either way because (-w,-w,-w,w)/w is one point for either
+    sign of w. What the test cannot pose is a vertex behind the eye off the
+    plane. Divided, it lands mirrored through the screen centre, and for
+    the game's projection (near 1, far infinite: z' = -z - 2, w' = -z) its
+    z/w is 1.4 -- inside the range, so the NDC cut kept it and the triangle
+    drew as a shard, or more often reached the guard band and was dropped
+    with the rest of the floor. In clip space z + w is, for any standard
+    projection, an affine function of eye z that is positive in front of
+    the near plane and negative behind the eye, so one Sutherland-Hodgman
+    pass on that plane handles both; attributes lerp with the same t,
+    which is exact for the cut vertex. A vertex that passes with w < 0 is
+    still divided, as hardware does -- that is what the "1->-1->-1" row
+    measures -- and "all w <= 0 draws nothing" stays as a separate rule,
+    since the test's degenerate projections need it and a real one never
+    triggers it.
+
+    With the cut moved, the hangar has its floor grid, hazard stripes,
+    pillars and doorway, laid out as in the PPSSPP frame at t=12 s of the
+    capture, and the same run reports 7,944 vertices cut at the near plane
+    (was 84) and 12,300 added by splits (was 4,780). `gpu/clipping` still
+    matches on every value: `guardband` exactly, `homogeneous` modulo the
+    `[r]`/`[x]` prefix from item 33. Lists and commands are unchanged
+    (1,296 / 1,613,365), as they must be -- this touches nothing the game
+    can observe. The mission gets its ground back the same way: the frame at
+    the first chatter box has continuous sand to the horizon, the camp's
+    tents, trucks and soldiers, the smoke column and the sky, laid out as
+    in the PPSSPP frame at t=77 s -- and the translucent AC across the
+    foreground is in the reference too, the game's own effect, not a depth
+    bug. Still missing there is the light-blue fog. The three replays are
+    unchanged in what the game does: title-idle 5,406 / 874,060,
+    skip-intro 7,506 / 2,280,256, mission-1 5,376 / 19,007,445 with
+    `stop` at 1790, all at 0 bad accesses; M1's gate holds at `stop` 6000,
+    18,006 lists, 6,003 finishes, 0 bad (305 s of raster, so give it a
+    drain of several hundred seconds); ctest 13/13.
+
+    The sweep holds at 137 MATCH with one row moved: `utility/msgdialog/
+    dialog.prx` went from DIFFER 139 to NOOUTPUT, and NOOUTPUT is the
+    verdict to distrust. It is a host segfault -- `psp_read32` handed a
+    non-null pointer for guest `0x09FEF9F4`, a heap address just under the
+    top partition, from `exec_simple` on a guest thread -- deterministic at
+    the full budget, and it reproduces on the fork's committed HEAD with
+    every uncommitted change stashed, so it is neither the clipper nor
+    item 33's work. It is not new either: the 2 Sep commit records the
+    same DIFFER-to-NOOUTPUT move, and item 33's sweep had it back at
+    DIFFER, so the crash comes and goes between runs.
+    `cpu/vfpu/vector.prx` dies the same way at 800M (the "line 4452"
+    death), and under gdb it does not crash but parks with two guest
+    threads alive after the 10 s wait, so a race is in it somewhere. Both
+    are one bug to chase in `psp_mem_ptr`'s bounds against the interp's
+    mapping, and it gates the only oracle for `vidt`/`vrot`.
+
+    Two traps: `scripts/07-autotests.sh` must be given an **absolute** test
+    directory -- a relative one silently reports every test as NO OUTPUT and
+    empties its `reports/07-*.got`, which is how this session lost the
+    previous vector.prx comparison -- and a `git stash` in the fork to
+    bisect leaves HEAD's binaries in `build/` after the pop; rebuild before
+    measuring anything else.
+
