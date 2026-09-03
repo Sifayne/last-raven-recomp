@@ -225,12 +225,19 @@ typedef struct {
 
 static SDL_AudioDeviceID g_audio_dev;
 static mix_ring g_mix[MIX_CHANNELS];
-/* PSPRECOMP_AUDIO_LEAD_MS: how far a channel may run ahead before its blocking
- * output is made to wait. PSPRECOMP_AUDIO_PREROLL_MS: what it must hold before
- * it plays, and again after running dry. Both are knobs for listening, since
- * a headless run cannot hear: raise the pre-roll if the report shows gaps
- * longer than it. */
-static uint32_t g_audio_target_frames  = 44100 / 2;
+/* How far a channel may run ahead of the speaker before its blocking output
+ * is made to wait. Hardware's answer is two of the channel's own buffers:
+ * sceAudioOutputBlocking returns when the previous buffer has finished
+ * playing, so at most the one playing and the one queued are ever in
+ * flight. That is also the sound-to-picture latency, and this used to be
+ * half a second -- the game's movie player takes its sound thread as the
+ * clock, that thread ran half a second ahead of the speaker, and the picture
+ * followed the decode while the sound arrived later: Sif saw the intro out
+ * of sync. Two buffers it is, but never less than the pre-roll, since a
+ * channel cannot start until it holds that much. PSPRECOMP_AUDIO_LEAD_MS
+ * overrides it, and PSPRECOMP_AUDIO_PREROLL_MS the pre-roll, for listening
+ * without a rebuild. */
+static uint32_t g_audio_target_frames  = 0;      /* 0: two of the channel's buffers */
 static uint32_t g_audio_preroll_frames = 4096;
 static int      g_audio_warned_fmt;
 
@@ -323,7 +330,9 @@ static int64_t present_audio(int ch, uint32_t samples, uint32_t fmt,
     const int64_t queued = m->count;
     SDL_UnlockAudioDevice(g_audio_dev);
 
-    const int64_t over = queued - (int64_t)g_audio_target_frames;
+    int64_t allow = g_audio_target_frames ? g_audio_target_frames : 2 * (int64_t)samples;
+    if (allow < (int64_t)g_audio_preroll_frames) allow = g_audio_preroll_frames;
+    const int64_t over = queued - allow;
     if (over <= 0) return 0;
     const int64_t us = over * 1000000 / 44100;
     return us > 100000 ? 100000 : us;          /* never claim more than 100ms */

@@ -4045,3 +4045,57 @@ faithful execution of that test.
     cadence), both at 0 bad accesses; and the video test rows of the sweep
     do not move.
 
+41. **The intro's sound and picture: three clocks, three faults** (3 Sep).
+    Sif, after the pops were gone: "it appears that it's out of sync with
+    the video". Headless with `PSPRECOMP_REALTIME=1` and two new lines in
+    the boot summary -- the movie's audio clock against its picture clock
+    at each decoded frame, and each stream's stamps against the wall clock
+    between its first and last fetch -- the intro read: picture 49.0 s of
+    stamps over 67.8 s of wall clock, sound 64.4 s over the same, and the
+    audio clock 6 ms ahead of the picture at the first frame and 6 s
+    ahead by the end. Three things, each its own fault.
+
+    The picture clock was invented. The demuxer discarded the PES
+    timestamps and stamped every picture at 25 fps from its frame count --
+    a comment in the file said so -- and the intro is 29.97 fps, so its
+    picture clock ran 12% slow against a sound clock that was right, and
+    the player, pacing on the stamps, showed each frame later than its
+    sound. The PES timestamps are kept now: a 33-bit field in the PES
+    header when its flag says so, and only 125 of the intro's 12,000 video
+    PES carry one, so each is anchored to where in the elementary stream
+    its PES began, a picture whose data holds an anchor takes it, and the
+    pictures between anchors are spaced by the frame duration measured
+    from the first anchor to the latest (33.40 ms; two adjacent anchors a
+    dozen frames apart gave 35.6). The audio's first stamp seeds the
+    audio clock, which then advances 4180 ticks a frame exactly, since
+    every ATRAC3+ frame is 2048 samples. The stream begins at 90000 and
+    85069, one second in, which is what a PSMF does.
+
+    The sound was throttled to the wrong thing. Under real-time pacing the
+    picture fetched at 72% of real time, and the reason was in the census:
+    284 million sceMpegRingbufferAvailableSize calls, the game's reader
+    polling a full ring in a hot loop -- one firmware call each, and each
+    a scheduling point, and the host's time went to the loop. A poll that
+    finds the ring seven-eighths full now sleeps 8 ms of guest time: the
+    same answer later, and the picture fetches at 98.5%. A millisecond
+    was tried and cost 1.5% in thread handoffs; half a frame was tried and
+    starved the ring. And the mixer let a channel run half a second ahead
+    of the speaker, which was half a second of latency between a picture
+    and its sound, since the player takes the sound thread as its clock;
+    hardware's blocking output lets two buffers queue, and so does the
+    mixer now, with the pre-roll as the floor. The headless model of the
+    speaker had the same defect the other way -- a flat wait of a buffer
+    per call ran the sound at 91% -- and is a virtual speaker now, drained
+    at 44.1kHz, the call waiting only for the excess over two buffers.
+
+    Where it stands, measured twice with PPSSPP and a browser running
+    beside it: picture 53.1 s of stamps over 53.9 s of wall clock (98.5%),
+    sound 54.3 s over the same, frame 33.40 ms; the audio clock leads the
+    picture by -8 ms at the first frame, 550 ms at picture 250 and then
+    150 ms more per 250 pictures, 1.3 s at the last. The first step is the
+    player's own pre-buffer -- it fetches half a second of sound before it
+    starts the picture, and would on hardware -- and the slope is the
+    picture path's 1.5%, which is the host's speed and M5's. What this
+    item closes is the 12% and the 28%; what it leaves is a second over
+    the length of the intro.
+
