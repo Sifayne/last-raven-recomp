@@ -210,18 +210,39 @@ static void publish_pad(void) {
  * callback fills with silence: the popping Sif heard through the intro. A
  * pre-roll of 4096 frames is 93 ms of slack against that jitter, paid once as
  * latency at the start of each stream. */
-enum { MIX_CHANNELS = 8, MIX_RING_FRAMES = 44100 * 8, MIX_PREROLL = 4096 };
+enum { MIX_CHANNELS = 8, MIX_RING_FRAMES = 44100 * 8 };
 typedef struct {
     int16_t *pcm;
     uint32_t head, tail, count;
     int      playing;          /* holds a pre-roll, or has not run dry since */
-    uint32_t pushed, dropped, underruns;
+    uint32_t pushed, dropped, underruns, silence;
+    /* Push timing, for the report: when the first and last pushes came, the
+     * longest wait between two, and how many waits were longer than the
+     * pre-roll -- each of those a gap the pre-roll could not cover. */
+    uint64_t first_ms, last_ms, max_gap_ms;
+    uint32_t long_gaps;
 } mix_ring;
 
 static SDL_AudioDeviceID g_audio_dev;
 static mix_ring g_mix[MIX_CHANNELS];
-static uint32_t g_audio_target_frames = 44100 / 2;   /* half a second ahead */
+/* PSPRECOMP_AUDIO_LEAD_MS: how far a channel may run ahead before its blocking
+ * output is made to wait. PSPRECOMP_AUDIO_PREROLL_MS: what it must hold before
+ * it plays, and again after running dry. Both are knobs for listening, since
+ * a headless run cannot hear: raise the pre-roll if the report shows gaps
+ * longer than it. */
+static uint32_t g_audio_target_frames  = 44100 / 2;
+static uint32_t g_audio_preroll_frames = 4096;
 static int      g_audio_warned_fmt;
+
+static uint32_t env_ms_frames(const char *name, uint32_t dflt_frames) {
+    const char *v = getenv(name);
+    if (!v || !*v) return dflt_frames;
+    const long ms = strtol(v, NULL, 10);
+    if (ms < 0) return dflt_frames;
+    uint64_t f = (uint64_t)ms * 44100u / 1000u;
+    if (f >= MIX_RING_FRAMES / 2) f = MIX_RING_FRAMES / 2;
+    return (uint32_t)f;
+}
 
 /* The device callback: runs on SDL's audio thread with the device lock held,
  * which is the lock present_audio takes to push. */
@@ -234,11 +255,12 @@ static void audio_callback(void *ud, Uint8 *stream, int len) {
         for (int ch = 0; ch < MIX_CHANNELS; ch++) {
             mix_ring *m = &g_mix[ch];
             if (!m->playing) {
-                if (m->count < MIX_PREROLL) continue;
+                if (m->count < g_audio_preroll_frames) { if (m->pushed) m->silence++; continue; }
                 m->playing = 1;
             } else if (!m->count) {
                 m->playing = 0;
                 m->underruns++;
+                m->silence++;
                 continue;
             }
             l += m->pcm[m->tail * 2];
@@ -276,7 +298,15 @@ static int64_t present_audio(int ch, uint32_t samples, uint32_t fmt,
     if (lvol > 0x8000) lvol = 0x8000;
     if (rvol > 0x8000) rvol = 0x8000;
 
+    const uint64_t now = SDL_GetTicks64();
     SDL_LockAudioDevice(g_audio_dev);
+    if (!m->first_ms) m->first_ms = now;
+    else {
+        const uint64_t gap = now - m->last_ms;
+        if (gap > m->max_gap_ms) m->max_gap_ms = gap;
+        if (gap * 44100u / 1000u > g_audio_preroll_frames) m->long_gaps++;
+    }
+    m->last_ms = now;
     for (uint32_t i = 0; i < samples; i++) {
         int32_t sl, sr;
         if (mono) { sl = sr = (int16_t)psp_read16(buf + i * 2u); }
@@ -334,6 +364,8 @@ static void *sdl_thread(void *arg) {
     want.samples  = 1024;
     want.callback = audio_callback;
     SDL_AudioSpec have;
+    g_audio_target_frames  = env_ms_frames("PSPRECOMP_AUDIO_LEAD_MS",    g_audio_target_frames);
+    g_audio_preroll_frames = env_ms_frames("PSPRECOMP_AUDIO_PREROLL_MS", g_audio_preroll_frames);
     g_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (g_audio_dev) SDL_PauseAudioDevice(g_audio_dev, 0);
     else fprintf(stderr, "present: no audio device: %s\n", SDL_GetError());
@@ -387,8 +419,13 @@ static void *sdl_thread(void *arg) {
                     for (int ch = 0; ch < MIX_CHANNELS; ch++) {
                         const mix_ring *m = &g_mix[ch];
                         if (m->pushed)
-                            fprintf(stderr, "present: audio ch %d  %u frames pushed  %u dropped  %u underruns\n",
-                                    ch, m->pushed, m->dropped, m->underruns);
+                            fprintf(stderr, "present: audio ch %d  %.1f s pushed over %.1f s  %u dropped  "
+                                            "%u underruns (%.2f s of silence)  longest wait between pushes %llu ms, "
+                                            "%u waits longer than the pre-roll\n",
+                                    ch, m->pushed / 44100.0,
+                                    (m->last_ms - m->first_ms) / 1000.0, m->dropped,
+                                    m->underruns, m->silence / 44100.0,
+                                    (unsigned long long)m->max_gap_ms, m->long_gaps);
                     }
                     SDL_UnlockAudioDevice(g_audio_dev);
                 }
