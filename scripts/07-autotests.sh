@@ -60,13 +60,18 @@ HOSTOUT="$HOSTFS/host/__testoutput.txt"
 for f in "${ELFS[@]}"; do
     name="$(basename "$f")"
     # A test's data files live beside it and it opens them by bare name --
-    # audio/atrac's `fopen("sample.at3")` -- which iofilemgr resolves under
-    # the working directory's `disc/`. Link the test's directory there, fresh
+    # audio/atrac's `fopen("sample.at3")`. Link the test's directory in, fresh
     # per test, so a name means the same file it does on the PSP.
+    #
+    # Into both the working directory and its `disc/`, because where a name
+    # without a device resolves is a property of iofilemgr that has changed
+    # once already: it used to be the disc, and is now the process's current
+    # directory, which starts at the root. Linking both places costs two
+    # symlinks and outlives the next such change.
     rm -rf "$HOSTFS/disc"; mkdir -p "$HOSTFS/disc"
     for d in "$(dirname "$f")"/*; do
         case "$d" in *.prx|*.expected|*.c|*.cpp|*.h|*.S|*.compile|*/Makefile) ;;
-                     *) ln -sf "$d" "$HOSTFS/disc/" ;;
+                     *) ln -sf "$d" "$HOSTFS/disc/"; ln -sf "$d" "$HOSTFS/" ;;
         esac
     done
     out="$REPORTS/07-${name%.*}.txt"

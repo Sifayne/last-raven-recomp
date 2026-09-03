@@ -63,10 +63,11 @@ while read -r f; do
     rel="${f#"$TESTS"/}"
     total=$((total + 1))
     rm -rf "$SWEEPFS"; mkdir -p "$SWEEPFS/host" "$SWEEPFS/disc"
-    # The test's data files, by bare name -- see 07-autotests.sh.
+    # The test's data files, by bare name, in both places -- see
+    # 07-autotests.sh for why both.
     for d in "$(dirname "$f")"/*; do
         case "$d" in *.prx|*.expected|*.c|*.cpp|*.h|*.S|*.compile|*/Makefile) ;;
-                     *) ln -sf "$d" "$SWEEPFS/disc/" ;;
+                     *) ln -sf "$d" "$SWEEPFS/disc/"; ln -sf "$d" "$SWEEPFS/" ;;
         esac
     done
     # An `if`, not a bare subshell followed by `rc=$?`: under `set -e` a
