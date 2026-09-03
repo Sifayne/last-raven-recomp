@@ -752,11 +752,14 @@ int main(int argc, char **argv) {
      * layer -- window, pad, audio -- and implies pacing; PSPRECOMP_REALTIME
      * paces a headless run on its own, which is what makes a wall-clock
      * measurement of a real scene honest. */
+    int windowed = 0;
     if (getenv("PSPRECOMP_WINDOW")) {
-        if (present_start() == 0)
+        if (present_start() == 0) {
+            windowed = 1;
             printf("      window    on (SDL2: video, pad, audio; implies real-time pacing)\n");
-        else
+        } else {
             printf("      window    unavailable -- running headless\n");
+        }
     } else if (getenv("PSPRECOMP_REALTIME")) {
         psp_clock_realtime(1);
         printf("      pacing    real-time (headless)\n");
@@ -821,14 +824,37 @@ int main(int argc, char **argv) {
     int live = psp_sched_live();
     printf("  [6] threads   %d spawned by module_start\n", live);
     if (g_guest_exited) printf("      (the guest already exited during entry)\n");
-    /* 60s is the bring-up default: long enough to reach a deadlock, short
-     * enough to stay interactive. A movie is longer than that, so watching
-     * one end needs a bigger window -- PSPRECOMP_DRAIN=<seconds>. */
+    /* How long to let the guest run, most specific first:
+     *
+     *   PSPRECOMP_DRAIN=<seconds>   explicit; 0 or less means no limit
+     *   a window                    no limit -- a person is driving
+     *   the scenario's own header   what that recording needs
+     *   60s                         the headless bring-up default
+     *
+     * The window rule is the one worth explaining. A wall-clock cut in the
+     * middle of someone playing is never what they wanted: it ends the run
+     * exactly where the interesting part was starting, and it looks like a
+     * crash. Closing the window already stops the run properly -- present.c
+     * raises psp_sched_stop_all("window closed"), which wakes the drain and
+     * prints the full report -- so the person at the keyboard is a better
+     * judge of when to stop than a timer is. A scenario carrying a `stop`
+     * still ends on it, window or not.
+     *
+     * Headless keeps its limit, and deliberately: an automated run with no
+     * deadline is a hung machine nobody is watching. */
     int drain_s = 60;
-    if (getenv("PSPRECOMP_DRAIN")) {
-        drain_s = atoi(getenv("PSPRECOMP_DRAIN"));
-        if (drain_s <= 0) drain_s = 60;
-        printf("      drain     %ds (PSPRECOMP_DRAIN)\n", drain_s);
+    const char *drain_env = getenv("PSPRECOMP_DRAIN");
+    if (drain_env && *drain_env) {   /* empty is unset, not "no limit" */
+        drain_s = atoi(drain_env);
+        if (drain_s <= 0) {
+            drain_s = 0;
+            printf("      drain     no limit (PSPRECOMP_DRAIN=0)\n");
+        } else {
+            printf("      drain     %ds (PSPRECOMP_DRAIN)\n", drain_s);
+        }
+    } else if (windowed) {
+        drain_s = 0;
+        printf("      drain     no limit (window open; close it to end the run)\n");
     } else if (psp_ctrl_replay_drain() > 0) {
         /* A scenario knows how long it needs to run -- reaching a menu three
          * screens in takes longer than the 60s bring-up default -- so it

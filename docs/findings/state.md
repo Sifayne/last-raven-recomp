@@ -250,8 +250,12 @@ rather than a stuck one.
 
 Three endings, three signatures. Reading one as another has cost sessions.
 
-- **Deadline.** `psp_sched_drain` gives up after 60 seconds —
-  `PSPRECOMP_DRAIN=<seconds>` widens it — and prints
+- **Deadline.** `psp_sched_drain` gives up after 60 seconds — headless.
+  `PSPRECOMP_DRAIN=<seconds>` widens it, `PSPRECOMP_DRAIN=0` removes it, and
+  **a window removes it by default**: a person is driving, closing the window
+  already ends the run cleanly, and a wall-clock cut lands exactly where the
+  interesting part was starting. Headless keeps its limit deliberately — an
+  automated run with no deadline is a hung machine nobody is watching. Prints
   `still running after 60s` with the live list. Not a deadlock — a run still
   going round. **The decoder run ends here.** Slots saying `running` are what the
   timeout path does: a guest thread cannot be unwound from outside, so the main
@@ -288,7 +292,7 @@ All are off by default and cost nothing when off.
 | `PSPRECOMP_PAD_PRESS=start,15,0.5` | Presses a button at a wall-clock moment — down at `delay` seconds, up `duration` (default 0.5) later. A held button never reads as *pressed*, because a press is a transition. Headless only; in a windowed run the SDL layer owns the pad. |
 | `PSPRECOMP_FRAME=<path>` | Where to write the frame. Defaults to `frame.ppm`, and dumps the GE's render target rather than the scanned-out buffer. |
 | `PSPRECOMP_MPEG_DECODE=1` | Demuxer and openh264 video path. Refused, loudly, in a build without openh264. |
-| `PSPRECOMP_DRAIN=<seconds>` | Widens the scheduler drain past its 60-second default, for runs that are supposed to still be going — a movie, for one. |
+| `PSPRECOMP_DRAIN=<seconds>` | Widens the scheduler drain past its 60-second headless default, for runs that are supposed to still be going — a movie, for one. `0` means no limit, which is also what a window gives you by default. An empty value is unset, not unlimited. |
 | `PSPRECOMP_WINDOW=1` | An SDL2 window, the gamepad and audio out. Implies real-time pacing. The frame is published at `sceDisplaySetFrameBuf` — the flip — because this game never asks for a vblank; hanging the hook off one publishes nothing, which looks exactly like a broken renderer. Closing the window stops the run through the scheduler, so the end-of-run summary still prints. Needs SDL2 at build time; without it the host still builds and says so when asked for a window. |
 | `PSPRECOMP_REALTIME=1` | Real-time pacing without a window, so a wall-clock measurement of a real scene is honest. Ignored when `PSPRECOMP_WINDOW` is set, which already implies it. |
 | `PSPRECOMP_MPEG=1` | Narrates the movie path. Everything it prints is throttled except `RingbufferPut`, which is bounded by the disc read — safe in either configuration. |

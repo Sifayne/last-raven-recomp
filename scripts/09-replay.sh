@@ -20,7 +20,9 @@ usage: scripts/09-replay.sh [options] <scenario.pad> [elf] [iso]
   --record <file>   also write a scenario from what the game actually saw
   --decode          PSPRECOMP_MPEG_DECODE=1 -- required to get past the intro
   --trace           use the PSPRECOMP_TRACE build, so faults name a function
-  --drain <s>       run length; overrides the scenario's own `drain` header
+  --drain <s>       run length; overrides the scenario's own `drain` header.
+                    0 means no limit -- the default under --window, where
+                    closing the window is what ends the run
   --stop <n>        stop the run at the nth bad memory access
   --gdb [n]         SIGTRAP at the nth bad access (default 1) under gdb
   --merge           one interleaved log instead of separate stdout/stderr
