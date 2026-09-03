@@ -4011,3 +4011,37 @@ faithful execution of that test.
     counts when the window closes -- the number to read after the next
     windowed run.
 
+    Sif read it: 67 underruns in 29 s of movie, and still popping. So the
+    gaps were bigger than a pre-roll, and headless with
+    `PSPRECOMP_REALTIME=1` -- the guest clock on the wall clock, no window
+    -- reproduced them through a new line in the boot summary that times
+    each channel's outputs on the host clock: the movie channel's longest
+    wait between two outputs was 1.8 s and 102 of them arrived later than
+    the buffer before them would have played, while the effects channel
+    never waited more than 52 ms. The token was not held that long by
+    anyone; the movie's sound thread was waiting on its own. The census
+    said for what: 85 million sceMpegGetAtracAu calls and 232 million
+    sceMpegRingbufferAvailableSize calls in 75 seconds. The sound thread
+    was spinning on NO_DATA and the reader thread on a ring that read as
+    full, because free packets were computed from the *video* decoder's
+    progress alone -- and the audio is interleaved ahead of the video in
+    the file, so whenever the video fell behind real time the reader
+    stopped putting and the audio ran out. Every refill was a pop.
+
+    A packet is now freed once its faster consumer is past it: each put
+    records where the two elementary streams stood, the decoders' read
+    positions map back through that to ring bytes, and the held count is
+    what the further-along decoder has not taken; one packet stays held
+    until the stream is over, since the game reads an entirely free ring
+    as the movie's end. The same run then reads: longest wait 62 ms, none
+    late, and the GetAtracAu spin gone from the census. The reader
+    thread's polling of AvailableSize remains (284 million calls) -- that
+    is the game's own loop, and it is hot on hardware too; a
+    lower-priority spinner costs this scheduler nothing it would otherwise
+    use. Headless and unpaced the whole intro still decodes, 41.9 s in 903
+    blocks with the six silent ones at its start; title-idle lands on its
+    baseline command count and skip-intro within 261 commands of its own
+    (2,280,517 against 2,280,256 -- the reader now puts on a different
+    cadence), both at 0 bad accesses; and the video test rows of the sweep
+    do not move.
+

@@ -894,6 +894,7 @@ int main(int argc, char **argv) {
         printf("threads:  %s\n",
                live == 0 ? "all finished" : "still alive (see the deadlock report above)");
     printf("bad mem:  %llu accesses\n", (unsigned long long)psp_mem_bad_access);
+    if (psp_clock_is_realtime()) psp_audio_dump_gaps(stdout);
     psp_mem_dump_bad(stdout, g_bad_top);
     if (g_bad_snapshot && g_bad_snapshot[0]) {
         /* Taken at the first bad access rather than read here. The HLE's
