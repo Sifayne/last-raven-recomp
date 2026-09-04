@@ -4750,3 +4750,51 @@ faithful execution of that test.
 
     No regression: the software bar is unchanged, 433 lists / 1,613,365
     commands on the hangar with 0 bad accesses, ctest 13/13.
+
+53. **The GL backend's state: depth, scissor, masks, blending, alpha test**
+    (3 Sep). M5's second increment, and the one that turns a white rectangle
+    into a picture.
+
+    **What was wrong before.** Nothing, mechanically -- item 52 verified every
+    stage of the pipeline independently. The frame was white because a frame
+    was every primitive painted in submission order with the last one winning.
+    Depth is what stops submission order deciding the picture, and it was the
+    single largest of the missing pieces.
+
+    Implemented: the depth test and depth writes, with window depth carried as
+    a third vertex component on the PSP's 0..65535 scale; the scissor,
+    converted from the GE's inclusive top-left corners to GL's bottom-left
+    box; the colour and alpha write masks, which is how clear mode says which
+    buffers it touches and why an ordinary draw leaves the alpha byte alone;
+    alpha blending, mapping the GE's factors and equations; and the alpha test
+    as a fragment discard, since GL 3.3 core removed the fixed-function one.
+
+    **Every state setter flushes first.** The batch is by construction all one
+    state; without the flush a state change would apply retroactively to
+    geometry already sitting in the buffer. This is the reason `finish()`
+    mattered (item 52) and the reason `set_target` is the one setter that does
+    not claim a context -- ge.c calls it while the register is still being
+    assembled, long before any drawing.
+
+    **Result on the hangar**: one colour to 105, mean 255 to 49.7, against the
+    software path's 1,893 colours and mean 25.2. The whole remaining gap is
+    texturing: the software path samples textures and this draws flat vertex
+    colours. No blend factor or equation in the scene fell outside what GL can
+    represent, which the summary would have counted if one had.
+
+    **Two things counted rather than approximated.** The doubled blend factors
+    (GE codes 6-9) and the absolute-difference equation (code 5) have no GL
+    equivalent; so does the stencil, which on this hardware *is* the
+    framebuffer's alpha byte rather than a separate buffer. All three need the
+    shader. A wrong factor renders a plausible picture and a counted one is a
+    number in the report, which is the difference that matters when the
+    software path is the oracle.
+
+    **And a limit on the comparison itself.** Software's blend term is
+    `((c+1)*f) >> 8` -- measured from `gpu/commands/blend`, exact, and not
+    GL's `c*f/255`. Through a blend the two differ by up to one level per
+    channel no matter how correct the backend is. Structure and brightness are
+    comparable; bit-exactness is not, and expecting it would send someone
+    hunting a bug that is arithmetic.
+
+    Software bar unchanged, ctest 13/13.
