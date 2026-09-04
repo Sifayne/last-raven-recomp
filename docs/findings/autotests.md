@@ -5004,3 +5004,39 @@ faithful execution of that test.
     mip/cache result. The PSP port's ~30 fps game loop is therefore distinct
     from the panel's ~60 Hz scanout; two SetFrameBuf calls per rendered game
     frame must not be reported as 60 fps.
+
+59. **The capture's black framebuffer was the chosen frame, not a broken copy**
+    (4 Sep). The last open piece of M5's fixed-list prerequisite was a false
+    diagnosis, made precise enough to replace rather than merely retract.
+
+    **The copy is exact.** A bounded probe counted each display buffer on both
+    sides of the capture `memcpy`. Through ordinary menu frames the live and
+    copied counts matched at 391,680 non-zero bytes apiece, then both fell to
+    zero together during the transition. The old `big.gcap` was written from
+    the first frame after `MINCMDS=5000` became true, and that candidate's two
+    source buffers were genuinely all zero.
+
+    **Black is the correct replay of that list.** Its centre-pixel trace first
+    draws the room, then an opaque full-screen black pass, then a white pass
+    with source and destination factor 0. On the GE those are destination- and
+    source-colour factors: white makes the last pass double the destination.
+    Starting from a populated previous frame produces the bright transition;
+    starting from black remains black. The replay's 986,338 reported writes
+    were real, but the final RGB value was zero by construction.
+
+    **Frame selection now expresses both requirements.** The existing
+    `PSPRECOMP_GE_CAPTURE_MINCMDS` still rejects trivial compositor frames.
+    `PSPRECOMP_GE_CAPTURE_MINMEAN` additionally measures visible RGB only in
+    display-sized render targets that actually received primitives, excluding
+    unrelated VRAM textures, row padding and stencil alpha. It understands all
+    four target formats and is opt-in, so a deliberately black capture remains
+    possible. From hangar boundary 300, thresholds 5000 commands and RGB mean
+    8 reject transition candidates from mean 0.00 through 7.91 and accept one
+    list with 14,806 commands at mean 9.95.
+
+    That capture is readable through both backends. They execute the same
+    command, primitive and vertex counts and reproduce the same hangar, menus
+    and floor. Software's output mean is 0.05362 and GL's 0.05220; their RMSE
+    is 374.760 on 16-bit ImageMagick's scale, 0.005718 normalized. The fixed-list
+    comparison gate therefore has a visual oracle now, not only matching
+    counters.

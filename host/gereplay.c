@@ -10,8 +10,10 @@
  * It is also what M5's gate asks for in as many words -- "pixel-comparable to
  * the software path on a fixed set of display lists".
  *
- *   PSPRECOMP_GE_CAPTURE=frame.gcap PSPRECOMP_GE_CAPTURE_FRAME=310 \
- *       scripts/09-replay.sh --decode scenarios/hanger.pad
+ *   PSPRECOMP_GE_CAPTURE=frame.gcap PSPRECOMP_GE_CAPTURE_FRAME=300 \
+ *   PSPRECOMP_GE_CAPTURE_MINCMDS=5000 PSPRECOMP_GE_CAPTURE_MINMEAN=8 \
+ *       scripts/09-replay.sh --decode --env PSPRECOMP_RENDER=gl \
+ *       scenarios/hanger.pad
  *   build/host/gereplay frame.gcap software out-sw.ppm
  *   build/host/gereplay frame.gcap gl       out-gl.ppm
  *

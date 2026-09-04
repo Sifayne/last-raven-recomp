@@ -409,9 +409,15 @@ pixel-comparable to the software path on a fixed set of display lists
   Vulkan later if it earns it -- the interface is what makes that cheap.
 - **Prerequisites.** Runtime selection is **done** (3 Sep):
   `PSPRECOMP_RENDER` selects the backend and an unknown name is fatal.
-  Display-list capture plus `host/gereplay.c` are also **done** (4 Sep); the
-  remaining capture defect is that its saved framebuffer region replays empty,
-  so it proves command equivalence but does not yet yield a readable scene.
+  Display-list capture plus `host/gereplay.c` are also **done** (4 Sep), now
+  including readable scene selection. The alleged empty-framebuffer copy was
+  the first large list after a fade: its source buffers really were black, and
+  its final destination-colour doubling pass correctly kept them black.
+  `PSPRECOMP_GE_CAPTURE_MINCMDS` selects substantial work and the new
+  `PSPRECOMP_GE_CAPTURE_MINMEAN` can additionally wait for a minimum visible
+  RGB mean. Starting the hangar search at frame 300 with limits 5000 and 8
+  captures one 14,806-command scene; software and GL replay the same primitive
+  and vertex counts into readable frames at normalized RMSE 0.00572.
   Still standing: `psp_render_raster_ns` is cumulative rather than per-frame,
   and `ge.c`'s pixel/depth counters are software-backend concepts that read
   zero under another backend.
