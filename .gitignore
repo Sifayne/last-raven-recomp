@@ -80,3 +80,6 @@ __testoutput.txt
 __testerror.txt
 __testfinish.txt
 host/__test*.txt
+
+# GE captures: guest memory images, tens of megabytes, and game data
+*.gcap

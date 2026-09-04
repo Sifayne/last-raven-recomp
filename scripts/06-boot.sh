@@ -83,10 +83,21 @@ if [ -z "$SDL_DEF" ]; then
     PRESENT="$OUT/render_gl.o"
 fi
 
+# gereplay: one captured frame through a chosen backend. Built beside the boot
+# host because it shares the presentation layer -- the gl backend needs a
+# window wherever it runs.
+info "compiling gereplay"
+cc -O2 -std=gnu11 $SDL_DEF ${SDL_DEF:+$(pkg-config --cflags sdl2)} \
+   -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
+   -c "$ROOT/host/gereplay.c" -o "$OUT/gereplay.o"
+
 info "linking"
 cc "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT \
    "$OUT/aclr_funcs.o" "$OUT/aclr_imports.o" "$LIB" \
    -o "$OUT/boot" -lm -lpthread $HOST_LIBS
+
+cc "$OUT/gereplay.o" $PRESENT "$LIB" \
+   -o "$OUT/gereplay" -lm -lpthread $HOST_LIBS
 
 # Build without running, so 09-replay.sh reuses this recipe instead of copying
 # it. The recipe is worth not duplicating: it probes SDL2 *before* compiling
