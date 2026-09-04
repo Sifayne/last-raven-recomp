@@ -92,7 +92,12 @@ int main(int argc, char **argv) {
             "\n"
             "Replays one captured frame of GE work into a backend and writes\n"
             "the render target as a PPM. Backends: software, null, gl (gl\n"
-            "needs a window, so it needs a display).\n");
+            "needs a window, so it needs a display).\n"
+            "\n"
+            "A fourth argument overrides which buffer is written, as hex. The\n"
+            "GE's target at the end of a frame is not always the one the frame\n"
+            "drew into -- this game alternates two display buffers -- and the\n"
+            "per-target primitive counts in the summary say which is wanted.\n");
         return 2;
     }
     const char *path = argv[1], *backend = argv[2], *out = argv[3];
@@ -155,6 +160,7 @@ int main(int argc, char **argv) {
      * did -- the whole reason the capture carries state at all. */
     psp_ge_init();
     psp_ge_state_load(state);
+    psp_ge_sync_backend();
 
     for (uint32_t i = 0; i < h.n_lists; i++)
         psp_ge_replay_list(lists[i].list, lists[i].stall, lists[i].base);
@@ -164,10 +170,30 @@ int main(int argc, char **argv) {
 
     uint32_t addr = 0, stride = 0; int fmt = 3;
     psp_ge_current_target(&addr, &stride, &fmt);
+    if (argc > 4) addr = (uint32_t)strtoul(argv[4], NULL, 16);
     printf("gereplay: %u list(s) through %s, target %08X stride %u fmt %d\n",
            h.n_lists, psp_render_current()->name, addr, stride, fmt);
     psp_ge_dump_stats(stdout);
     render_gl_report(stdout);
 
+    if (getenv("GEREPLAY_SCAN")) {
+        /* Where did the pixels actually go? Scan both guest regions in 64K
+         * blocks and name the ones that are not all zero. */
+        const struct { const char *n; uint32_t base, size; } regs[] = {
+            { "vram", h.vram_base, h.vram_bytes },
+            { "ram",  h.ram_base,  h.ram_bytes  },
+        };
+        for (size_t r = 0; r < 2; r++) {
+            for (uint32_t o = 0; o + 0x10000 <= regs[r].size; o += 0x10000) {
+                const uint8_t *p8 = psp_mem_ptr(regs[r].base + o, 0x10000);
+                if (!p8) continue;
+                uint32_t nz = 0;
+                for (uint32_t i = 0; i < 0x10000; i++) if (p8[i]) nz++;
+                if (nz > 4096)
+                    printf("  %s %08X: %u non-zero bytes of 65536\n",
+                           regs[r].n, regs[r].base + o, nz);
+            }
+        }
+    }
     return write_ppm(out, addr, stride ? stride : 512, fmt);
 }

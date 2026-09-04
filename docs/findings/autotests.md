@@ -4929,3 +4929,46 @@ faithful execution of that test.
     GL; blend factor 0 (a doubling) is the first suspect; block transfers,
     batch overflow, the alpha test, depth accumulation and texture-cache
     staleness are all ruled out.
+
+57. **The capture tool works; its memory image does not yet** (4 Sep). The
+    replay half of M5's third prerequisite is sound and the capture half has a
+    known, bounded defect. Recorded because the four wrong answers on the way
+    are each a trap.
+
+    **Working.** `gereplay <capture> <backend> <out.ppm>` replays a captured
+    frame with no ELF, no disc and no scheduler. On the hangar it runs the
+    identical **10,101 commands** through software and GL -- same list, same
+    memory, same starting registers -- and both report the same primitive and
+    vertex counts. That is the pacing-free comparison item 56 said was needed.
+
+    **The four things that had to be right**, each of which was wrong first
+    and is now a comment where it matters:
+    - *The stall must not be recorded.* At submission the game has usually
+      released no words, so a recorded stall equals the start and the replay
+      executes zero commands.
+    - *The list address must be recorded at submission*, not after. The
+      deferred GE advances the pointer as words are released, so replaying
+      from the post-enqueue value runs off the end -- 2^23 commands and no END.
+    - *The module image is a third memory region.* `psp_mem_ptr` checks it
+      before RAM and VRAM and this game's display lists live inside it, so a
+      capture of RAM and VRAM alone resolves every list address to nothing.
+    - *Restored state has to be pushed at the backend.* `psp_ge_state_load`
+      tells the GE what it believes; the backend learns the target only from a
+      register *write*. Without `psp_ge_sync_backend` the replay reported
+      986,346 pixels written while every buffer read black, because they went
+      to wherever the backend was last pointed.
+
+    **The defect.** The captured VRAM image has an empty framebuffer even
+    though the live run has 391,680 non-zero bytes in it at the moment the
+    snapshot is taken -- measured, on both display buffers, immediately after
+    the `memcpy` that fills the capture's buffer. The textures in the same
+    VRAM image come through intact, so the copy is happening; it is the
+    framebuffer region specifically that arrives empty. Not yet explained, and
+    it is why a replayed frame renders black in both backends rather than
+    showing the hangar.
+
+    **What that does and does not block.** The comparison is still valid --
+    both backends replay the same commands against the same memory, so a
+    difference between them is still a real difference. What is missing is a
+    replay that looks like the frame it came from, which is what makes the
+    result readable. Fix the memory image before using this to chase the floor.
