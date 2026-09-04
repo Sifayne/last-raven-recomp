@@ -4575,3 +4575,18 @@ faithful execution of that test.
     candidates. Recorded rather than explained, because 261 is small enough to
     shrug at and constant enough not to be random, which is the profile of
     most of the bugs in this file.
+
+    **M3's gate, measured.** The gate asks for music and effects audible in a
+    windowed run on the garage screen, and *audible* is not something a
+    headless run can answer -- but *generated* is. `garage.pad` under
+    `PSPRECOMP_AUDIO_DUMP` writes three channels of non-silent PCM: ch3 at
+    15.7 s with a zero-crossing rate of 0.075, which is the shape of music,
+    and ch1/ch2 at 5.5 s and 4.0 s with ZCR 0.252 and 0.294, which is the
+    shape of effects. The same run calls `__sceSasCore` 2,712 times; under
+    `PSPRECOMP_ATRAC_LOG=1` it opens three tracks and runs 125 `DecodeData`
+    with two `SetLoopNum`, so the music is decoding and looping. Both
+    generators are live in the scene the gate names. **Sif confirmed the
+    listening half the same day**: the game's audio is fully audible windowed
+    and sounds correct, nothing standing out as wrong. M3 is struck. The dump
+    is not made redundant by that -- it is what makes the claim re-checkable
+    after every later change, which is the half an ear cannot provide.

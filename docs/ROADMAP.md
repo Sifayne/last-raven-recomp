@@ -242,10 +242,32 @@ within one level in all three: means 36/36, 39/38, 91/91. The composites are in
 -- affine interpolation and no dithering against a compressed capture -- and
 speed, both M5's.
 
-## M3 — Sound
+## M3 — Sound ✅ 3 Sep
 
-**Gate.** Music and effects audible in a windowed run on the garage screen.
-`audio/atrac` and `audio/sascore` worked targeted, per the policy below.
+**Gate — passed, in two halves.** Music and effects audible in a windowed run
+on the garage screen; `audio/atrac` and `audio/sascore` worked targeted.
+
+The measured half, 3 Sep (findings item 49): `garage.pad` replayed headless
+under `PSPRECOMP_AUDIO_DUMP` writes **three channels of non-silent PCM** —
+15.7 s at ZCR 0.075 on ch3, which is the shape of music, and 5.5 s and 4.0 s
+at ZCR 0.25/0.29, which is the shape of effects. The same run calls
+`__sceSasCore` 2,712 times and, under `PSPRECOMP_ATRAC_LOG=1`, opens three
+tracks and runs 125 `DecodeData` with two `SetLoopNum`. So both generators are
+running in the scene the gate names, and both are producing signal rather than
+silence.
+
+**The listening half, 3 Sep: Sif confirms the game's audio is fully audible
+windowed and sounds correct, with nothing standing out as wrong.** That is the
+half a dump cannot carry — a headless run has no speaker, and the numbers
+above prove sound is *generated* and mixed, not that it comes out. The two
+halves do different jobs and the milestone needed both: the ear is what made
+the claim true, and the dump is what makes it re-checkable after every later
+change.
+
+`audio/sascore` is twelve of twelve byte-exact. `audio/atrac` matches on every
+value in decode, setdata, addstreamdata and atractest; what still differs is
+`sceAtracReinit`'s states and a streaming seek, neither of which this game
+reaches — see the leftovers below.
 
 - **ATRAC3+ through FFmpeg's `libavcodec`** — `find_library(avcodec)`,
   `PSPRECOMP_HAVE_FFMPEG`, dynamically linked, optional: the same shape as
@@ -282,12 +304,21 @@ invented at 25 fps (items 40, 41), and the host's remaining 1.5% is paid by
 dropping a late picture rather than showing it, which holds the two together
 within a frame across the whole intro. A movie can now reach its end, which
 nothing had done before: the player waits for the ring buffer to read empty
-and deadlocks if it never does (item 42). Still to do here: the context structure stream.prx prints
-(`_sceAtracGetContextAddress`), which would turn on the streaming oracle; the
-seek tests. And a cleanup worth doing
-once: with libavcodec linked,
-its H.264 decoder can replace openh264 for the video and leave one optional
-dependency instead of two.
+and deadlocks if it never does (item 42).
+
+**What is left here, and why none of it blocks** (surveyed 3 Sep, item 49).
+`_sceAtracGetContextAddress` is absent, and it is the one call `stream.prx`
+needs before the streaming oracle will run at all — worth it only if a track
+ever has to stream. `sceAtracSetSecondBuffer` is absent too, and both
+spellings of `GetBufferInfoForRese[t]ting` are registered and refuse
+deliberately; `ResetPlayPosition` is real but in-memory only. That whole
+cluster is the seek tests, and `hle/atrac.c` records the reason to leave it:
+**this game imports both reset calls and invokes neither**, so the work would
+buy oracle rows and nothing the player can hear. The one cleanup worth doing
+once — libavcodec's H.264 replacing openh264, leaving one optional dependency
+instead of two — is small and contained (`CMakeLists.txt` L85–93, and three
+sites in `hle/mpeg.c`); do it in M6's pass rather than paying a context switch
+for it now.
 
 ## M4 — Saves ✅ 3 Sep
 
