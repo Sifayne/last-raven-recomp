@@ -413,6 +413,15 @@ pixel-comparable to the software path on a fixed set of display lists
   counters are software-backend concepts that read zero under any other
   backend.
 - Frame pacing on the vblank grid the clock already owns.
+- **The framebuffer plan, from the census** (item 50). Own a GL colour buffer
+  for the display pair -- 99.88% of drawing -- and present by blitting it,
+  with no guest memory in the path. Switch to an FBO-backed texture for the
+  one off-screen target, which is two switches a run. Read back into guest
+  memory *lazily*: nothing forces a per-frame `glReadPixels`, but the
+  project's own instruments (`score_frame` and `dump_frame_seq` in
+  `display.c`, `dump_framebuffer` and `survey_vram` in boot.c, and the frame
+  comparison that passed the M2 gate) all read guest framebuffer memory, and
+  a backend that never writes it makes every one of them blind.
 - **Build the 1x path, but know it is the 1x path.** See M7: the interface
   hands the backend screen-space vertices that `ge.c` has already transformed
   and quantized, which is the right input for matching the oracle and the
@@ -462,11 +471,15 @@ benefits. Decide it when M5's 1x backend works and is exact, not before.
 guest's framebuffer must stay 480x272 whatever the GPU renders at, because the
 game reads and writes it: movie frames are decoded into it, the 2D layer is
 drawn into it, and the stencil *is* its alpha byte. Every readback and every
-CPU write has to reconcile with a scaled GPU-side buffer. **Unmeasured, and
-the first thing to measure:** whether this game ever points `FBP` anywhere
-other than its two display buffers (`0x04000000` and `0x04088000` in the
-mission run). If it never renders to texture, high resolution is dramatically
-simpler here than in a general emulator. One instrumented run answers it.
+CPU write has to reconcile with a scaled GPU-side buffer.
+
+**Measured 3 Sep (findings item 50), and the answer is favourable.** Across
+six scenarios the game draws into its two display buffers and into exactly one
+other surface: `0x04154000`, stride 256, format 5551, entered at most twice a
+run and never taking more than 552 primitives -- 0.12% of the mission's
+drawing. It appears only in the scenes that show an AC. So scaling has one
+auxiliary target to think about rather than an open-ended set, which is the
+difference between this and a general emulator.
 
 **A higher frame rate is not a faster present.** The game paces itself against
 elapsed time and its own loop; presenting more often does not make it simulate

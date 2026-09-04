@@ -4603,3 +4603,57 @@ faithful execution of that test.
     exist", "no clipper", "one texture function of five", and savedata
     writing nothing). It is the first thing a session reads, which makes it
     the worst place in the tree to let drift.
+
+50. **M5's first prerequisites: a backend can be named, and the render targets
+    are counted** (3 Sep). Two pieces, both about being able to say what a run
+    did before there is a second backend to say it about.
+
+    **`PSPRECOMP_RENDER` picks the backend.** `RENDERER.md` had described the
+    backend as "chosen at run time" since 20 Jul while `psp_render_select` had
+    exactly one caller outside the unit tests: none. So the software rasterizer
+    was the only backend a real run could ever have had. An unknown name now
+    exits 2 and prints the names it would have taken -- read from
+    `psp_render_backend_name(i)`, not from a second copy of the list. A warning
+    would have been worse than useless: `psp_render_select` leaves the current
+    backend in place and returns -1, so continuing runs software while the
+    operator believes otherwise and files every number under the wrong backend.
+    A set-but-empty value is unset, as `PSPRECOMP_AUDIO_DUMP` has it. `init()`
+    is called once the backend is chosen; `present()` and `shutdown()` stay
+    unwired, and `shutdown()` would not run reliably if it were -- boot.c skips
+    its teardown whenever a guest thread is still live, the common case.
+
+    **Does this game render to texture?** The question decides how a GPU
+    backend handles the framebuffer, and the summary could not answer it: its
+    `framebuffer 0x%08X` line reports the *last* FBP, not a census. Counting
+    that line across old reports looked like an answer and was not -- it only
+    said which buffer each run happened to end on. `ge.c` now keeps a census of
+    distinct (address, stride, format) targets with the primitives drawn into
+    each, attributed to whichever target was current at `GE_PRIM`.
+
+    **The answer: one small off-screen target, in three scenes.**
+
+    | scenario | display pair | off-screen |
+    |---|---|---|
+    | title-idle | 8,390 / 8,386 | -- |
+    | hanger | 19,794 / 19,422 | -- |
+    | new-game | 576,126 / 575,778 | -- |
+    | main-menu | 71,650 / 71,743 | `0x04154000` 280 |
+    | garage | 103,582 / 104,101 | `0x04154000` 552 |
+    | mission-1 | 231,904 / 231,788 | `0x04154000` 552 |
+
+    Always the same address, stride 256, format 1 (5551), entered at most twice
+    a run, never more than 552 primitives -- 0.12% of the mission's drawing.
+    It appears only in the scenes that show an AC and never in the title, the
+    hangar room or the settings panel, which is the correlation to check first
+    if anyone needs to know what it is. So a GL backend needs FBO switching,
+    but for one small auxiliary surface rather than the general
+    render-to-texture machinery an emulator carries.
+
+    **Read the second number, not the first.** The census reports "14 seen, 3
+    drawn into" because `FBP`, `FBW` and the pixel format arrive as three
+    separate GE commands, so every half-updated combination registers as a
+    target and draws nothing. The first count is an artifact of how the
+    registers are written; the second is the measurement.
+
+    No regression from either change: all seven replay rows identical to the
+    baseline in `8f50501`, 0 bad accesses, ctest 13/13.
