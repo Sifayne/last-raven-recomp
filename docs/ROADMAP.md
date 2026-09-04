@@ -413,6 +413,12 @@ pixel-comparable to the software path on a fixed set of display lists
   counters are software-backend concepts that read zero under any other
   backend.
 - Frame pacing on the vblank grid the clock already owns.
+- **Build the 1x path, but know it is the 1x path.** See M7: the interface
+  hands the backend screen-space vertices that `ge.c` has already transformed
+  and quantized, which is the right input for matching the oracle and the
+  wrong input for rendering at a higher internal resolution. Do not try to
+  retrofit scaling onto it; M5's gate is a pixel comparison, and that gate is
+  only meaningful at 1x.
 
 ## M6 — Ship shape
 
@@ -431,6 +437,54 @@ pixel-comparable to the software path on a fixed set of display lists
   so this is preventive.
 - Upstream: the PRs drafted in [upstream/README.md](upstream/README.md), in
   its suggested order.
+
+## M7 — The PC port's own settings
+
+Sif's aspiration, recorded 3 Sep: a settings screen for the things a
+recompilation can offer that the hardware never could — internal resolution
+above 480x272, frame rates above the panel's, and whatever else earns a row.
+Nothing here is scheduled. It is written down because three of its
+consequences are cheap to allow for now and expensive to retrofit, and one of
+them lands inside M5.
+
+**The vertex interface is the software rasterizer's shape.** `psp_vertex`
+carries **12.4 fixed-point screen-space** positions: `ge.c` has already done
+model, view, projection and the viewport, and quantized to a sixteenth of a
+PSP pixel. Scaling those to 4x gives geometry at quarter-of-a-target-pixel
+precision — PSP-precision geometry enlarged, not higher-resolution geometry.
+A real internal-resolution path wants the transform done in float by the
+backend, from untransformed vertices and the matrices, which is a *second*
+input path rather than a change to this one. Through-mode geometry is already
+in screen space on hardware and stays as it is; transformed 3D is what
+benefits. Decide it when M5's 1x backend works and is exact, not before.
+
+**Framebuffer aliasing is what actually makes high resolution hard.** The
+guest's framebuffer must stay 480x272 whatever the GPU renders at, because the
+game reads and writes it: movie frames are decoded into it, the 2D layer is
+drawn into it, and the stencil *is* its alpha byte. Every readback and every
+CPU write has to reconcile with a scaled GPU-side buffer. **Unmeasured, and
+the first thing to measure:** whether this game ever points `FBP` anywhere
+other than its two display buffers (`0x04000000` and `0x04088000` in the
+mission run). If it never renders to texture, high resolution is dramatically
+simpler here than in a general emulator. One instrumented run answers it.
+
+**A higher frame rate is not a faster present.** The game paces itself against
+elapsed time and its own loop; presenting more often does not make it simulate
+more often, and a fixed-timestep game misbehaves if its tick is changed. The
+tractable near-term piece is making sure nothing assumes 60 and that present
+rate and emulation rate are separable. Anything beyond that is interpolation
+or unlocking the game's loop, which is research, not a milestone step.
+
+**A settings screen implies a configuration layer, and that is cheap now.**
+Configuration today is 41 distinct `PSPRECOMP_*` environment variables read by
+`getenv` at 11 call sites across the host and the runtime, each with its own
+parsing and its own idea of what an empty value means. A settings screen needs
+one place that holds defaults, validates, and reports what is in force — with
+environment variables as one source that populates it rather than as the
+mechanism itself. Introducing that structure and migrating call sites
+opportunistically costs little; retrofitting it across 41 scattered reads
+later costs a lot. **The rule from here: a new option goes through the
+configuration layer, not into a new `getenv`.**
 
 ## The autotests policy
 
