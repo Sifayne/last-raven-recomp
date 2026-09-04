@@ -413,6 +413,16 @@ pixel-comparable to the software path on a fixed set of display lists
   counters are software-backend concepts that read zero under any other
   backend.
 - Frame pacing on the vblank grid the clock already owns.
+- **The backend lives in the host, and the context on the GE thread** (3 Sep,
+  findings item 51). SDL2 is the host's by policy, so a backend needing a
+  window cannot live in the runtime; `psp_render_register()` is the seam, and
+  it refuses a backend missing any of the twelve entry points. The GE is
+  driven by **exactly one host thread** -- measured, and now reported in every
+  run -- so the SDL thread creates window and context and releases it, the GE
+  thread claims it, and present swaps from there. No command queue. A GL
+  backend must fail loudly if that thread ever changes. One consequence:
+  GL needs a window even when hidden, so software-versus-GL comparison runs on
+  a desktop, and the software path stays the CI oracle.
 - **The framebuffer plan, from the census** (item 50). Own a GL colour buffer
   for the display pair -- 99.88% of drawing -- and present by blitting it,
   with no guest memory in the path. Switch to an FBO-backed texture for the

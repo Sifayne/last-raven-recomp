@@ -4657,3 +4657,47 @@ faithful execution of that test.
 
     No regression from either change: all seven replay rows identical to the
     baseline in `8f50501`, 0 bad accesses, ctest 13/13.
+
+51. **Where a GL backend lives, and on which thread** (3 Sep). Two questions
+    that had to be answered before writing any GL, both of which turned out to
+    have measurable answers rather than architectural ones.
+
+    **It lives in the host.** `tools/psprecomp/CMakeLists.txt` states the
+    policy in its header: the core has no external dependencies on purpose and
+    SDL2 and friends only ever appear behind an opt-in option. A GL backend
+    needs a window and a context, so it belongs on the host side with the SDL
+    layer that already owns them -- which the runtime had no way to accept.
+    `psp_render_register()` is that seam. It refuses a backend missing any of
+    the twelve entry points, because the interface is twelve calls precisely so
+    that a backend cannot quietly not implement one, and the alternative to
+    checking at registration is a crash at whichever call it forgot,
+    arbitrarily far from the mistake. `test_raster.c` covers it with a probe
+    backend and needs no GPU; removing the duplicate-name check fails the
+    suite, so the test is not vacuous.
+
+    **The context belongs on the GE thread, because there is only one.** SDL
+    runs on its own thread (`host/present.c` spawns it) and owns the window,
+    the renderer and the event loop, while display lists execute on whichever
+    guest thread submitted them -- and a GL context belongs to exactly one
+    thread. That is the difference between holding a context and building a
+    command queue, and it was an assumption nobody had checked. Measured with
+    a census in `run_list`: **one host thread**, 864 lists in the hangar and
+    3,584 in the mission, all from the same one. (The list counts are about
+    twice the GE list counts because the deferred GE runs a list at enqueue
+    and again when Sync drains it.)
+
+    So: the SDL thread creates the window and the context and releases it with
+    `SDL_GL_MakeCurrent(win, NULL)`; the GE thread claims it on first use and
+    keeps it; `present()` swaps from there. The census is permanent rather than
+    a one-off, because the assumption is load-bearing -- if a second thread
+    ever drives the GE, every report says so -- and a GL backend must fail
+    loudly on a thread change rather than issue calls against a context that
+    is not current.
+
+    **What this costs: headless GL.** A GL backend needs a window even if
+    hidden, so software-versus-GL comparison runs on a desktop rather than in
+    CI. That does not weaken the oracle arrangement: what must keep working
+    with no GPU is the software backend, and it does.
+
+    No regression from either instrument: hanger and mission-1 identical to
+    the baseline in `8f50501`, 0 bad accesses, ctest 13/13.
