@@ -4798,3 +4798,57 @@ faithful execution of that test.
     hunting a bug that is arithmetic.
 
     Software bar unchanged, ctest 13/13.
+
+54. **The hangar's missing floor: what it is not, and where it stands**
+    (3 Sep). Open. Recorded because the eliminations cost more than the
+    remaining work will, and repeating them would be the waste.
+
+    **The symptom.** With the GL backend the hangar renders its UI, its text
+    and the upper structures, and the floor and lower walls are black. Software
+    has a lit grating floor. 1,246 colours against 1,893; mean 12.0 against
+    25.2; RMSE 0.069.
+
+    **The room geometry is correct, and that is proven.** Each frame opens with
+    a full-screen textured sprite drawn with blending *off* -- 128x128 5650
+    texture at `0x0416C000`, MODULATE, vertex colour `0x00202000`, colour mask
+    on, full-screen scissor, depth test off. Skip that one draw and the whole
+    room appears: walls, beams, pillars, floor grating, correctly textured and
+    correctly depth-sorted (2,511 colours, mean 21.9). So texturing, depth, the
+    transform and the geometry are all working; something about that single
+    pass differs between the backends.
+
+    **Eliminated, each by measurement:**
+    - *The alpha test.* Disabling it entirely changes nothing.
+    - *Depth accumulation.* Clearing depth every frame makes it slightly worse
+      (991 colours), so far geometry is not being z-rejected.
+    - *A stale texture cache.* Textures in VRAM are re-uploaded on every bind
+      now (24,478 times in this scene); the frame is unchanged.
+    - *The other full-screen passes.* Skipping the two 50%-black overlays or
+      the two doubling passes does not restore the room.
+    - *The sprite's colour source.* Software takes a sprite's colour from the
+      second vertex (`sw_sprite`, `b->rgba`) and so does this backend.
+
+    **Fixed on the way, and needed regardless: one framebuffer per render
+    target.** A single shared FBO was wrong. The game double-buffers and then
+    composites -- some frames contain nothing but five full-screen passes and
+    no scene geometry at all -- so with one FBO a compositing frame painted
+    over the frame that had drawn the room. There are now separate colour and
+    depth attachments per target address (two in the hangar, matching item
+    50's census), a texture bound at a target's address samples that target
+    rather than being uploaded, and every dirtied target is read back at the
+    flip so the instruments in `display.c` and `boot.c` all see true pixels.
+    This did not fix the floor either -- and the counter says why: **zero
+    textures were sampled from a render target**, so the compositing pass is
+    not reading a buffer the GE drew into.
+
+    **Where to look next.** `0x0416C000` is VRAM but is not a render target,
+    so its texels arrive some other way -- the GE's block transfer is the
+    obvious candidate (`psp_ge_dump_stats` counts transfers) and it runs in
+    `ge.c` independently of the backend, so guest memory there should already
+    be right. Confirm that first: dump what the GL path decodes from
+    `0x0416C000` and compare it against what the software path samples, using
+    `PSPRECOMP_TEXDUMP`. If they differ the decode is the bug; if they agree,
+    the difference is in how the pass composites and the next suspect is the
+    blend-off write itself.
+
+    Software bar unchanged throughout, ctest 13/13.

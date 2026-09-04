@@ -158,7 +158,26 @@ static int gl_load(void) {
  * is possible, which is a wrong picture rather than a crash -- recorded here
  * so it is looked for rather than discovered.
  */
-enum { TEXCACHE_MAX = 512, TEXEL_CAP = 512 * 512 };
+enum { TEXCACHE_MAX = 512, TEXEL_CAP = 512 * 512, RT_MAX = 8 };
+
+/* One framebuffer object per render target.
+ *
+ * A single shared FBO was wrong in a way that took a while to see. This game
+ * double-buffers and then composites: it draws the room into one display
+ * buffer, and in a later frame draws a handful of full-screen passes that read
+ * that buffer back. With one FBO those two live in the same pixels, so the
+ * compositing frame painted over the room and the hangar came back as walls
+ * with no floor. The census in findings item 50 said three targets are drawn
+ * into; this gives each its own colour and depth.
+ *
+ * A texture bound at a target's address samples that target's colour texture
+ * rather than being uploaded from guest memory, which is what makes the
+ * read-back-and-composite pattern work at all. */
+typedef struct {
+    int      used, dirty;
+    uint32_t addr;
+    GLuint   fbo, colour, depth;
+} rendertarget;
 
 typedef struct {
     int      used;
@@ -201,8 +220,12 @@ static struct {
     int      clut_fmt, clut_shift, clut_mask, clut_start;
     GLuint   bound;
 
+    rendertarget rts[RT_MAX];
+    int      n_rts, cur_rt;
+    uint64_t rt_overflow;
+
     texcache_entry cache[TEXCACHE_MAX];
-    uint64_t tex_uploads, tex_hits, tex_evictions, tex_too_big;
+    uint64_t tex_uploads, tex_hits, tex_evictions, tex_too_big, tex_vram_uploads, tex_from_rt;
 
     float   *batch;          /* x, y, r, g, b, a per vertex */
     size_t   batch_n;
@@ -384,6 +407,39 @@ static int build_fbo(void) {
     return 0;
 }
 
+/* Find the target for an address, creating it the first time. Targets are few
+ * -- the census found three across six scenarios -- so a linear scan is the
+ * right shape and the overflow counter is what says if that ever stops being
+ * true. */
+static int rt_for(uint32_t addr) {
+    for (int i = 0; i < g.n_rts; i++)
+        if (g.rts[i].addr == addr) return i;
+    if (g.n_rts >= RT_MAX) { g.rt_overflow++; return g.cur_rt; }
+
+    const int i = g.n_rts++;
+    rendertarget *r = &g.rts[i];
+    r->addr = addr; r->used = 1;
+
+    p_glGenFramebuffers(1, &r->fbo);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    p_glGenTextures(1, &r->colour);
+    p_glBindTexture(GL_TEXTURE_2D, r->colour);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g.w, g.h, 0,
+                   GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, r->colour, 0);
+    p_glGenRenderbuffers(1, &r->depth);
+    p_glBindRenderbuffer(GL_RENDERBUFFER, r->depth);
+    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, g.w, g.h);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                GL_RENDERBUFFER, r->depth);
+    if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        fprintf(stderr, "gl: framebuffer for target %08X is incomplete\n", addr);
+    return i;
+}
+
 /* Claim the context, once, on whichever thread the GE turns out to be. Every
  * entry point goes through here, so a call arriving on a second thread is
  * caught at the boundary rather than as corruption inside the driver. */
@@ -407,7 +463,7 @@ static int claim(void) {
     if (present_gl_make_current() != 0 || gl_load() != 0) { g.failed = 1; return -1; }
     g.thread = me;
 
-    if (build_program() != 0 || build_fbo() != 0) { g.failed = 1; return -1; }
+    if (build_program() != 0) { g.failed = 1; return -1; }
 
     p_glGenVertexArrays(1, &g.vao);
     p_glBindVertexArray(g.vao);
@@ -434,6 +490,10 @@ static int claim(void) {
     fprintf(stderr, "gl: context claimed on thread %lu, %dx%d target\n",
             me, g.w, g.h);
     g.ready = 1;
+    /* Whatever the GE last named, or the primary display buffer if it has not
+     * named one yet -- a target has to exist before the first draw. */
+    g.cur_rt = rt_for(g.target_addr ? g.target_addr : 0x04000000u);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
     return 0;
 }
 
@@ -453,6 +513,10 @@ static void gl_target(uint32_t addr, uint32_t stride, int fmt) {
      * run that never draws it would otherwise create a context for nothing. */
     if (g.ready) flush();
     g.target_addr = addr; g.target_stride = stride; g.target_fmt = fmt;
+    if (g.ready && addr) {
+        g.cur_rt = rt_for(addr);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
+    }
 }
 
 /* Every setter flushes what is pending before recording. A state change
@@ -471,6 +535,15 @@ static GLenum gl_filter(int f) { return (f & 1) ? GL_LINEAR : GL_NEAREST; }
 
 static GLuint texcache_get(const psp_tex_state *t) {
     if (!t->addr || t->w <= 0 || t->h <= 0) return 0;
+    /* Bound at a render target's address: sample that target's colour rather
+     * than uploading from guest memory, which under GL never received the
+     * pixels in the first place. This is the read-back-and-composite pattern
+     * the hangar's post-processing frame uses. */
+    for (int i = 0; i < g.n_rts; i++)
+        if (g.rts[i].used && g.rts[i].addr == t->addr) {
+            g.tex_from_rt++;
+            return g.rts[i].colour;
+        }
     if ((size_t)t->w * (size_t)t->h > TEXEL_CAP) { g.tex_too_big++; return 0; }
 
     size_t slot = ((size_t)t->addr >> 4) ^ ((size_t)t->w * 31u)
@@ -478,7 +551,19 @@ static GLuint texcache_get(const psp_tex_state *t) {
                 ^ ((size_t)g.clut_addr >> 3);
     slot %= TEXCACHE_MAX;
 
-    for (size_t probe = 0; probe < 8; probe++) {
+    /* A texture living in VRAM is one the GE can be drawing into, so its
+     * texels are not a function of its address -- they change whenever the
+     * game re-renders that buffer. The hangar's backdrop is exactly this: a
+     * full-screen sprite sampling 0x0416C000, which the game refreshes every
+     * frame. Cached, it served the first upload forever and painted a stale
+     * (black) backdrop over the room, which read as "the floor is missing".
+     *
+     * Re-uploading on every bind is the honest version and cheap here: these
+     * are few and small. A dirty-region signal from the GE would be better and
+     * needs the interface to carry one. */
+    const int in_vram = (t->addr & 0xFF000000u) == 0x04000000u;
+
+    for (size_t probe = 0; !in_vram && probe < 8; probe++) {
         texcache_entry *e = &g.cache[(slot + probe) % TEXCACHE_MAX];
         if (e->used && e->addr == t->addr && e->w == t->w && e->h == t->h &&
             e->fmt == t->fmt && e->stride == t->stride &&
@@ -493,7 +578,7 @@ static GLuint texcache_get(const psp_tex_state *t) {
     /* Every probe taken: reuse the first, which is a cheap eviction rather than
      * an LRU. If this counter climbs the table is too small or the key is too
      * loose, and the number says which. */
-    g.tex_evictions++;
+    if (!in_vram) g.tex_evictions++;
 upload: {
     texcache_entry *e = &g.cache[slot];
     static uint32_t *texels;
@@ -518,6 +603,7 @@ upload: {
     e->clut_shift = g.clut_shift; e->clut_mask = g.clut_mask;
     e->clut_start = g.clut_start;
     g.tex_uploads++;
+    if (in_vram) g.tex_vram_uploads++;
     return e->tex;
 }
 }
@@ -739,7 +825,8 @@ static void apply_state(void) {
 
 static void flush(void) {
     if (!g.ready || g.batch_n == 0) return;
-    p_glBindFramebuffer(GL_FRAMEBUFFER, g.fbo);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
+    g.rts[g.cur_rt].dirty = 1;
     p_glViewport(0, 0, g.w, g.h);
     p_glUseProgram(g.prog);
     p_glUniform2f(g.u_viewport, (float)g.w, (float)g.h);
@@ -800,16 +887,27 @@ static void gl_present(void) {
     if (claim() != 0) return;
     flush();
 
-    /* The off-screen target, scaled into whatever size the window is now. */
-    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g.fbo);
+    /* The current target, scaled into whatever size the window is now. */
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     p_glBlitFramebuffer(0, 0, g.w, g.h, 0, 0, g.w * 2, g.h * 2,
                         GL_COLOR_BUFFER_BIT, GL_LINEAR);
     present_gl_swap();
 
-    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g.fbo);
-    readback();
-    p_glBindFramebuffer(GL_FRAMEBUFFER, g.fbo);
+    /* Read every target that has been drawn into since the last flip. The
+     * instruments in display.c and boot.c all read guest memory, and which
+     * buffer they read is not this backend's to know -- so all of them are
+     * made true rather than guessing at one. */
+    const uint32_t save_addr = g.target_addr;
+    for (int i = 0; i < g.n_rts; i++) {
+        if (!g.rts[i].dirty) continue;
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g.rts[i].fbo);
+        g.target_addr = g.rts[i].addr;
+        readback();
+        g.rts[i].dirty = 0;
+    }
+    g.target_addr = save_addr;
+    p_glBindFramebuffer(GL_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
 }
 
 static const psp_render_backend gl_backend = {
@@ -837,10 +935,16 @@ void render_gl_report(FILE *out) {
         fprintf(out, " -- %llu draw(s), %llu vertices, %llu readback(s)",
                 (unsigned long long)g.draws, (unsigned long long)g.verts,
                 (unsigned long long)g.readbacks);
+    fprintf(out, "\n          targets: %d%s", g.n_rts,
+            g.rt_overflow ? " (more than the table holds)" : "");
+    for (int i = 0; i < g.n_rts; i++)
+        fprintf(out, " %08X", g.rts[i].addr);
     fprintf(out, "\n          textures: %llu upload(s), %llu hit(s), %llu eviction(s),"
-                 " %llu too big",
+                 " %llu too big, %llu from VRAM, %llu sampled from a target",
             (unsigned long long)g.tex_uploads, (unsigned long long)g.tex_hits,
-            (unsigned long long)g.tex_evictions, (unsigned long long)g.tex_too_big);
+            (unsigned long long)g.tex_evictions, (unsigned long long)g.tex_too_big,
+            (unsigned long long)g.tex_vram_uploads,
+            (unsigned long long)g.tex_from_rt);
     if (g.unsupported_prims)
         fprintf(out, ", %llu point/line draw(s) skipped",
                 (unsigned long long)g.unsupported_prims);
