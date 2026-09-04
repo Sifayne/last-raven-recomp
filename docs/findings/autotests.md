@@ -4891,3 +4891,41 @@ faithful execution of that test.
     term and "source colour" for the destination term, which is a doubling,
     and a doubling that does not compound is exactly a picture that never gets
     bright.
+
+56. **The floor hunt hits the limit of probe-based debugging** (3 Sep). Open,
+    and the honest conclusion is that the next step is a tool rather than
+    another probe.
+
+    **What this round added.** Per-frame draw counts from the GL backend, over
+    the hangar: 864 presents against 433 GE lists, so `present()` fires
+    **twice per display list** -- the game sets the frame buffer twice a frame
+    and `display.c` hooks both. **433 of those presents contain zero draws.**
+    That is harmless as things stand, because only targets dirtied since the
+    last flip are read back, so an empty present cannot overwrite a good
+    buffer with a stale one. It is recorded because it makes "frame N" mean
+    two different things depending on whether you are counting presents or
+    dumped images, which is what defeated the attempt below.
+
+    **Why the frame-level probes stalled.** Item 55 located the divergence at
+    dumped frame 310, where software goes flat near-white and GL does not. The
+    obvious follow-up -- trace that frame's draws in GL -- does not work,
+    because the GL run is windowed and therefore real-time paced while the
+    software run is unpaced, so the backend's present counter and the dump
+    index drift apart over three hundred frames. Tracing GL's frames 309-311
+    shows ordinary UI frames of 45, 45 and 30 draws; they are not the same
+    frames the dumps numbered 309-311.
+
+    **So the tool is the blocker, and it is one already named.** M5's third
+    prerequisite is display-list capture and replay, deferred at the start as
+    "needed the moment you want the mission scene". It is needed sooner than
+    that: it is what would let one frame's exact list run through both
+    backends and be diffed, which is the measurement this bug wants and the
+    only one that removes pacing from the comparison entirely. Every probe
+    since item 54 has been an attempt to work around not having it.
+
+    **Still standing from items 54 and 55**, so it is not re-derived: the
+    geometry, textures, depth and transform agree across 250 frames; the
+    difference is one full-screen pass that goes bright in software and not in
+    GL; blend factor 0 (a doubling) is the first suspect; block transfers,
+    batch overflow, the alpha test, depth accumulation and texture-cache
+    staleness are all ruled out.
