@@ -402,14 +402,16 @@ pixel-comparable to the software path on a fixed set of display lists
   Vulkan's; the old plan's first increment is what `host/present.c` already
   does in SDL2; and SDL3 would land on the audio callback M3's gate rests on.
   Vulkan later if it earns it -- the interface is what makes that cheap.
-- **Four prerequisites, none of them the backend**, and all missing:
-  `psp_render_select` is called from `test_raster.c` and nowhere else, so
-  wire it to an environment variable in `host/boot.c`; `psp_render_raster_ns`
-  is cumulative and printed once per run, which cannot show 60 fps; the gate's
-  "fixed set of display lists" has no capture or replay tool, since
-  `09-replay.sh` replays controller input and `PSPRECOMP_FRAMES` dumps
-  finished images; and `ge.c`'s pixel and depth counters are software-backend
-  concepts that read zero under any other backend.
+- **Four prerequisites, none of them the backend.** The first is **done**
+  (3 Sep): `psp_render_select` was called from `test_raster.c` and nowhere
+  else, and is now wired to `PSPRECOMP_RENDER` in `host/boot.c`, with an
+  unknown name fatal rather than a silent fall back to software. The other
+  three stand: `psp_render_raster_ns` is cumulative and printed once per run,
+  which cannot show 60 fps; the gate's "fixed set of display lists" has no
+  capture or replay tool, since `09-replay.sh` replays controller input and
+  `PSPRECOMP_FRAMES` dumps finished images; and `ge.c`'s pixel and depth
+  counters are software-backend concepts that read zero under any other
+  backend.
 - Frame pacing on the vblank grid the clock already owns.
 
 ## M6 — Ship shape

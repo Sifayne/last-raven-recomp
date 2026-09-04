@@ -33,6 +33,7 @@
 #include "psprecomp/sched.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
+#include "psprecomp/render.h"
 #include "psprecomp/vfpu.h"
 
 #include <setjmp.h>
@@ -759,6 +760,39 @@ int main(int argc, char **argv) {
      * layer -- window, pad, audio -- and implies pacing; PSPRECOMP_REALTIME
      * paces a headless run on its own, which is what makes a wall-clock
      * measurement of a real scene honest. */
+    /* PSPRECOMP_RENDER picks the presentation backend. Until now nothing
+     * outside tests/test_raster.c called psp_render_select, so the software
+     * backend was the only one a real run could ever have -- "chosen at run
+     * time" in RENDERER.md was an aspiration, not a fact.
+     *
+     * An unknown name is fatal rather than a warning. psp_render_select leaves
+     * the current backend in place and returns -1, so continuing would run the
+     * software rasterizer while the operator believed they had asked for
+     * something else, and every number the run produced would be attributed to
+     * the wrong backend. That is the shape of failure this project keeps
+     * finding: a call that quietly answers something other than what was
+     * asked. */
+    const char *render = getenv("PSPRECOMP_RENDER");
+    if (render && !*render) render = NULL;   /* set-but-empty means unset,
+                                              * as PSPRECOMP_AUDIO_DUMP has it */
+    if (render && psp_render_select(render) != 0) {
+        fprintf(stderr, "unknown render backend \"%s\"\navailable:", render);
+        for (size_t i = 0; psp_render_backend_name(i); i++)
+            fprintf(stderr, " %s", psp_render_backend_name(i));
+        fprintf(stderr, "\n");
+        return 2;
+    }
+    /* Chosen or defaulted, the backend gets its init(). Both current backends
+     * return 0 without doing anything; a windowed one will not. */
+    enum { SCREEN_W = 480, SCREEN_H = 272 };   /* the PSP's panel, fixed */
+    if (psp_render_current()->init(SCREEN_W, SCREEN_H) != 0) {
+        fprintf(stderr, "render backend \"%s\" failed to initialise\n",
+                psp_render_current()->name);
+        return 1;
+    }
+    printf("      render    %s%s\n", psp_render_current()->name,
+           render ? " (PSPRECOMP_RENDER)" : " (default)");
+
     int windowed = 0;
     if (getenv("PSPRECOMP_WINDOW")) {
         if (present_start() == 0) {
