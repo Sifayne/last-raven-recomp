@@ -4852,3 +4852,42 @@ faithful execution of that test.
     blend-off write itself.
 
     Software bar unchanged throughout, ctest 13/13.
+
+55. **The hangar floor, narrowed: the two backends agree until one bright pass
+    goes missing** (3 Sep). Still open, but much smaller than item 54 left it.
+
+    **Frame-by-frame is the instrument that moved it.** `PSPRECOMP_FRAMES=<p>`
+    with `PSPRECOMP_FRAMES_EVERY=1` dumps every presented frame; running it
+    under both backends and comparing means index by index shows they are the
+    **same picture** for the first ~250 frames -- 3.5/3.5, 4.6/4.6, 9.8/9.8,
+    14.0/14.0 -- with a two-frame phase offset that is the windowed run's
+    real-time pacing and nothing else. Both produce 400 frames and both have
+    242 with content.
+
+    **Then, at frame 310, software goes from mean 16.0 to 214.0** -- a flat
+    near-white full-screen fill with no geometry in it -- and decays back down
+    over the next thirty frames (214, 213, 210, 205, 198, 188, 174, 164, 141,
+    125, 118...). GL stays flat at 17.3 through all of it and never brightens.
+
+    So this is not the geometry, the textures, the depth or the transform,
+    all of which item 54 already cleared and this confirms across 250 frames.
+    **One full-screen pass produces a bright result in software and not in
+    GL**, and everything downstream of it -- the dark floor, the missing
+    lit grating, mean 12.0 against 25.2 -- follows from that.
+
+    **Also ruled out this round:** the GE's block transfer (the hangar performs
+    none; `psp_ge_dump_stats` prints the transfer line only when it does), and
+    batch overflow (zero, once counted).
+
+    **Fixed while looking:** `push()` returned when the vertex batch was full,
+    silently discarding geometry. Nothing in this scene hit it, but a wrong
+    picture with no symptom is the failure mode this file is mostly about, so
+    it flushes and counts instead.
+
+    **Next.** The frame the divergence starts on is now known, so the question
+    is answerable directly: trace the passes of frame 310 alone under both
+    backends and find the one whose result differs. The blend arithmetic is
+    the first suspect -- GE factor 0 is "destination colour" for the source
+    term and "source colour" for the destination term, which is a doubling,
+    and a doubling that does not compound is exactly a picture that never gets
+    bright.

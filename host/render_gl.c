@@ -230,7 +230,7 @@ static struct {
     float   *batch;          /* x, y, r, g, b, a per vertex */
     size_t   batch_n;
 
-    uint64_t draws, verts, unsupported_prims, readbacks;
+    uint64_t draws, verts, unsupported_prims, readbacks, batch_overflows;
 } g;
 
 enum { FLOATS_PER_VERT = 9 };   /* x, y, z, r, g, b, a, u, v */
@@ -647,7 +647,10 @@ static void gl_blend(const psp_blend_state *b) {
 static void gl_fog(int enable, uint32_t colour) { (void)enable; (void)colour; }
 
 static void push(const psp_vertex *v) {
-    if (g.batch_n + 1 > GL_MAX_VERTS) return;
+    /* Flush rather than drop. Returning here silently discarded geometry the
+     * moment a frame's batch passed the cap, which is a wrong picture with no
+     * symptom -- exactly the failure this project keeps naming. */
+    if (g.batch_n + 1 > GL_MAX_VERTS) { flush(); g.batch_overflows++; }
     float *o = g.batch + g.batch_n * FLOATS_PER_VERT;
     /* 12.4 fixed point to pixels. The quarter-pixel this throws away is the
      * PSP's own precision, not ours -- see ROADMAP M7 on why that caps the
@@ -945,6 +948,9 @@ void render_gl_report(FILE *out) {
             (unsigned long long)g.tex_evictions, (unsigned long long)g.tex_too_big,
             (unsigned long long)g.tex_vram_uploads,
             (unsigned long long)g.tex_from_rt);
+    if (g.batch_overflows)
+        fprintf(out, ", %llu batch flush(es) from overflow",
+                (unsigned long long)g.batch_overflows);
     if (g.unsupported_prims)
         fprintf(out, ", %llu point/line draw(s) skipped",
                 (unsigned long long)g.unsupported_prims);
