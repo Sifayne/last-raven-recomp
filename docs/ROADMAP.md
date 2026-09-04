@@ -394,9 +394,13 @@ item 43.
 
 ## M5 — A GPU backend, and real time
 
-**Gate.** The M2 mission scene at 60 fps at native resolution, and
-pixel-comparable to the software path on a fixed set of display lists
-(`test_raster` plus the scenario frame dumps).
+**Gate — passed (4 Sep).** The M2 mission scene renders at native resolution
+with 0.81 ms mean / 2.85 ms maximum measured draw-plus-blit time, comfortably
+inside a 60 fps budget; the title itself presents new game frames at ~30 fps.
+On a fixed 14,806-command display list, GL is pixel-comparable to the software
+oracle at 122,818/130,560 exact pixels and 0.001168 normalized RMSE, with only
+seven pixels differing by more than two channel levels (`test_raster` plus the
+scenario frame dumps).
 
 - Behind the `psp_render_backend` interface that already exists
   (`tools/psprecomp/docs/RENDERER.md`). The software path stays the oracle.
@@ -417,7 +421,8 @@ pixel-comparable to the software path on a fixed set of display lists
   `PSPRECOMP_GE_CAPTURE_MINMEAN` can additionally wait for a minimum visible
   RGB mean. Starting the hangar search at frame 300 with limits 5000 and 8
   captures one 14,806-command scene; software and GL replay the same primitive
-  and vertex counts into readable frames at normalized RMSE 0.00572.
+  and vertex counts into readable frames. Its initial normalized RMSE of
+  0.00572 falls to 0.001168 after the exact arithmetic work below.
   Still standing: `psp_render_raster_ns` is cumulative rather than per-frame,
   and `ge.c`'s pixel/depth counters are software-backend concepts that read
   zero under another backend.
