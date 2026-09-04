@@ -122,6 +122,8 @@ int main(int argc, char **argv) {
     if (!ram || !vram) return die("guest memory does not match the capture");
     if (fread(ram,  h.ram_bytes,  1, f) != 1) return die("short RAM image");
     if (fread(vram, h.vram_bytes, 1, f) != 1) return die("short VRAM image");
+    psp_mem_mark_write(h.ram_base, h.ram_bytes);
+    psp_mem_mark_write(h.vram_base, h.vram_bytes);
     /* The module image is mapped outside the RAM window and psp_mem_ptr looks
      * there first, so without it every list address in this game resolves to
      * nothing at all. */
@@ -131,6 +133,7 @@ int main(int argc, char **argv) {
         void *mod = psp_mem_ptr(h.mod_base, h.mod_bytes);
         if (!mod) return die("module region did not map");
         if (fread(mod, h.mod_bytes, 1, f) != 1) return die("short module image");
+        psp_mem_mark_write(h.mod_base, h.mod_bytes);
     }
     fclose(f);
 

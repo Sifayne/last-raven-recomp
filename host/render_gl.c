@@ -15,19 +15,20 @@
  * one ever appears this refuses loudly rather than issuing calls against a
  * context that is not current.
  *
- * SCOPE, and what this deliberately does not do yet. This is the first
- * increment: untextured geometry with vertex colours, no depth test, no
- * blending, no scissor. Those arrive with the oracle to check them against.
- * State the interpreter sets is recorded and ignored rather than approximated,
- * because a backend that silently half-implements a rule is worse than one that
- * has not implemented it -- the software path is exact on all of them and is
- * what this gets diffed against.
+ * The backend translates triangles, strips, fans and sprites at native PSP
+ * resolution, including texture decode/cache, perspective UVs, the full mip
+ * chain and the measured PSP LOD/filter rules, depth, scissor, blending, alpha
+ * test and fog. The software path remains the oracle it is diffed against.
+ * Points, lines, the alpha-backed stencil and blend operations without a fixed
+ * GL equivalent stay explicitly counted below rather than approximated.
  */
 
 #include "present.h"
 #include "psprecomp/render.h"
 #include "psprecomp/mem.h"
+#include "psprecomp/os.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -151,14 +152,18 @@ static int gl_load(void) {
  * applied to the index. Two bindings with the same key decode identically, so
  * one upload serves both.
  *
- * What this does NOT do yet is notice the game overwriting a texture in place
- * at the same address. That is real (render-to-texture is one way it happens,
- * and the census in item 50 found one such target) and it needs an
- * invalidation signal the interface does not carry. Until then a stale entry
- * is possible, which is a wrong picture rather than a crash -- recorded here
- * so it is looked for rather than discovered.
+ * The key is paired with the guest-memory generation of every byte range the
+ * decoder can read. CPU stores, GE copies and render-target readbacks advance
+ * those generations, so an in-place update reuses the GL texture object but
+ * uploads fresh texels. A global serial makes the common no-write case O(1);
+ * page ranges are scanned only after guest memory changed somewhere.
  */
-enum { TEXCACHE_MAX = 512, TEXEL_CAP = 512 * 512, RT_MAX = 8 };
+enum {
+    TEXCACHE_MAX = 512,
+    TEXCACHE_PROBES = 32,
+    TEXEL_CAP = 512 * 512,
+    RT_MAX = 8
+};
 
 /* One framebuffer object per render target.
  *
@@ -174,16 +179,21 @@ enum { TEXCACHE_MAX = 512, TEXEL_CAP = 512 * 512, RT_MAX = 8 };
  * rather than being uploaded from guest memory, which is what makes the
  * read-back-and-composite pattern work at all. */
 typedef struct {
-    int      used, dirty;
-    uint32_t addr;
+    int      used, dirty, configured;
+    uint32_t addr, stride;
+    int      fmt, w, h;
     GLuint   fbo, colour, depth;
 } rendertarget;
 
 typedef struct {
     int      used;
     uint32_t addr, stride, clut_addr;
-    int      w, h, fmt, swizzled;
+    int      w, h, fmt, swizzled, max_level, uploaded_top;
+    uint32_t lv_addr[8], lv_stride[8];
+    int      lv_w[8], lv_h[8];
     int      clut_fmt, clut_shift, clut_mask, clut_start;
+    uint64_t content_generation, validated_serial;
+    uint64_t last_used;
     GLuint   tex;
 } texcache_entry;
 
@@ -200,6 +210,8 @@ static struct {
     GLuint   prog, vao, vbo, fbo, colour, depth;
     GLint    u_viewport, u_atest, u_aref;
     GLint    u_texenable, u_texfunc, u_tcc, u_double, u_env, u_tex;
+    GLint    u_minfilter, u_magfilter, u_wraps, u_wrapt, u_miptop;
+    GLint    u_fogenable, u_fogcolour;
 
     uint32_t target_addr, target_stride;
     int      target_fmt;
@@ -210,6 +222,8 @@ static struct {
      * flushes what is pending first. */
     int      sc_x0, sc_y0, sc_x1, sc_y1, sc_valid;
     int      z_test, z_func, z_write;
+    int      fog_enable;
+    uint32_t fog_colour;
     psp_blend_state bs;
     uint64_t unsupported_blend_eq, unsupported_blend_factor;
 
@@ -219,24 +233,37 @@ static struct {
     uint32_t clut_addr;
     int      clut_fmt, clut_shift, clut_mask, clut_start;
     GLuint   bound;
+    int      bound_top;
 
     rendertarget rts[RT_MAX];
     int      n_rts, cur_rt;
     uint64_t rt_overflow;
 
     texcache_entry cache[TEXCACHE_MAX];
-    uint64_t tex_uploads, tex_hits, tex_evictions, tex_too_big, tex_vram_uploads, tex_from_rt;
+    int      cache_entries;
+    uint64_t cache_clock;
+    uint64_t tex_requests, tex_uploads, tex_hits, tex_fast_hits, tex_revalidated;
+    uint64_t tex_invalidations, tex_misses, tex_evictions, tex_too_big;
+    uint64_t tex_vram_uploads, tex_upload_pixels;
+    uint64_t tex_from_rt, tex_alias_from_rt;
+    uint64_t mip_chains, mip_levels, mip_incomplete;
+    uint64_t tex_bind_ns, tex_generation_ns, tex_decode_ns, tex_upload_ns;
 
-    float   *batch;          /* x, y, r, g, b, a per vertex */
+    float   *batch;          /* position, colour, UV, fog and homogeneous terms */
     size_t   batch_n;
 
     uint64_t draws, verts, unsupported_prims, readbacks, batch_overflows;
+    uint64_t readback_ns;
+    uint64_t presents, frames, frame_first_ns, frame_last_ns, frame_prev_ns;
+    uint64_t frame_max_ns;
+    uint64_t frame_ms[256];
 } g;
 
-enum { FLOATS_PER_VERT = 9 };   /* x, y, z, r, g, b, a, u, v */
+enum { FLOATS_PER_VERT = 13 };  /* x,y,z, r,g,b,a, u,v, fog, 1/w, texture q, lod16 */
 
 static void flush(void);
 static int  claim(void);
+static void readback_rt(int i);
 
 static unsigned long this_thread(void) {
     return (unsigned long)pthread_self();
@@ -254,9 +281,19 @@ static const char *VS_SRC =
     "layout(location=0) in vec3 a_pos;\n"
     "layout(location=1) in vec4 a_col;\n"
     "layout(location=2) in vec2 a_uv;\n"
+    "layout(location=3) in float a_fog;\n"
+    "layout(location=4) in float a_inv_w;\n"
+    "layout(location=5) in float a_tex_q;\n"
+    "layout(location=6) in float a_lod16;\n"
     "uniform vec2 u_viewport;\n"
     "out vec4 v_col;\n"
-    "out vec2 v_uv;\n"
+    /* gl_Position deliberately remains post-divide screen space with w=1 so
+     * GL cannot alter the PSP coverage or depth already resolved by the GE.
+     * Carry UV/W and Q/W as explicitly non-perspective varyings and perform
+     * only the texture divide in the fragment shader. */
+    "noperspective out vec3 v_uvq;\n"
+    "out float v_fog;\n"
+    "flat out int v_lod16;\n"
     "void main() {\n"
     "    vec2 ndc = vec2( (a_pos.x / u_viewport.x) * 2.0 - 1.0,\n"
     "                     1.0 - (a_pos.y / u_viewport.y) * 2.0 );\n"
@@ -266,7 +303,9 @@ static const char *VS_SRC =
      * on GL's depth range without a second projection. */
     "    gl_Position = vec4(ndc, a_pos.z * 2.0 - 1.0, 1.0);\n"
     "    v_col = a_col;\n"
-    "    v_uv = a_uv;\n"
+    "    v_uvq = vec3(a_uv * a_inv_w, a_tex_q * a_inv_w);\n"
+    "    v_fog = a_fog;\n"
+    "    v_lod16 = int(a_lod16);\n"
     "}\n";
 
 /* GL 3.3 core removed the fixed-function alpha test, so it is a discard. The
@@ -281,7 +320,9 @@ static const char *VS_SRC =
 static const char *FS_SRC =
     "#version 330 core\n"
     "in vec4 v_col;\n"
-    "in vec2 v_uv;\n"
+    "noperspective in vec3 v_uvq;\n"
+    "in float v_fog;\n"
+    "flat in int v_lod16;\n"
     "uniform int u_atest;\n"
     "uniform float u_aref;\n"
     "uniform int u_texenable;\n"
@@ -290,9 +331,66 @@ static const char *FS_SRC =
     "uniform int u_double;\n"
     "uniform vec3 u_env;\n"
     "uniform sampler2D u_tex;\n"
+    "uniform int u_minfilter;\n"
+    "uniform int u_magfilter;\n"
+    "uniform int u_wraps;\n"
+    "uniform int u_wrapt;\n"
+    "uniform int u_miptop;\n"
+    "uniform int u_fogenable;\n"
+    "uniform vec3 u_fogcolour;\n"
     "out vec4 o_col;\n"
+    /* Use texelFetch and reproduce the PSP sampler explicitly. Native GL
+     * filtering has a different minification switch for one legal PSP filter
+     * combination, and its bilinear precision is implementation-defined; both
+     * are visible at the 1:1 UI boundary. Coordinates and mip blending here
+     * follow the software oracle's measured 1/16 rules. */
+    "int wrap_axis(int p, int n, int clamp_it) {\n"
+    "    if (clamp_it != 0) return clamp(p, 0, n - 1);\n"
+    "    int r = p % n; return r < 0 ? r + n : r;\n"
+    "}\n"
+    "ivec4 texel_i(ivec2 p, int level) {\n"
+    "    ivec2 sz = textureSize(u_tex, level);\n"
+    "    p.x = wrap_axis(p.x, sz.x, u_wraps);\n"
+    "    p.y = wrap_axis(p.y, sz.y, u_wrapt);\n"
+    "    return ivec4(floor(texelFetch(u_tex, p, level) * 255.0 + 0.5));\n"
+    "}\n"
+    "ivec4 sample_level(vec2 uv, int level, bool linear) {\n"
+    "    ivec2 sz = textureSize(u_tex, level);\n"
+    "    ivec2 base_sz = textureSize(u_tex, 0);\n"
+    "    vec2 tc = uv * vec2(sz) / vec2(base_sz);\n"
+    "    if (!linear) return texel_i(ivec2(floor(tc)), level);\n"
+    "    ivec2 fq = ivec2(floor((tc - vec2(0.5)) * 16.0 + vec2(0.001)));\n"
+    "    ivec2 p0 = ivec2(floor(vec2(fq) / 16.0));\n"
+    "    ivec2 a = fq - p0 * 16;\n"
+    "    ivec4 t00 = texel_i(p0,                 level);\n"
+    "    ivec4 t10 = texel_i(p0 + ivec2(1, 0), level);\n"
+    "    ivec4 t01 = texel_i(p0 + ivec2(0, 1), level);\n"
+    "    ivec4 t11 = texel_i(p0 + ivec2(1, 1), level);\n"
+    "    int w00 = (16 - a.x) * (16 - a.y);\n"
+    "    int w10 = a.x * (16 - a.y);\n"
+    "    int w01 = (16 - a.x) * a.y;\n"
+    "    int w11 = a.x * a.y;\n"
+    "    return (t00 * w00 + t10 * w10 + t01 * w01 + t11 * w11) / 256;\n"
+    "}\n"
+    "vec4 sample_psp(vec2 uv) {\n"
+    "    int lod = v_lod16;\n"
+    "    bool linear = (((lod > 0 ? u_minfilter : u_magfilter) & 1) != 0);\n"
+    "    if (u_minfilter < 4 || u_miptop <= 0)\n"
+    "        return vec4(sample_level(uv, 0, linear)) / 255.0;\n"
+    "    lod = clamp(lod, 0, u_miptop * 16);\n"
+    "    if ((u_minfilter & 2) == 0) {\n"
+    "        int level = min((lod + 8) / 16, u_miptop);\n"
+    "        return vec4(sample_level(uv, level, linear)) / 255.0;\n"
+    "    }\n"
+    "    int level = lod / 16, f = lod & 15;\n"
+    "    ivec4 c0 = sample_level(uv, level, linear);\n"
+    "    if (f == 0 || level >= u_miptop) return vec4(c0) / 255.0;\n"
+    "    ivec4 c1 = sample_level(uv, level + 1, linear);\n"
+    "    return vec4(c0 + (c1 - c0) * f / 16) / 255.0;\n"
+    "}\n"
     "vec4 texfunc(vec4 c) {\n"
-    "    vec4 t = texture(u_tex, v_uv);\n"
+    "    vec2 uv = (v_uvq.z != 0.0) ? v_uvq.xy / v_uvq.z : vec2(0.0);\n"
+    "    vec4 t = sample_psp(uv);\n"
     "    vec3 tc = t.rgb; float ta = (u_tcc != 0) ? t.a : 1.0;\n"
     "    vec3 rgb; float a;\n"
     "    if (u_texfunc == 1) {\n"          /* DECAL */
@@ -316,6 +414,8 @@ static const char *FS_SRC =
     "}\n"
     "void main() {\n"
     "    vec4 c = (u_texenable != 0) ? texfunc(v_col) : v_col;\n"
+    "    if (u_fogenable != 0)\n"
+    "        c.rgb = mix(u_fogcolour, c.rgb, clamp(v_fog, 0.0, 1.0));\n"
     "    if (u_atest != 1) {\n"
     "        float a = c.a;\n"
     "        bool pass = true;\n"
@@ -374,6 +474,13 @@ static int build_program(void) {
     g.u_double    = p_glGetUniformLocation(g.prog, "u_double");
     g.u_env       = p_glGetUniformLocation(g.prog, "u_env");
     g.u_tex       = p_glGetUniformLocation(g.prog, "u_tex");
+    g.u_minfilter = p_glGetUniformLocation(g.prog, "u_minfilter");
+    g.u_magfilter = p_glGetUniformLocation(g.prog, "u_magfilter");
+    g.u_wraps     = p_glGetUniformLocation(g.prog, "u_wraps");
+    g.u_wrapt     = p_glGetUniformLocation(g.prog, "u_wrapt");
+    g.u_miptop    = p_glGetUniformLocation(g.prog, "u_miptop");
+    g.u_fogenable = p_glGetUniformLocation(g.prog, "u_fogenable");
+    g.u_fogcolour = p_glGetUniformLocation(g.prog, "u_fogcolour");
     return 0;
 }
 
@@ -407,10 +514,10 @@ static int build_fbo(void) {
     return 0;
 }
 
-/* Find the target for an address, creating it the first time. Targets are few
- * -- the census found three across six scenarios -- so a linear scan is the
- * right shape and the overflow counter is what says if that ever stops being
- * true. */
+/* Find the record for an address.  Storage is deliberately deferred until the
+ * first draw: FBP, FBW and FBFMT are separate GE registers, so set_target sees
+ * several half-assembled combinations while a surface is being selected.  If
+ * we allocated here, the first transient format would become permanent. */
 static int rt_for(uint32_t addr) {
     for (int i = 0; i < g.n_rts; i++)
         if (g.rts[i].addr == addr) return i;
@@ -420,11 +527,50 @@ static int rt_for(uint32_t addr) {
     rendertarget *r = &g.rts[i];
     r->addr = addr; r->used = 1;
 
+    return i;
+}
+
+/* Allocate a target from the complete state that exists at its first draw.
+ *
+ * A framebuffer register carries a row stride but no height.  The active
+ * scissor supplies the drawn extent: this game's display pair is 512x272
+ * (480 visible pixels plus padding), while its AC scratch surface is 256x128.
+ * Keeping the padding in the attachment makes pixel x land at byte x in every
+ * row, which is essential when the bytes are later reinterpreted as a texture.
+ */
+static int rt_prepare(int i) {
+    rendertarget *r = &g.rts[i];
+    const int stride = g.target_stride ? (int)g.target_stride : g.w;
+    int w = stride;
+    int h = g.sc_valid ? g.sc_y1 + 1 : g.h;
+    if (g.sc_valid && g.sc_x1 + 1 > w) w = g.sc_x1 + 1;
+    if (w < 1) w = g.w;
+    if (h < 1) h = g.h;
+
+    if (r->configured) {
+        if (r->stride != (uint32_t)stride || r->fmt != g.target_fmt ||
+            r->w < w || r->h < h) {
+            static int said;
+            if (!said++)
+                fprintf(stderr, "gl: target %08X changed after its first draw "
+                                "(%ux%d fmt %d -> %dx%d fmt %d); keeping the "
+                                "original storage\n",
+                        r->addr, r->stride, r->h, r->fmt, w, h, g.target_fmt);
+        }
+        return 0;
+    }
+
+    r->configured = 1;
+    r->stride = (uint32_t)stride;
+    r->fmt = g.target_fmt;
+    r->w = w;
+    r->h = h;
+
     p_glGenFramebuffers(1, &r->fbo);
     p_glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
     p_glGenTextures(1, &r->colour);
     p_glBindTexture(GL_TEXTURE_2D, r->colour);
-    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g.w, g.h, 0,
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, r->w, r->h, 0,
                    GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -432,12 +578,12 @@ static int rt_for(uint32_t addr) {
                              GL_TEXTURE_2D, r->colour, 0);
     p_glGenRenderbuffers(1, &r->depth);
     p_glBindRenderbuffer(GL_RENDERBUFFER, r->depth);
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, g.w, g.h);
+    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, r->w, r->h);
     p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                                 GL_RENDERBUFFER, r->depth);
     if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        fprintf(stderr, "gl: framebuffer for target %08X is incomplete\n", addr);
-    return i;
+        fprintf(stderr, "gl: framebuffer for target %08X is incomplete\n", r->addr);
+    return 0;
 }
 
 /* Claim the context, once, on whichever thread the GE turns out to be. Every
@@ -483,6 +629,22 @@ static int claim(void) {
                             FLOATS_PER_VERT * sizeof(float),
                             (void *)(7 * sizeof(float)));
     p_glEnableVertexAttribArray(2);
+    p_glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE,
+                            FLOATS_PER_VERT * sizeof(float),
+                            (void *)(9 * sizeof(float)));
+    p_glEnableVertexAttribArray(3);
+    p_glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE,
+                            FLOATS_PER_VERT * sizeof(float),
+                            (void *)(10 * sizeof(float)));
+    p_glEnableVertexAttribArray(4);
+    p_glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE,
+                            FLOATS_PER_VERT * sizeof(float),
+                            (void *)(11 * sizeof(float)));
+    p_glEnableVertexAttribArray(5);
+    p_glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE,
+                            FLOATS_PER_VERT * sizeof(float),
+                            (void *)(12 * sizeof(float)));
+    p_glEnableVertexAttribArray(6);
 
     g.batch = calloc(GL_MAX_VERTS * FLOATS_PER_VERT, sizeof(float));
     if (!g.batch) { g.failed = 1; return -1; }
@@ -493,7 +655,6 @@ static int claim(void) {
     /* Whatever the GE last named, or the primary display buffer if it has not
      * named one yet -- a target has to exist before the first draw. */
     g.cur_rt = rt_for(g.target_addr ? g.target_addr : 0x04000000u);
-    p_glBindFramebuffer(GL_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
     return 0;
 }
 
@@ -515,7 +676,6 @@ static void gl_target(uint32_t addr, uint32_t stride, int fmt) {
     g.target_addr = addr; g.target_stride = stride; g.target_fmt = fmt;
     if (g.ready && addr) {
         g.cur_rt = rt_for(addr);
-        p_glBindFramebuffer(GL_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
     }
 }
 
@@ -527,81 +687,278 @@ static void gl_scissor(int x0, int y0, int x1, int y1) {
     flush();
     g.sc_x0 = x0; g.sc_y0 = y0; g.sc_x1 = x1; g.sc_y1 = y1; g.sc_valid = 1;
 }
-/* GE wrap codes: 0 repeat, 1 clamp. GE filter: bit 0 selects linear within a
- * level; 4..7 are the mipmap variants, which this does not build yet, so the
- * level bit is all that is read. */
-static GLenum gl_wrap(int w) { return w ? GL_CLAMP_TO_EDGE : GL_REPEAT; }
-static GLenum gl_filter(int f) { return (f & 1) ? GL_LINEAR : GL_NEAREST; }
+/* Only a mipmap minification filter consumes the extra levels. TEXMODE may
+ * retain a non-zero top while a draw deliberately selects ordinary nearest or
+ * linear filtering; uploading those unreachable levels would make a sampling
+ * state change invalidate an otherwise identical cache entry for no result. */
+static int texture_top(const psp_tex_state *t) {
+    if (t->min_filter < 4 || t->max_level <= 0) return 0;
+    return t->max_level > 7 ? 7 : t->max_level;
+}
+
+static uint32_t level_addr(const psp_tex_state *t, int level) {
+    return level ? t->lv_addr[level] : t->addr;
+}
+static uint32_t level_stride(const psp_tex_state *t, int level) {
+    return level ? t->lv_stride[level] : t->stride;
+}
+static int level_w(const psp_tex_state *t, int level) {
+    return level ? t->lv_w[level] : t->w;
+}
+static int level_h(const psp_tex_state *t, int level) {
+    return level ? t->lv_h[level] : t->h;
+}
+
+/* Bytes the shared decoder can touch for one level. A swizzled texture is laid
+ * out in eight-row blocks, so a short final block occupies its padded height;
+ * tracking only visible rows would miss a write to a texel the swizzle maps
+ * beyond stride*height. */
+static uint32_t level_bytes(const psp_tex_state *t, int level) {
+    static const int halfbytes[8] = { 4, 4, 4, 8, 1, 2, 4, 8 };
+    const int fmt = t->fmt;
+    const uint32_t stride = level_stride(t, level);
+    const int h = level_h(t, level);
+    if (fmt < 0 || fmt >= 8 || !stride || h <= 0) return 0;
+    const uint64_t row = ((uint64_t)stride * (uint64_t)halfbytes[fmt]) / 2u;
+    const uint64_t rows = t->swizzled && row >= 16u
+                        ? (uint64_t)(h + 7) & ~UINT64_C(7)
+                        : (uint64_t)h;
+    const uint64_t bytes = row * rows;
+    return bytes > UINT32_MAX ? UINT32_MAX : (uint32_t)bytes;
+}
+
+static uint64_t texture_generation(const psp_tex_state *t, int top) {
+    uint64_t newest = 0;
+    for (int level = 0; level <= top; level++) {
+        const uint64_t gen = psp_mem_range_generation(level_addr(t, level),
+                                                       level_bytes(t, level));
+        if (gen > newest) newest = gen;
+    }
+    if (t->fmt >= 4 && t->fmt <= 7 && g.clut_addr) {
+        /* CLUT start is already in entries (multiples of sixteen), and mask is
+         * applied before ORing it. Tracking through their greatest possible
+         * index covers every palette read without knowing the texel values. */
+        const uint32_t entries = (uint32_t)(g.clut_start | g.clut_mask) + 1u;
+        const uint32_t bytes = entries * (g.clut_fmt == 3 ? 4u : 2u);
+        const uint64_t gen = psp_mem_range_generation(g.clut_addr, bytes);
+        if (gen > newest) newest = gen;
+    }
+    return newest;
+}
+
+static uint32_t hash_word(uint32_t hash, uint32_t word) {
+    return (hash ^ word) * UINT32_C(16777619);
+}
+
+static size_t texture_slot(const psp_tex_state *t, int top) {
+    uint32_t hash = UINT32_C(2166136261);
+    hash = hash_word(hash, (uint32_t)t->fmt);
+    hash = hash_word(hash, (uint32_t)t->swizzled);
+    hash = hash_word(hash, (uint32_t)top);
+    for (int level = 0; level <= top; level++) {
+        hash = hash_word(hash, level_addr(t, level));
+        hash = hash_word(hash, level_stride(t, level));
+        hash = hash_word(hash, (uint32_t)level_w(t, level));
+        hash = hash_word(hash, (uint32_t)level_h(t, level));
+    }
+    if (t->fmt >= 4 && t->fmt <= 7) {
+        hash = hash_word(hash, g.clut_addr);
+        hash = hash_word(hash, (uint32_t)g.clut_fmt);
+        hash = hash_word(hash, (uint32_t)g.clut_shift);
+        hash = hash_word(hash, (uint32_t)g.clut_mask);
+        hash = hash_word(hash, (uint32_t)g.clut_start);
+    }
+    return (size_t)hash % TEXCACHE_MAX;
+}
+
+static int cache_matches(const texcache_entry *e, const psp_tex_state *t,
+                         int top) {
+    if (!e->used || e->fmt != t->fmt || e->swizzled != t->swizzled ||
+        e->max_level != top)
+        return 0;
+    /* Palette state has no bearing on direct-colour formats. Including the
+     * GE's incidental last CLUT there multiplied identical cache entries and
+     * was responsible for most of the mission's post-generation evictions. */
+    if (t->fmt >= 4 && t->fmt <= 7 &&
+        (e->clut_addr != g.clut_addr || e->clut_fmt != g.clut_fmt ||
+         e->clut_shift != g.clut_shift || e->clut_mask != g.clut_mask ||
+         e->clut_start != g.clut_start))
+        return 0;
+    for (int level = 0; level <= top; level++)
+        if (e->lv_addr[level] != level_addr(t, level) ||
+            e->lv_stride[level] != level_stride(t, level) ||
+            e->lv_w[level] != level_w(t, level) ||
+            e->lv_h[level] != level_h(t, level))
+            return 0;
+    return 1;
+}
+
+static void cache_record(texcache_entry *e, const psp_tex_state *t, int top,
+                         int uploaded_top, uint64_t generation,
+                         uint64_t serial) {
+    if (!e->used) g.cache_entries++;
+    e->used = 1;
+    e->addr = t->addr; e->stride = t->stride; e->w = t->w; e->h = t->h;
+    e->fmt = t->fmt; e->swizzled = t->swizzled;
+    e->max_level = top; e->uploaded_top = uploaded_top;
+    for (int level = 0; level <= top; level++) {
+        e->lv_addr[level] = level_addr(t, level);
+        e->lv_stride[level] = level_stride(t, level);
+        e->lv_w[level] = level_w(t, level);
+        e->lv_h[level] = level_h(t, level);
+    }
+    e->clut_addr = g.clut_addr; e->clut_fmt = g.clut_fmt;
+    e->clut_shift = g.clut_shift; e->clut_mask = g.clut_mask;
+    e->clut_start = g.clut_start;
+    e->content_generation = generation;
+    e->validated_serial = serial;
+    e->last_used = g.cache_clock;
+}
 
 static GLuint texcache_get(const psp_tex_state *t) {
     if (!t->addr || t->w <= 0 || t->h <= 0) return 0;
-    /* Bound at a render target's address: sample that target's colour rather
-     * than uploading from guest memory, which under GL never received the
-     * pixels in the first place. This is the read-back-and-composite pattern
-     * the hangar's post-processing frame uses. */
-    for (int i = 0; i < g.n_rts; i++)
+    g.tex_requests++;
+    const int top = texture_top(t);
+    /* A target can only be sampled directly when the texture describes the
+     * same pixel layout.  The AC scratch surface is the important opposite
+     * case: it is rendered as 5551, then deliberately read as CLUT8 through a
+     * palette.  Returning its RGBA attachment used to skip that byte-level
+     * reinterpretation and produced the bright menu shards and mirrored
+     * mission foreground.  Synchronise such aliases to guest memory and send
+     * them through the common decoder instead. */
+    for (int i = 0; i < g.n_rts; i++) {
         if (g.rts[i].used && g.rts[i].addr == t->addr) {
             g.tex_from_rt++;
-            return g.rts[i].colour;
+            rendertarget *r = &g.rts[i];
+            if (r->configured && r->fmt == 3 && t->fmt == 3 &&
+                !t->swizzled && t->stride == r->stride &&
+                t->w == r->w && t->h == r->h && top == 0) {
+                g.bound_top = 0;
+                return r->colour;
+            }
+            if (r->dirty) {
+                readback_rt(i);
+                r->dirty = 0;
+            }
+            g.tex_alias_from_rt++;
+            break;
         }
-    if ((size_t)t->w * (size_t)t->h > TEXEL_CAP) { g.tex_too_big++; return 0; }
+    }
+    /* A lower mip can independently alias a render target. Synchronise every
+     * level the sampler can reach before decoding; checking only level zero
+     * leaves a perfectly keyed cache holding yesterday's generated mip. */
+    for (int level = 1; level <= top; level++) {
+        const uint32_t addr = level_addr(t, level);
+        for (int i = 0; addr && i < g.n_rts; i++) {
+            rendertarget *r = &g.rts[i];
+            if (!r->used || r->addr != addr) continue;
+            g.tex_from_rt++;
+            if (r->dirty) { readback_rt(i); r->dirty = 0; }
+            g.tex_alias_from_rt++;
+            break;
+        }
+    }
+    for (int level = 0; level <= top; level++)
+        if (level_w(t, level) <= 0 || level_h(t, level) <= 0 ||
+            (size_t)level_w(t, level) * (size_t)level_h(t, level) > TEXEL_CAP) {
+            g.tex_too_big++;
+            return 0;
+        }
 
-    size_t slot = ((size_t)t->addr >> 4) ^ ((size_t)t->w * 31u)
-                ^ ((size_t)t->h * 131u) ^ ((size_t)t->fmt * 7919u)
-                ^ ((size_t)g.clut_addr >> 3);
-    slot %= TEXCACHE_MAX;
+    size_t slot = texture_slot(t, top);
 
-    /* A texture living in VRAM is one the GE can be drawing into, so its
-     * texels are not a function of its address -- they change whenever the
-     * game re-renders that buffer. The hangar's backdrop is exactly this: a
-     * full-screen sprite sampling 0x0416C000, which the game refreshes every
-     * frame. Cached, it served the first upload forever and painted a stale
-     * (black) backdrop over the room, which read as "the floor is missing".
-     *
-     * Re-uploading on every bind is the honest version and cheap here: these
-     * are few and small. A dirty-region signal from the GE would be better and
-     * needs the interface to carry one. */
-    const int in_vram = (t->addr & 0xFF000000u) == 0x04000000u;
+    /* Textures in VRAM used to skip this lookup altogether. That avoided a
+     * stale render-to-texture result, but decoded and uploaded every binding --
+     * 232,297 times in the first full mission measurement. Write generations
+     * let VRAM use the same cache while preserving the in-place update. */
+    int in_vram = 0;
+    for (int level = 0; level <= top; level++)
+        if ((level_addr(t, level) & 0xFF000000u) == 0x04000000u)
+            in_vram = 1;
 
-    for (size_t probe = 0; !in_vram && probe < 8; probe++) {
-        texcache_entry *e = &g.cache[(slot + probe) % TEXCACHE_MAX];
-        if (e->used && e->addr == t->addr && e->w == t->w && e->h == t->h &&
-            e->fmt == t->fmt && e->stride == t->stride &&
-            e->swizzled == t->swizzled && e->clut_addr == g.clut_addr &&
-            e->clut_fmt == g.clut_fmt && e->clut_shift == g.clut_shift &&
-            e->clut_mask == g.clut_mask && e->clut_start == g.clut_start) {
+    const uint64_t memory_serial = psp_mem_write_serial();
+    g.cache_clock++;
+    size_t victim = slot;
+    uint64_t oldest = UINT64_MAX;
+    for (size_t probe = 0; probe < TEXCACHE_PROBES; probe++) {
+        const size_t at = (slot + probe) % TEXCACHE_MAX;
+        texcache_entry *e = &g.cache[at];
+        if (cache_matches(e, t, top)) {
+            if (e->validated_serial == memory_serial) {
+                g.tex_fast_hits++;
+            } else {
+                const uint64_t gen_t0 = psp_os_mono_ns();
+                const uint64_t generation = texture_generation(t, top);
+                g.tex_generation_ns += psp_os_mono_ns() - gen_t0;
+                if (generation != e->content_generation) {
+                    g.tex_invalidations++;
+                    slot = at;
+                    goto upload;
+                }
+                e->validated_serial = memory_serial;
+                g.tex_revalidated++;
+            }
             g.tex_hits++;
+            e->last_used = g.cache_clock;
+            g.bound_top = e->uploaded_top;
             return e->tex;
         }
         if (!e->used) { slot = (slot + probe) % TEXCACHE_MAX; goto upload; }
+        if (e->last_used < oldest) { oldest = e->last_used; victim = at; }
     }
-    /* Every probe taken: reuse the first, which is a cheap eviction rather than
-     * an LRU. If this counter climbs the table is too small or the key is too
-     * loose, and the number says which. */
-    if (!in_vram) g.tex_evictions++;
+    /* The bounded probe window keeps lookup cost predictable. If it fills,
+     * retain the hot entries instead of repeatedly replacing the hash's first
+     * slot; the eviction counter says whether 512 entries/32 probes suffices. */
+    slot = victim;
+    g.tex_evictions++;
 upload: {
     texcache_entry *e = &g.cache[slot];
+    if (!cache_matches(e, t, top)) g.tex_misses++;
     static uint32_t *texels;
     if (!texels) texels = malloc(TEXEL_CAP * sizeof(uint32_t));
     if (!texels) return 0;
 
-    int dw = 0, dh = 0;
     /* One decoder for every backend -- the formats, the CLUT paging and the
      * swizzle are the runtime's, not repeated here. */
     const psp_clut_state clut = { g.clut_addr, g.clut_fmt, g.clut_shift,
                                   g.clut_mask, g.clut_start };
-    if (psp_render_decode_level(t, 0, &clut, texels, TEXEL_CAP, &dw, &dh) == 0)
-        return 0;
-
     if (!e->tex) p_glGenTextures(1, &e->tex);
     p_glBindTexture(GL_TEXTURE_2D, e->tex);
-    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, dw, dh, 0,
-                   GL_RGBA, GL_UNSIGNED_BYTE, texels);
-    e->used = 1; e->addr = t->addr; e->stride = t->stride;
-    e->w = t->w; e->h = t->h; e->fmt = t->fmt; e->swizzled = t->swizzled;
-    e->clut_addr = g.clut_addr; e->clut_fmt = g.clut_fmt;
-    e->clut_shift = g.clut_shift; e->clut_mask = g.clut_mask;
-    e->clut_start = g.clut_start;
+    int uploaded_top = -1;
+    for (int level = 0; level <= top; level++) {
+        int dw = 0, dh = 0;
+        const uint64_t decode_t0 = psp_os_mono_ns();
+        const size_t decoded = psp_render_decode_level(t, level, &clut,
+                                                       texels, TEXEL_CAP,
+                                                       &dw, &dh);
+        g.tex_decode_ns += psp_os_mono_ns() - decode_t0;
+        if (decoded == 0)
+            break;
+        const uint64_t upload_t0 = psp_os_mono_ns();
+        p_glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA8, dw, dh, 0,
+                       GL_RGBA, GL_UNSIGNED_BYTE, texels);
+        g.tex_upload_ns += psp_os_mono_ns() - upload_t0;
+        g.tex_upload_pixels += decoded;
+        uploaded_top = level;
+        if (level) g.mip_levels++;
+    }
+    if (uploaded_top < 0) return 0;
+    if (uploaded_top < top) g.mip_incomplete++;
+    if (uploaded_top > 0) g.mip_chains++;
+    /* texelFetch performs the PSP's filtering in the shader. Keeping the GL
+     * sampler itself non-mipmapped also permits the PSP's independently-sized
+     * levels without making the texture incomplete under GL's stricter
+     * halving rule. */
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, uploaded_top);
+    const uint64_t gen_t0 = psp_os_mono_ns();
+    const uint64_t generation = texture_generation(t, top);
+    g.tex_generation_ns += psp_os_mono_ns() - gen_t0;
+    cache_record(e, t, top, uploaded_top, generation,
+                 psp_mem_write_serial());
+    g.bound_top = uploaded_top;
     g.tex_uploads++;
     if (in_vram) g.tex_vram_uploads++;
     return e->tex;
@@ -613,13 +970,16 @@ static void gl_texture(const psp_tex_state *t) {
     flush();
     g.tex = *t;
     g.tex_enable = t->addr != 0;
+    g.bound_top = 0;
+    const uint64_t bind_t0 = psp_os_mono_ns();
     g.bound = g.tex_enable ? texcache_get(t) : 0;
+    g.tex_bind_ns += psp_os_mono_ns() - bind_t0;
     if (g.bound) {
         p_glBindTexture(GL_TEXTURE_2D, g.bound);
-        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (GLint)gl_wrap(t->wrap_s));
-        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (GLint)gl_wrap(t->wrap_t));
-        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)gl_filter(t->min_filter));
-        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)gl_filter(t->mag_filter));
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, g.bound_top);
     } else {
         g.tex_enable = 0;
     }
@@ -644,13 +1004,21 @@ static void gl_blend(const psp_blend_state *b) {
     flush();
     g.bs = *b;
 }
-static void gl_fog(int enable, uint32_t colour) { (void)enable; (void)colour; }
+static void gl_fog(int enable, uint32_t colour) {
+    if (claim() != 0) return;
+    flush();
+    g.fog_enable = enable;
+    g.fog_colour = colour;
+}
 
-static void push(const psp_vertex *v) {
-    /* Flush rather than drop. Returning here silently discarded geometry the
-     * moment a frame's batch passed the cap, which is a wrong picture with no
-     * symptom -- exactly the failure this project keeps naming. */
-    if (g.batch_n + 1 > GL_MAX_VERTS) { flush(); g.batch_overflows++; }
+static void reserve_vertices(size_t n) {
+    /* Flush only between complete triangles. GL_MAX_VERTS is not divisible by
+     * three, so checking one vertex at a time can strand one endpoint at the
+     * end of one draw and two at the start of the next. */
+    if (g.batch_n + n > GL_MAX_VERTS) { flush(); g.batch_overflows++; }
+}
+
+static void push(const psp_vertex *v, int lod16) {
     float *o = g.batch + g.batch_n * FLOATS_PER_VERT;
     /* 12.4 fixed point to pixels. The quarter-pixel this throws away is the
      * PSP's own precision, not ours -- see ROADMAP M7 on why that caps the
@@ -662,24 +1030,93 @@ static void push(const psp_vertex *v) {
     o[4] = (float)((v->rgba >>  8) & 0xFF) / 255.0f;
     o[5] = (float)((v->rgba >> 16) & 0xFF) / 255.0f;
     o[6] = (float)((v->rgba >> 24) & 0xFF) / 255.0f;
-    /* UVs arrive in texels, as the software path takes them; GL wants them
-     * normalised, and dividing here keeps the shader free of the texture's
-     * dimensions. */
-    o[7] = g.tex.w > 0 ? v->u / (float)g.tex.w : 0.0f;
-    o[8] = g.tex.h > 0 ? v->v / (float)g.tex.h : 0.0f;
+    /* Keep UVs in the texel units the backend contract supplies. The shader
+     * scales those units for each mip level; normalising here and multiplying
+     * back there moves exact 1/16 boundaries through an avoidable round trip. */
+    o[7] = v->u;
+    o[8] = v->v;
+    o[9] = (float)v->fog / 255.0f;
+    o[10] = v->inv_w;
+    o[11] = v->tex_q;
+    o[12] = (float)lod16;
     g.batch_n++;
 }
 
+/* Match sw_tri's per-primitive scale calculation. In particular this is based
+ * on the submitted texel coordinates, not on GL's per-fragment derivatives:
+ * CONST and SLOPE have no derivative at all, while AUTO is measured by the PSP
+ * once for the primitive and quantised to a sixteenth before adding its bias. */
+static int triangle_lod16(const psp_vertex *a, const psp_vertex *b,
+                          const psp_vertex *c) {
+    if (!g.tex_enable) return 0;
+    const float e1x = (float)(b->x - a->x) / 16.0f;
+    const float e1y = (float)(b->y - a->y) / 16.0f;
+    const float e2x = (float)(c->x - a->x) / 16.0f;
+    const float e2y = (float)(c->y - a->y) / 16.0f;
+    const float det = e1x * e2y - e1y * e2x;
+    if (det == 0.0f) return 0;
+    const float du1 = b->u - a->u, du2 = c->u - a->u;
+    const float dv1 = b->v - a->v, dv2 = c->v - a->v;
+    const float dudx = (du1 * e2y - du2 * e1y) / det;
+    const float dudy = (du2 * e1x - du1 * e2x) / det;
+    const float dvdx = (dv1 * e2y - dv2 * e1y) / det;
+    const float dvdy = (dv2 * e1x - dv1 * e2x) / det;
+    const float rx = sqrtf(dudx * dudx + dvdx * dvdx);
+    const float ry = sqrtf(dudy * dudy + dvdy * dvdy);
+    return psp_render_lod16(&g.tex, rx > ry ? rx : ry);
+}
+
+static void push_triangle(const psp_vertex *a, const psp_vertex *b,
+                          const psp_vertex *c) {
+    const int lod16 = triangle_lod16(a, b, c);
+    reserve_vertices(3);
+    push(a, lod16); push(b, lod16); push(c, lod16);
+}
+
 /* A sprite is two triangles from opposite corners, axis-aligned, taking its
- * colour from the second vertex the way the software path does. */
+ * colour and fog from the second vertex and depth from the first the way the
+ * software path does. The other two UVs have to be made here: copying the
+ * second vertex to all four corners collapses every textured sprite to one
+ * texel.
+ *
+ * With exactly one screen axis reversed, the PSP transposes the mapping: u
+ * follows y and v follows x. This is the same rule measured and implemented
+ * by sw_sprite(), rather than a GL-specific approximation. */
 static void push_sprite(const psp_vertex *v) {
     psp_vertex a = v[1], b = v[1], c = v[1], d = v[1];
     a.x = v[0].x; a.y = v[0].y;
     b.x = v[1].x; b.y = v[0].y;
     c.x = v[1].x; c.y = v[1].y;
     d.x = v[0].x; d.y = v[1].y;
-    push(&a); push(&b); push(&c);
-    push(&a); push(&c); push(&d);
+    a.z = b.z = c.z = d.z = v[0].z;
+    /* A sprite's two-corner mapping is affine even when its endpoints came
+     * through the transform pipeline.  The software rectangle path has the
+     * same rule; forcing homogeneous ones keeps the GL expansion equivalent. */
+    a.inv_w = b.inv_w = c.inv_w = d.inv_w = 1.0f;
+    a.tex_q = b.tex_q = c.tex_q = d.tex_q = 1.0f;
+    a.u = v[0].u; a.v = v[0].v;
+    c.u = v[1].u; c.v = v[1].v;
+    const int transposed = (v[1].x < v[0].x) != (v[1].y < v[0].y);
+    if (transposed) {
+        b.u = v[0].u; b.v = v[1].v;
+        d.u = v[1].u; d.v = v[0].v;
+    } else {
+        b.u = v[1].u; b.v = v[0].v;
+        d.u = v[0].u; d.v = v[1].v;
+    }
+    int lod16 = 0;
+    const int dx = v[1].x - v[0].x, dy = v[1].y - v[0].y;
+    const int uden = transposed ? dy : dx;
+    const int vden = transposed ? dx : dy;
+    if (g.tex_enable && uden && vden) {
+        const float du = (v[1].u - v[0].u) / (float)uden;
+        const float dv = (v[1].v - v[0].v) / (float)vden;
+        const float rx = fabsf(du) * 16.0f, ry = fabsf(dv) * 16.0f;
+        lod16 = psp_render_lod16(&g.tex, rx > ry ? rx : ry);
+    }
+    reserve_vertices(6);
+    push(&a, lod16); push(&b, lod16); push(&c, lod16);
+    push(&a, lod16); push(&c, lod16); push(&d, lod16);
 }
 
 static void gl_draw(int prim, const psp_vertex *v, int count) {
@@ -689,22 +1126,20 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
 
     switch (prim) {
     case 3:                                        /* triangles */
-        for (int i = 0; i + 2 < count; i += 3) {
-            push(&v[i]); push(&v[i + 1]); push(&v[i + 2]);
-        }
+        for (int i = 0; i + 2 < count; i += 3)
+            push_triangle(&v[i], &v[i + 1], &v[i + 2]);
         break;
     case 4:                                        /* triangle strip */
         for (int i = 0; i + 2 < count; i++) {
             /* Winding alternates along a strip; preserve it so a later
              * increment can turn face culling on without the strip flipping. */
-            if (i & 1) { push(&v[i + 1]); push(&v[i]); push(&v[i + 2]); }
-            else       { push(&v[i]); push(&v[i + 1]); push(&v[i + 2]); }
+            if (i & 1) push_triangle(&v[i + 1], &v[i], &v[i + 2]);
+            else       push_triangle(&v[i], &v[i + 1], &v[i + 2]);
         }
         break;
     case 5:                                        /* triangle fan */
-        for (int i = 1; i + 1 < count; i++) {
-            push(&v[0]); push(&v[i]); push(&v[i + 1]);
-        }
+        for (int i = 1; i + 1 < count; i++)
+            push_triangle(&v[0], &v[i], &v[i + 1]);
         break;
     case 6:                                        /* sprites, in pairs */
         for (int i = 0; i + 1 < count; i += 2) push_sprite(&v[i]);
@@ -745,9 +1180,22 @@ static GLenum gl_factor(int f, int is_src, int *ok) {
     case 3:  return GL_ONE_MINUS_SRC_ALPHA;
     case 4:  return GL_DST_ALPHA;
     case 5:  return GL_ONE_MINUS_DST_ALPHA;
-    case 10: return GL_CONSTANT_COLOR;
     default: *ok = 0; return GL_ONE;
     }
+}
+
+/* PSP fixed blend factors are separate RGB constants for the source and
+ * destination terms. GL has only one glBlendColor, but the two important
+ * endpoints need no constant at all: fixed black is GL_ZERO and fixed white
+ * is GL_ONE. That makes the hangar compositor's FIXA=808080/FIXB=000000 pair
+ * exactly representable. `uses_constant` tells apply_state whether the one GL
+ * constant is still needed for this side. */
+static GLenum gl_fixed_factor(uint32_t colour, int *uses_constant) {
+    colour &= 0xFFFFFFu;
+    if (colour == 0x000000u) return GL_ZERO;
+    if (colour == 0xFFFFFFu) return GL_ONE;
+    *uses_constant = 1;
+    return GL_CONSTANT_COLOR;
 }
 
 static GLenum gl_equation(int eq, int *ok) {
@@ -764,9 +1212,14 @@ static GLenum gl_equation(int eq, int *ok) {
 /* Apply what the interpreter last set. Called once per flush rather than per
  * primitive: the batch is by construction all one state. */
 static void apply_state(void) {
-    if (g.z_test) {
+    /* In OpenGL, disabling GL_DEPTH_TEST also disables depth-buffer writes,
+     * regardless of glDepthMask.  The GE treats those controls separately:
+     * clear-mode draws disable the comparison but still write the clear depth.
+     * Keep the GL test enabled with ALWAYS whenever a depth write is requested
+     * so those clears actually establish the value later geometry tests. */
+    if (g.z_test || g.z_write) {
         p_glEnable(GL_DEPTH_TEST);
-        p_glDepthFunc(gl_compare(g.z_func));
+        p_glDepthFunc(g.z_test ? gl_compare(g.z_func) : GL_ALWAYS);
     } else {
         p_glDisable(GL_DEPTH_TEST);
     }
@@ -784,26 +1237,37 @@ static void apply_state(void) {
         p_glEnable(GL_SCISSOR_TEST);
         /* GE corners are inclusive and top-left; GL's origin is bottom-left. */
         const int w = g.sc_x1 - g.sc_x0 + 1, h = g.sc_y1 - g.sc_y0 + 1;
-        p_glScissor(g.sc_x0, g.h - g.sc_y0 - h, w > 0 ? w : 0, h > 0 ? h : 0);
+        const int target_h = g.rts[g.cur_rt].h;
+        p_glScissor(g.sc_x0, target_h - g.sc_y0 - h,
+                    w > 0 ? w : 0, h > 0 ? h : 0);
     } else {
         p_glDisable(GL_SCISSOR_TEST);
     }
 
     if (g.bs.enable) {
         int ok = 1;
-        const GLenum src = gl_factor(g.bs.src, 1, &ok);
-        const GLenum dst = gl_factor(g.bs.dst, 0, &ok);
+        int src_constant = 0, dst_constant = 0;
+        const GLenum src = g.bs.src == 10
+                         ? gl_fixed_factor(g.bs.fixa, &src_constant)
+                         : gl_factor(g.bs.src, 1, &ok);
+        const GLenum dst = g.bs.dst == 10
+                         ? gl_fixed_factor(g.bs.fixb, &dst_constant)
+                         : gl_factor(g.bs.dst, 0, &ok);
         if (!ok) g.unsupported_blend_factor++;
+        if (src_constant && dst_constant &&
+            (g.bs.fixa & 0xFFFFFFu) != (g.bs.fixb & 0xFFFFFFu))
+            g.unsupported_blend_factor++;
         int eq_ok = 1;
         const GLenum eq = gl_equation(g.bs.eq, &eq_ok);
         if (!eq_ok) g.unsupported_blend_eq++;
         p_glEnable(GL_BLEND);
         p_glBlendFunc(src, dst);
         p_glBlendEquation(eq);
-        /* The fixed colours, for factor 10. src takes fixa, dst fixb; GL has
-         * one constant, so a draw using both is the case this does not cover
-         * and the counter above is where it shows up. */
-        const uint32_t fx = (g.bs.src == 10) ? g.bs.fixa : g.bs.fixb;
+        /* If both sides need a non-trivial, unequal fixed colour the counter
+         * above records the case GL's fixed pipeline cannot represent. Equal
+         * constants, or one non-trivial constant paired with zero/one, are
+         * exact. */
+        const uint32_t fx = src_constant ? g.bs.fixa : g.bs.fixb;
         p_glBlendColor((float)( fx        & 0xFF) / 255.0f,
                        (float)((fx >>  8) & 0xFF) / 255.0f,
                        (float)((fx >> 16) & 0xFF) / 255.0f,
@@ -820,7 +1284,18 @@ static void apply_state(void) {
                            (float)((g.tex.env >>  8) & 0xFF) / 255.0f,
                            (float)((g.tex.env >> 16) & 0xFF) / 255.0f);
     p_glUniform1i(g.u_tex, 0);
+    p_glUniform1i(g.u_minfilter, g.tex.min_filter);
+    p_glUniform1i(g.u_magfilter, g.tex.mag_filter);
+    p_glUniform1i(g.u_wraps, g.tex.wrap_s ? 1 : 0);
+    p_glUniform1i(g.u_wrapt, g.tex.wrap_t ? 1 : 0);
+    p_glUniform1i(g.u_miptop, g.bound_top);
     if (g.bound) p_glBindTexture(GL_TEXTURE_2D, g.bound);
+
+    p_glUniform1i(g.u_fogenable, g.fog_enable ? 1 : 0);
+    p_glUniform3f(g.u_fogcolour,
+                  (float)( g.fog_colour        & 0xFF) / 255.0f,
+                  (float)((g.fog_colour >>  8) & 0xFF) / 255.0f,
+                  (float)((g.fog_colour >> 16) & 0xFF) / 255.0f);
 
     p_glUniform1i(g.u_atest, g.bs.alpha_test ? g.bs.alpha_func : 1);
     p_glUniform1f(g.u_aref,  (float)g.bs.alpha_ref / 255.0f);
@@ -828,11 +1303,13 @@ static void apply_state(void) {
 
 static void flush(void) {
     if (!g.ready || g.batch_n == 0) return;
-    p_glBindFramebuffer(GL_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
-    g.rts[g.cur_rt].dirty = 1;
-    p_glViewport(0, 0, g.w, g.h);
+    if (rt_prepare(g.cur_rt) != 0) { g.batch_n = 0; return; }
+    rendertarget *r = &g.rts[g.cur_rt];
+    p_glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    r->dirty = 1;
+    p_glViewport(0, 0, r->w, r->h);
     p_glUseProgram(g.prog);
-    p_glUniform2f(g.u_viewport, (float)g.w, (float)g.h);
+    p_glUniform2f(g.u_viewport, (float)r->w, (float)r->h);
     apply_state();
     p_glBindVertexArray(g.vao);
     p_glBindBuffer(GL_ARRAY_BUFFER, g.vbo);
@@ -848,52 +1325,122 @@ static void gl_finish(void) {
     flush();
 }
 
-/* Read the colour attachment back into the guest's framebuffer.
+/* Read one colour attachment back into the guest's framebuffer.
  *
  * This is what keeps the rest of the project working. score_frame,
  * dump_frame_seq, dump_framebuffer, survey_vram and the frame comparison that
- * passed the M2 gate all read guest memory, and a backend that never writes it
- * makes every one of them blind. It is done here, once per flip, rather than
- * per draw -- which is the difference between affordable and not. */
-static void readback(void) {
-    if (!g.target_addr) return;
-    if (g.target_fmt != 3) {          /* 8888; the census says the display
-                                       * buffers are always this */
-        static int said;
-        if (!said++)
-            fprintf(stderr, "gl: readback skipped, target format %d is not "
-                            "8888 -- the guest framebuffer will be stale\n",
-                    g.target_fmt);
-        return;
-    }
-    const uint32_t stride = g.target_stride ? g.target_stride : 512;
-    const size_t bytes = (size_t)stride * (size_t)g.h * 4u;
-    void *dst = psp_mem_ptr(g.target_addr, bytes);
+ * passed the M2 gate all read guest memory, and render-target aliases need the
+ * actual PSP bytes before the shared texture decoder can reinterpret them.
+ *
+ * One glReadPixels for the whole surface matters: the old row-at-a-time path
+ * forced 272 GPU/CPU synchronisation points at every flip, which made complex
+ * mission frames disproportionately slow.  Rows are flipped and packed on the
+ * CPU after that single transfer. */
+static void readback_rt(int i) {
+    rendertarget *r = &g.rts[i];
+    if (!r->configured || !r->addr || !r->stride) return;
+    const int bpp = r->fmt == 3 ? 4 : 2;
+    const size_t bytes = (size_t)r->stride * (size_t)r->h * (size_t)bpp;
+    void *dst = psp_mem_ptr(r->addr, bytes);
     if (!dst) return;
 
-    /* GL hands back bottom-up; the guest's framebuffer is top-down, and the
-     * rows are `stride` pixels wide rather than `w`. One row at a time is
-     * slower than one call and is the version that is obviously correct;
-     * making it fast belongs with the increment that measures it. */
-    static uint8_t *row;
-    if (!row) row = malloc((size_t)g.w * 4u);
-    if (!row) return;
-    uint8_t *out = (uint8_t *)dst;
-    for (int y = 0; y < g.h; y++) {
-        p_glReadPixels(0, g.h - 1 - y, g.w, 1, GL_RGBA, GL_UNSIGNED_BYTE, row);
-        memcpy(out + (size_t)y * stride * 4u, row, (size_t)g.w * 4u);
+    static uint8_t *pixels;
+    static size_t capacity;
+    const size_t need = (size_t)r->w * (size_t)r->h * 4u;
+    if (need > capacity) {
+        uint8_t *larger = realloc(pixels, need);
+        if (!larger) return;
+        pixels = larger;
+        capacity = need;
     }
+
+    const uint64_t readback_t0 = psp_os_mono_ns();
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
+    p_glReadPixels(0, 0, r->w, r->h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+    uint8_t *out = (uint8_t *)dst;
+    const int copy_w = r->w < (int)r->stride ? r->w : (int)r->stride;
+    for (int y = 0; y < r->h; y++) {
+        const uint8_t *row = pixels + (size_t)(r->h - 1 - y) * (size_t)r->w * 4u;
+        if (r->fmt == 3) {
+            memcpy(out + (size_t)y * r->stride * 4u, row, (size_t)copy_w * 4u);
+            continue;
+        }
+        uint16_t *row16 = (uint16_t *)(out + (size_t)y * r->stride * 2u);
+        for (int x = 0; x < copy_w; x++) {
+            const uint32_t red   = row[x * 4 + 0];
+            const uint32_t green = row[x * 4 + 1];
+            const uint32_t blue  = row[x * 4 + 2];
+            const uint32_t alpha = row[x * 4 + 3];
+            if (r->fmt == 0)
+                row16[x] = (uint16_t)((red >> 3) | ((green >> 2) << 5) |
+                                      ((blue >> 3) << 11));
+            else if (r->fmt == 1)
+                row16[x] = (uint16_t)((red >> 3) | ((green >> 3) << 5) |
+                                      ((blue >> 3) << 10) | ((alpha >> 7) << 15));
+            else
+                row16[x] = (uint16_t)((red >> 4) | ((green >> 4) << 4) |
+                                      ((blue >> 4) << 8) | ((alpha >> 4) << 12));
+        }
+    }
+    /* The raw pointer deliberately avoids one mark per output pixel. One range
+     * mark after conversion gives every texture overlapping this target the
+     * same precise invalidation signal. */
+    psp_mem_mark_write(r->addr, (uint32_t)bytes);
     g.readbacks++;
+    g.readback_ns += psp_os_mono_ns() - readback_t0;
+}
+
+static void note_frame_time(void) {
+    const uint64_t now = psp_os_mono_ns();
+    if (!g.frames) {
+        g.frame_first_ns = now;
+    } else {
+        const uint64_t gap = now - g.frame_prev_ns;
+        uint64_t ms = gap / UINT64_C(1000000);
+        if (ms > 255) ms = 255;
+        g.frame_ms[ms]++;
+        if (gap > g.frame_max_ns) g.frame_max_ns = gap;
+    }
+    g.frame_prev_ns = g.frame_last_ns = now;
+    g.frames++;
 }
 
 static void gl_present(void) {
     if (claim() != 0) return;
+    g.presents++;
     flush();
 
-    /* The current target, scaled into whatever size the window is now. */
-    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
+    /* The current target, scaled into the window's physical GL drawable. SDL
+     * window sizes are logical pixels on a high-DPI desktop; blitting to the
+     * fixed 960x544 logical size therefore occupied only the lower-left
+     * quarter of a 1920x1088 drawable. Preserve aspect ratio for arbitrary
+     * resizes and clear the letterbox before the blit. */
+    int draw_w = 0, draw_h = 0;
+    present_gl_drawable_size(&draw_w, &draw_h);
+    if (draw_w <= 0) draw_w = g.w * 2;
+    if (draw_h <= 0) draw_h = g.h * 2;
+    int out_w = draw_w;
+    int out_h = (int)((long long)draw_w * g.h / g.w);
+    if (out_h > draw_h) {
+        out_h = draw_h;
+        out_w = (int)((long long)draw_h * g.w / g.h);
+    }
+    const int out_x = (draw_w - out_w) / 2;
+    const int out_y = (draw_h - out_h) / 2;
+
+    if (rt_prepare(g.cur_rt) != 0) return;
+    rendertarget *shown = &g.rts[g.cur_rt];
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, shown->fbo);
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    p_glBlitFramebuffer(0, 0, g.w, g.h, 0, 0, g.w * 2, g.h * 2,
+    p_glDisable(GL_SCISSOR_TEST);
+    p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    p_glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    p_glClear(GL_COLOR_BUFFER_BIT);
+    p_glBlitFramebuffer(0, 0,
+                        shown->w < g.w ? shown->w : g.w,
+                        shown->h < g.h ? shown->h : g.h,
+                        out_x, out_y, out_x + out_w, out_y + out_h,
                         GL_COLOR_BUFFER_BIT, GL_LINEAR);
     present_gl_swap();
 
@@ -901,16 +1448,18 @@ static void gl_present(void) {
      * instruments in display.c and boot.c all read guest memory, and which
      * buffer they read is not this backend's to know -- so all of them are
      * made true rather than guessing at one. */
-    const uint32_t save_addr = g.target_addr;
+    int rendered = 0;
     for (int i = 0; i < g.n_rts; i++) {
         if (!g.rts[i].dirty) continue;
-        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g.rts[i].fbo);
-        g.target_addr = g.rts[i].addr;
-        readback();
+        readback_rt(i);
         g.rts[i].dirty = 0;
+        rendered = 1;
     }
-    g.target_addr = save_addr;
     p_glBindFramebuffer(GL_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
+    /* This game calls sceDisplaySetFrameBuf twice per rendered frame. Counting
+     * both callbacks produced a fictitious 63 fps with alternating 12/20 ms
+     * intervals; a dirty target is the evidence that new work was presented. */
+    if (rendered) note_frame_time();
 }
 
 static const psp_render_backend gl_backend = {
@@ -941,13 +1490,59 @@ void render_gl_report(FILE *out) {
     fprintf(out, "\n          targets: %d%s", g.n_rts,
             g.rt_overflow ? " (more than the table holds)" : "");
     for (int i = 0; i < g.n_rts; i++)
-        fprintf(out, " %08X", g.rts[i].addr);
-    fprintf(out, "\n          textures: %llu upload(s), %llu hit(s), %llu eviction(s),"
-                 " %llu too big, %llu from VRAM, %llu sampled from a target",
+        if (g.rts[i].configured)
+            fprintf(out, " %08X(%dx%d,s%u,f%d)", g.rts[i].addr,
+                    g.rts[i].w, g.rts[i].h, g.rts[i].stride, g.rts[i].fmt);
+        else
+            fprintf(out, " %08X(unused)", g.rts[i].addr);
+    fprintf(out, "\n          textures: %llu request(s), %llu upload(s), %llu hit(s)"
+                 " (%llu immediate, %llu revalidated), %llu dirty invalidation(s),"
+                 " %llu miss(es), %llu eviction(s), %d/%d resident, %llu too big, %llu from VRAM,"
+                 " %llu sampled from a target",
+            (unsigned long long)g.tex_requests,
             (unsigned long long)g.tex_uploads, (unsigned long long)g.tex_hits,
-            (unsigned long long)g.tex_evictions, (unsigned long long)g.tex_too_big,
+            (unsigned long long)g.tex_fast_hits,
+            (unsigned long long)g.tex_revalidated,
+            (unsigned long long)g.tex_invalidations,
+            (unsigned long long)g.tex_misses,
+            (unsigned long long)g.tex_evictions, g.cache_entries, TEXCACHE_MAX,
+            (unsigned long long)g.tex_too_big,
             (unsigned long long)g.tex_vram_uploads,
             (unsigned long long)g.tex_from_rt);
+    if (g.tex_alias_from_rt)
+        fprintf(out, ", %llu target alias decode(s)",
+                (unsigned long long)g.tex_alias_from_rt);
+    if (g.mip_chains || g.mip_incomplete) {
+        fprintf(out, ", mipmaps: %llu chain upload(s), %llu extra level(s)",
+                (unsigned long long)g.mip_chains,
+                (unsigned long long)g.mip_levels);
+        if (g.mip_incomplete)
+            fprintf(out, ", %llu incomplete",
+                    (unsigned long long)g.mip_incomplete);
+    }
+    fprintf(out, "\n          timing: texture bind %.3f s (generation %.3f, decode %.3f,"
+                 " upload %.3f; %.1f MiB RGBA), readback %.3f s",
+            g.tex_bind_ns / 1.0e9, g.tex_generation_ns / 1.0e9,
+            g.tex_decode_ns / 1.0e9, g.tex_upload_ns / 1.0e9,
+            g.tex_upload_pixels * 4.0 / (1024.0 * 1024.0),
+            g.readback_ns / 1.0e9);
+    if (g.frames > 1 && g.frame_last_ns > g.frame_first_ns) {
+        const uint64_t intervals = g.frames - 1;
+        const uint64_t p50_at = (intervals + 1) / 2;
+        const uint64_t p95_at = (intervals * 95 + 99) / 100;
+        uint64_t seen = 0;
+        int p50 = -1, p95 = -1;
+        for (int ms = 0; ms < 256; ms++) {
+            seen += g.frame_ms[ms];
+            if (p50 < 0 && seen >= p50_at) p50 = ms;
+            if (seen >= p95_at) { p95 = ms; break; }
+        }
+        const double seconds = (g.frame_last_ns - g.frame_first_ns) / 1.0e9;
+        fprintf(out, "\n          frames: %llu rendered / %llu present call(s) over %.3f s"
+                     " (%.2f/s), interval p50 %d ms, p95 %d ms, max %.1f ms",
+                (unsigned long long)g.frames, (unsigned long long)g.presents, seconds,
+                intervals / seconds, p50, p95, g.frame_max_ns / 1.0e6);
+    }
     if (g.batch_overflows)
         fprintf(out, ", %llu batch flush(es) from overflow",
                 (unsigned long long)g.batch_overflows);

@@ -354,6 +354,8 @@ static int             g_gl_want;        /* set before present_start */
 static SDL_Window     *g_gl_win;
 static SDL_GLContext   g_gl_ctx;
 static int             g_gl_state;       /* 0 pending, 1 ready, -1 failed */
+static _Atomic int     g_gl_draw_w;
+static _Atomic int     g_gl_draw_h;
 static pthread_mutex_t g_gl_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_gl_cv   = PTHREAD_COND_INITIALIZER;
 
@@ -386,6 +388,14 @@ int present_gl_make_current(void) {
 }
 
 void present_gl_swap(void) { if (g_gl_win) SDL_GL_SwapWindow(g_gl_win); }
+
+/* SDL owns window queries on its presentation thread.  Publish the physical
+ * drawable size through atomics so the GE thread can scale its final blit
+ * correctly on high-DPI displays without reaching back into SDL. */
+void present_gl_drawable_size(int *w, int *h) {
+    if (w) *w = atomic_load(&g_gl_draw_w);
+    if (h) *h = atomic_load(&g_gl_draw_h);
+}
 
 void *present_gl_proc(const char *name) { return SDL_GL_GetProcAddress(name); }
 
@@ -424,6 +434,10 @@ static void *sdl_thread(void *arg) {
              * window, released here because it has to be current on the GE
              * thread instead. */
             SDL_GL_MakeCurrent(win, NULL);
+            int dw = 0, dh = 0;
+            SDL_GL_GetDrawableSize(win, &dw, &dh);
+            atomic_store(&g_gl_draw_w, dw);
+            atomic_store(&g_gl_draw_h, dh);
             fprintf(stderr, "present: GL 3.3 core context created, "
                             "handed to the GE thread\n");
         } else {
@@ -464,6 +478,16 @@ static void *sdl_thread(void *arg) {
                     "backspace select | close window to stop\n");
 
     for (;;) {
+        /* Logical window pixels and GL drawable pixels differ under desktop
+         * scaling.  Refresh this on the SDL thread so resize and display-scale
+         * changes are reflected by the next GL presentation. */
+        if (g_gl_want && win) {
+            int dw = 0, dh = 0;
+            SDL_GL_GetDrawableSize(win, &dw, &dh);
+            atomic_store(&g_gl_draw_w, dw);
+            atomic_store(&g_gl_draw_h, dh);
+        }
+
         /* Publish the latest frame, if the guest has produced one. Waiting
          * bounded rather than forever keeps the window alive -- and showing
          * its last frame -- when the guest stalls, which it does. */

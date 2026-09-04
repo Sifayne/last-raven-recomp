@@ -47,8 +47,13 @@ The renderer is a software rasterizer, exact where it is implemented and a
 placeholder where it is not. Implemented since this paragraph last said
 otherwise: all five texture functions, a clip-space near clipper and the
 guard band, the scissor, mip chains, lighting, fog, the blend factors and the
-stencil. Still affine, still undithered — that is what the M2 gate's frame
-comparison had left over, and it is M5's. It costs 43–66 ns/pixel depending
+stencil. Perspective-correct texture interpolation is now carried across the
+backend seam. The GL backend uploads the complete declared mip chain and uses
+the software oracle's per-primitive AUTO/CONST/SLOPE LOD and 1/16 filter rules;
+its cache now tracks 256-byte guest-memory write generations, so unchanged
+VRAM textures remain resident while in-place updates and render-target
+readbacks invalidate exactly the ranges they touch. It is still undithered.
+The software path costs 43–66 ns/pixel depending
 on how textured the scene is: `mission-1.pad` spends 84.6 s of raster across
 1,793 GE finishes, which is 47 ms of rasterizing per frame against a 16.7 ms
 budget — **about 2.8× over, on the scene M5 has to hold at 60 fps**. It is the
@@ -402,16 +407,14 @@ pixel-comparable to the software path on a fixed set of display lists
   Vulkan's; the old plan's first increment is what `host/present.c` already
   does in SDL2; and SDL3 would land on the audio callback M3's gate rests on.
   Vulkan later if it earns it -- the interface is what makes that cheap.
-- **Four prerequisites, none of them the backend.** The first is **done**
-  (3 Sep): `psp_render_select` was called from `test_raster.c` and nowhere
-  else, and is now wired to `PSPRECOMP_RENDER` in `host/boot.c`, with an
-  unknown name fatal rather than a silent fall back to software. The other
-  three stand: `psp_render_raster_ns` is cumulative and printed once per run,
-  which cannot show 60 fps; the gate's "fixed set of display lists" has no
-  capture or replay tool, since `09-replay.sh` replays controller input and
-  `PSPRECOMP_FRAMES` dumps finished images; and `ge.c`'s pixel and depth
-  counters are software-backend concepts that read zero under any other
-  backend.
+- **Prerequisites.** Runtime selection is **done** (3 Sep):
+  `PSPRECOMP_RENDER` selects the backend and an unknown name is fatal.
+  Display-list capture plus `host/gereplay.c` are also **done** (4 Sep); the
+  remaining capture defect is that its saved framebuffer region replays empty,
+  so it proves command equivalence but does not yet yield a readable scene.
+  Still standing: `psp_render_raster_ns` is cumulative rather than per-frame,
+  and `ge.c`'s pixel/depth counters are software-backend concepts that read
+  zero under another backend.
 - Frame pacing on the vblank grid the clock already owns.
 - **The backend lives in the host, and the context on the GE thread** (3 Sep,
   findings item 51). SDL2 is the host's by policy, so a backend needing a
@@ -438,6 +441,39 @@ pixel-comparable to the software path on a fixed set of display lists
   wrong input for rendering at a higher internal resolution. Do not try to
   retrofit scaling onto it; M5's gate is a pixel comparison, and that gate is
   only meaningful at 1x.
+- **Mipmaps and LOD — done 4 Sep.** Cache identities include every active
+  level's address, stride and dimensions; all levels are decoded and uploaded.
+  Software and GL share the PSP's AUTO/CONST/SLOPE calculation, including its
+  signed 1/16 bias, and GL performs the measured in-level and between-level
+  filtering explicitly rather than inheriting OpenGL's different switch-over
+  rule. `mission-1.pad` uploaded 47,779 chains / 95,558 extra levels with zero
+  incomplete chains. Against the same deterministic software end frame, RMSE
+  improved from 0.01532 to 0.01418.
+- **Content-aware texture cache and cadence measurements — done 4 Sep.** Every
+  scalar and bulk guest-memory write advances a 256-byte range generation;
+  direct HLE writers, GE render-target readbacks and capture restores mark
+  their ranges explicitly. A cache entry records the generations of all active
+  mip levels and the reachable CLUT, taking an O(1) hit while the global write
+  serial is unchanged and scanning only after some guest memory changed.
+  Direct-colour entries ignore incidental CLUT state, and a 32-entry bounded
+  probe retains the least-recently-used working set rather than thrashing its
+  first collision. `mission-1.pad` fell from 232,385 uploads to 1,073
+  (**99.5% fewer**) with 898 real dirty invalidations, 175 cold misses and only
+  16 evictions; 159 of the 512 slots are resident at the end. Its final
+  framebuffer is byte-identical to the
+  pre-cache mip/LOD frame; the fixed `big.gcap` frame is also byte-identical to
+  both its previous GL result and the software oracle. Texture binding,
+  including generation checks, decoding and driver upload, costs 1.157 s over
+  the 56.6 s mission; readback costs 0.832 s.
+
+  Cadence is not scene-complexity dependent in the two measured paths. The
+  mission renders 1,791 new frames over 56.6 s with 33 ms median / 34 ms p95
+  intervals; the hangar has the same 33/34 ms steady intervals. The game makes
+  two `sceDisplaySetFrameBuf` calls for each new frame, which the report keeps
+  separate rather than mislabelling as 60+ fps. This is a stable ~30 fps game
+  path, not a GL workload falling behind in the mission. Any remaining
+  perceived game-speed difference belongs in the clock/game-timing pass rather
+  than another texture optimisation.
 
 ## M6 — Ship shape
 

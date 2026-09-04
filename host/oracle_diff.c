@@ -293,7 +293,9 @@ static void snap_take(snapshot *s) {
 static void snap_restore(const snapshot *s) {
     psp_cpu = s->cpu;
     memcpy(psp_mem.ram + STACK_WIN_OFF, s->stack,  STACK_WIN_LEN);
+    psp_mem_mark_write(PSP_RAM_BASE + STACK_WIN_OFF, STACK_WIN_LEN);
     memcpy(g_module_host, s->module, g_module_size);
+    psp_mem_mark_write(g_module_lo, g_module_size);
     psp_mem_bad_access = s->bad_access;
 }
 

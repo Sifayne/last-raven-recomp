@@ -40,11 +40,16 @@ static inline int present_start(void) {
 #ifdef HAVE_SDL2
 void  present_want_gl(void);
 int   present_gl_make_current(void);
+void  present_gl_drawable_size(int *w, int *h);
 void  present_gl_swap(void);
 void *present_gl_proc(const char *name);
 #else
 static inline void  present_want_gl(void) { }
 static inline int   present_gl_make_current(void) { return -1; }
+static inline void  present_gl_drawable_size(int *w, int *h) {
+    if (w) *w = 0;
+    if (h) *h = 0;
+}
 static inline void  present_gl_swap(void) { }
 static inline void *present_gl_proc(const char *name) { (void)name; return 0; }
 #endif
