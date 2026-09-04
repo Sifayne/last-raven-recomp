@@ -395,8 +395,21 @@ pixel-comparable to the software path on a fixed set of display lists
 
 - Behind the `psp_render_backend` interface that already exists
   (`tools/psprecomp/docs/RENDERER.md`). The software path stays the oracle.
-- Which API is decided then, not now. OpenGL 3.3 core through SDL2 is the
-  low-risk first; Vulkan later if it earns it.
+- **The API is decided: OpenGL 3.3 core on SDL2** (3 Sep). RENDERER.md had
+  said SDL3 + Vulkan since 20 Jul and was the document being read; it now
+  carries the decision and the reasoning. In short: nine of the interface's
+  twelve entry points are per-draw state setters, which is GL's model and not
+  Vulkan's; the old plan's first increment is what `host/present.c` already
+  does in SDL2; and SDL3 would land on the audio callback M3's gate rests on.
+  Vulkan later if it earns it -- the interface is what makes that cheap.
+- **Four prerequisites, none of them the backend**, and all missing:
+  `psp_render_select` is called from `test_raster.c` and nowhere else, so
+  wire it to an environment variable in `host/boot.c`; `psp_render_raster_ns`
+  is cumulative and printed once per run, which cannot show 60 fps; the gate's
+  "fixed set of display lists" has no capture or replay tool, since
+  `09-replay.sh` replays controller input and `PSPRECOMP_FRAMES` dumps
+  finished images; and `ge.c`'s pixel and depth counters are software-backend
+  concepts that read zero under any other backend.
 - Frame pacing on the vblank grid the clock already owns.
 
 ## M6 — Ship shape
