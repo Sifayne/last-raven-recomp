@@ -4542,3 +4542,36 @@ faithful execution of that test.
 
     Not implemented, and not measured by this corpus: reverb, and the noise
     generator (the frequency is validated, the generator is not there).
+
+49. **The regression bar was reading three times high, and M3's gate gets a
+    number** (3 Sep). Bookkeeping, of the kind this file exists to stop being
+    necessary.
+
+    **The bar lied for a day.** `264a9b2` ("deferred GE -- queue on EnQueue,
+    drain on Sync") made a display list count **once at enqueue** rather than
+    once per stall-resumed run. Every GE list count in state.md's regression
+    table was written under the old rule, so every row read three times high:
+    title-idle 5,406 against a true 1,803, skip-intro 7,506 against 2,503,
+    the hangar 1,296 against 433, New Game 18,006 against 6,003. Item 39 saw
+    the drop while doing the ATRAC work, attributed it to another session's
+    uncommitted `ge.c` change, and left the rows alone -- but the change was
+    committed, and the rows stayed wrong through the whole of M3. **The tell
+    is that lists now equal finishes on every row**, which is what the
+    counter's name has always promised.
+
+    Re-baselined by re-running all seven replays back to back on a quiet
+    machine, `4192624` / fork `72664ec`: 0 bad accesses everywhere, every
+    `stop` reached. Command counts were untouched by the counter change and
+    four of the seven reproduce to the byte.
+
+    **Three rows are down exactly 261 commands, and that is left open.**
+    main-menu, garage and mission-1 each read 261 fewer commands than the M2
+    gate recorded (item 38); the other four are identical. `--repeat 2` reports
+    main-menu's guest-visible trajectory identical, so these rows are
+    deterministic on this build, and the same constant across three scenarios
+    of very different length is not run-to-run variation. These three are also
+    precisely the rows transcribed *last*, so whatever did it landed after
+    item 38 and before the evening runs -- `998dc8e` and `264a9b2` are the
+    candidates. Recorded rather than explained, because 261 is small enough to
+    shrug at and constant enough not to be random, which is the profile of
+    most of the bugs in this file.

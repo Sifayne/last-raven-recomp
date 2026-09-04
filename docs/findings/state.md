@@ -303,11 +303,11 @@ All are off by default and cost nothing when off.
 | `scripts/08-autotest-sweep.sh` | All 432 tests, reduced budget and a per-test wall timeout, into `reports/08-sweep.tsv`. A map, not a verdict: the reduced budget truncates tests that legitimately run long. Rank by the differing-line column — one line away is one bug, five hundred is an unimplemented library. |
 
 **The GE list count doubles as a cost signal, and it earned that on 2 Sep.**
-New Game sits at 18,006 lists and 6,003 finishes. It fell to 17,200-17,500
+New Game sits at 6,003 lists and 6,003 finishes. It fell to 17,200-17,500
 across several runs while the guard band was wrongly relaxed -- the replay is
 keyed on pad polls and the game paces against elapsed time, so letting
 enormous off-screen triangles reach the rasterizer cost enough frames to show
-here. With the rule restored it is back at 18,006 exactly, lighting and all.
+here. With the rule restored it is back at 6,003 exactly, lighting and all.
 So a drop in this number without a change in what the run reaches means
 something got dramatically more expensive, and is worth chasing rather than
 shrugging at.
@@ -1300,19 +1300,44 @@ compared:  3073      match: 3071      differ: 2      dispatch miss: 0
 
 **And the game, four ways.** The headless run is the bar the project had; the
 three replays are the bar it needs, because the headless run ends at the logo
-and cannot see anything past it. Measured 1 Sep on `3f402c5`.
+and cannot see anything past it. Re-baselined 3 Sep on `4192624` /
+fork `72664ec`, every row re-run back to back on a quiet machine.
+
+**The list counts here were wrong for a day, and the reason is worth keeping.**
+`264a9b2` ("deferred GE -- queue on EnQueue, drain on Sync") made a list count
+**once at enqueue** instead of once per stall-resumed run, so every count in
+this table read three times high. Findings item 39 saw the drop, attributed it
+to another session's uncommitted `ge.c` change, and left the rows alone -- but
+the change was committed, and the rows stayed wrong through the whole of M3.
+Lists now equal finishes on every row, which is the tell that the counter is
+counting what its name says. Command counts were untouched by it: four of the
+seven rows reproduce to the byte.
+
+**The other three are down exactly 261 commands each, and that is not noise.**
+`main-menu`, `garage` and `mission-1` each read 261 fewer than the numbers
+written during the M2 gate; `title-idle`, `skip-intro`, `hanger` and
+`new-game` are identical. `--repeat 2` on main-menu reports the guest-visible
+trajectory identical, so the row is deterministic on this build, and the same
+constant across three scenarios of very different length rules out run-to-run
+variation. These three are also exactly the rows whose values were transcribed
+*last* (item 38, 3 Sep), so whatever did it landed after that and before the
+evening runs -- `998dc8e` (blend and stencil) and `264a9b2` are the
+candidates. **Unexplained, and left that way deliberately**: 261 is small
+enough to shrug at and constant enough not to be random, which is the profile
+of the bugs this file keeps being written by. The new numbers are the
+baseline; the question is whose 261 commands stopped being counted.
 
 | command | expect |
 |---|---|
 | `scripts/06-boot.sh` (default) | 639 lists, 106,762 commands, 93,875,406 pixels, 0 bad mem; frames 0 / 751 / 9,020 |
 | save and load (windowed, by hand) | Save from the garage writes `ms0:/PSP/SAVEDATA/NPUH10024ACLRSAVELIST00/` -- `SAVEDATA.BIN` 28,316 B, a valid `PARAM.SFO`, `ICON0.PNG`, `PIC1.PNG` -- and a later launch loads it into the hangar (3 Sep, M4's gate). No scenario covers it: `garage.pad` starts a new game every time, so a replay only makes the boot free-space call. `ms/` is gitignored; the save is the player's |
-| `scripts/09-replay.sh --decode scenarios/title-idle.pad` | `stop` at poll 1800, 0 bad mem, 5,406 lists, 874,060 commands |
-| `scripts/09-replay.sh --decode scenarios/skip-intro.pad` | `stop` at poll 2500, 0 bad mem, 7,506 lists, 2,280,256 commands, the menu in the displayed frame |
-| `scripts/09-replay.sh --decode scenarios/hanger.pad` | **`stop` at poll 430, 0 bad mem**, 1,296 lists, 1,613,365 commands, the option menu over the hangar — the same scene as new-game.pad in 14 seconds rather than minutes (2 Sep); **the room renders since the `vidt` fix** (3 Sep, findings item 33) — walls, grating, doorway, light shafts — where it was nearly black; **floor, pillars and hazard stripes since the clip-space near clipper** (3 Sep, item 34), where they were shards — 7,944 near-cut vertices and 12,300 split-added in the summary, was 84 / 4,780 |
-| `scripts/09-replay.sh --decode scenarios/new-game.pad` | **`stop` at poll 6000, 0 bad mem**, 70/70 events, 18,006 lists, 51,603,655 commands, the sound-settings panel in the displayed frame (1 Sep, night — M1's gate); **every glyph on it exact** since indexed draws were fixed (2 Sep); gate reproduces exactly behind a wider drain (3 Sep — it renders more now, 288 s of raster, so the default drain expires first) |
-| `scripts/09-replay.sh --decode scenarios/mission-1.pad` | **`stop` at poll 1790, 0 bad mem**, 5,376 lists, 19,007,445 commands, the mission's opening with its chatter box; ~87 s wall, 56 ns/pixel (2 Sep, night — the first run into a sortie); **renders since the `vidt` fix** (3 Sep) — mean 84 against ~100, 4,200 colours, mech, buildings, smoke, lit horizon; **continuous ground since the clip-space near clipper** (3 Sep, item 34), where it was shards — same 5,376 / 19,007,445; **light-blue sky and far field since fog** (3 Sep, item 36), end-frame mean 92 against the reference's 89 |
-| `scripts/09-replay.sh --decode scenarios/main-menu.pad` | **`stop` at poll 748, 0 bad mem**, 2,250 lists, 9,556,513 commands, the main menu with the AC standing behind it, GARAGE highlighted (3 Sep, recut from 810; findings item 38) -- mean 36 against the PPSSPP frame's 36 |
-| `scripts/09-replay.sh --decode scenarios/garage.pad` | **`stop` at poll 925, 0 bad mem**, 2,781 lists, 11,948,579 commands, the sortie launch's AC in the hangar (3 Sep, item 38) -- mean 39 against 38 |
+| `scripts/09-replay.sh --decode scenarios/title-idle.pad` | `stop` at poll 1800, 0 bad mem, 1,803 lists, 874,060 commands |
+| `scripts/09-replay.sh --decode scenarios/skip-intro.pad` | `stop` at poll 2500, 0 bad mem, 2,503 lists, 2,280,256 commands, the menu in the displayed frame |
+| `scripts/09-replay.sh --decode scenarios/hanger.pad` | **`stop` at poll 430, 0 bad mem**, 433 lists, 1,613,365 commands, the option menu over the hangar — the same scene as new-game.pad in 14 seconds rather than minutes (2 Sep); **the room renders since the `vidt` fix** (3 Sep, findings item 33) — walls, grating, doorway, light shafts — where it was nearly black; **floor, pillars and hazard stripes since the clip-space near clipper** (3 Sep, item 34), where they were shards — 7,944 near-cut vertices and 12,300 split-added in the summary, was 84 / 4,780 |
+| `scripts/09-replay.sh --decode scenarios/new-game.pad` | **`stop` at poll 6000, 0 bad mem**, 70/70 events, 6,003 lists, 51,603,655 commands, the sound-settings panel in the displayed frame (1 Sep, night — M1's gate); **every glyph on it exact** since indexed draws were fixed (2 Sep); gate reproduces exactly behind a wider drain (3 Sep — it renders more now, 288 s of raster, so the default drain expires first) |
+| `scripts/09-replay.sh --decode scenarios/mission-1.pad` | **`stop` at poll 1790, 0 bad mem**, 1,793 lists, 19,007,184 commands, the mission's opening with its chatter box; ~87 s wall, 56 ns/pixel (2 Sep, night — the first run into a sortie); **renders since the `vidt` fix** (3 Sep) — mean 84 against ~100, 4,200 colours, mech, buildings, smoke, lit horizon; **continuous ground since the clip-space near clipper** (3 Sep, item 34), where it was shards — same 1,793 / 19,007,184; **light-blue sky and far field since fog** (3 Sep, item 36), end-frame mean 92 against the reference's 89 |
+| `scripts/09-replay.sh --decode scenarios/main-menu.pad` | **`stop` at poll 748, 0 bad mem**, 751 lists, 9,556,252 commands, the main menu with the AC standing behind it, GARAGE highlighted (3 Sep, recut from 810; findings item 38) -- mean 36 against the PPSSPP frame's 36 |
+| `scripts/09-replay.sh --decode scenarios/garage.pad` | **`stop` at poll 925, 0 bad mem**, 928 lists, 11,948,318 commands, the sortie launch's AC in the hangar (3 Sep, item 38) -- mean 39 against 38 |
 | `scripts/08-autotest-sweep.sh` | **138 MATCH** of 432, 3 NOOUTPUT (3 Sep, after blend and stencil: no row moved; after fog: `gpu/commands/fog.prx` DIFFER 528 → MATCH and nothing else moved); `utility/msgdialog/dialog.prx` is back at DIFFER 139 since the interp's teardown fix (item 35); diff per test, the total is not a goal |
 | `scripts/07-autotests.sh <dir with gpu/commands/blend.prx, blend565.prx + .expected>` | **every value matches** on both (3 Sep, item 37); the runner reports 128 / 140 differing lines, all of them the `[r]`/`[x]` checkpoint prefix, a scheduling artifact -- strip it before diffing |
 | `scripts/07-autotests.sh <dir with gpu/commands/fog.prx + .expected>` | **MATCHES hardware**, all 272 rows including the 256 immediate-mode rounding rows (3 Sep, item 36) |

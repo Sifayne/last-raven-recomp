@@ -56,8 +56,10 @@ written, and the result code is never filled in.
 
 **Gate — passed.** `scripts/09-replay.sh --decode scenarios/new-game.pad`
 reaches its `stop` at poll 6000 with `bad mem: 0`, 70 of 70 events delivered,
-18,006 GE lists; the displayed frame is the game's initial sound-settings
-panel. `title-idle.pad` and `skip-intro.pad` unchanged.
+18,006 GE lists as the counter read them that day (**6,003** since `264a9b2`
+changed what a list is -- see findings item 49); the displayed frame is the
+game's initial sound-settings panel. `title-idle.pad` and `skip-intro.pad`
+unchanged.
 
 **What the fault was.** Not audio. The emitter never translated the four VFPU
 condition branches (`bvt`/`bvf` and likely forms) — it emitted them as never
