@@ -492,6 +492,14 @@ pixel-comparable to the software path on a fixed set of display lists
   path, not a GL workload falling behind in the mission. Any remaining
   perceived game-speed difference belongs in the clock/game-timing pass rather
   than another texture optimisation.
+- **GPU frame timing — done 4 Sep.** An eight-query nonblocking ring measures
+  native-resolution draw work through the final blit without waiting for an
+  unavailable result; a full ring is counted rather than stalled. The mission
+  produces 1,791 samples at 0.80 ms mean, 0.8 ms p50, 2.1 ms p95 and 2.67 ms
+  maximum, with no dropped measurements. The exact-list hangar costs 1.27 ms,
+  and both its image and the mission end frame are byte-identical before and
+  after the instrumentation. The observed 33--35 ms game-frame cadence is not
+  GPU saturation: there is ample headroom inside a 16.7 ms rendering budget.
 
 ## M6 — Ship shape
 

@@ -38,7 +38,7 @@
 #include <SDL_opengl.h>
 #include <pthread.h>
 
-enum { GL_MAX_VERTS = 64 * 1024 };
+enum { GL_MAX_VERTS = 64 * 1024, GPU_QUERY_RING = 8 };
 
 /* ---- the entry points we need, loaded by hand ------------------------------
  *
@@ -129,7 +129,12 @@ typedef void (APIENTRY *PFN_glClearDepth)(GLdouble);
     X(PFNGLGENRENDERBUFFERSPROC,        glGenRenderbuffers) \
     X(PFNGLBINDRENDERBUFFERPROC,        glBindRenderbuffer) \
     X(PFNGLRENDERBUFFERSTORAGEPROC,     glRenderbufferStorage) \
-    X(PFNGLFRAMEBUFFERRENDERBUFFERPROC, glFramebufferRenderbuffer)
+    X(PFNGLFRAMEBUFFERRENDERBUFFERPROC, glFramebufferRenderbuffer) \
+    X(PFNGLGENQUERIESPROC,               glGenQueries) \
+    X(PFNGLBEGINQUERYPROC,               glBeginQuery) \
+    X(PFNGLENDQUERYPROC,                 glEndQuery) \
+    X(PFNGLGETQUERYOBJECTIVPROC,         glGetQueryObjectiv) \
+    X(PFNGLGETQUERYOBJECTUI64VPROC,      glGetQueryObjectui64v)
 
 #define X(type, name) static type p_##name;
 GL_FUNCS(X)
@@ -226,6 +231,7 @@ static struct {
     uint32_t fog_colour;
     psp_blend_state bs;
     uint64_t unsupported_blend_eq, unsupported_blend_factor;
+    uint64_t unsupported_stencil_draws;
 
     /* Texture state as the interpreter last set it, plus what is bound. */
     psp_tex_state tex;
@@ -257,7 +263,13 @@ static struct {
     uint64_t presents, frames, frame_first_ns, frame_last_ns, frame_prev_ns;
     uint64_t frame_max_ns;
     uint64_t frame_ms[256];
-} g;
+    GLuint   gpu_query[GPU_QUERY_RING];
+    uint8_t  gpu_query_pending[GPU_QUERY_RING];
+    int      gpu_query_active, gpu_query_suppressed;
+    unsigned gpu_query_next;
+    uint64_t gpu_samples, gpu_total_ns, gpu_max_ns, gpu_dropped;
+    uint64_t gpu_tenth_ms[256];
+} g = { .gpu_query_active = -1 };
 
 enum { FLOATS_PER_VERT = 13 };  /* x,y,z, r,g,b,a, u,v, fog, 1/w, texture q, lod16 */
 
@@ -267,6 +279,61 @@ static void readback_rt(int i);
 
 static unsigned long this_thread(void) {
     return (unsigned long)pthread_self();
+}
+
+/* ---- asynchronous GPU frame timing --------------------------------------
+ *
+ * Wall cadence answers whether the game is paced; it does not answer how
+ * much of the frame budget the GPU used. TIME_ELAPSED queries bracket the
+ * native-resolution draws and final blit. Eight objects are rotated so a
+ * result is only read after the driver says it is ready; the measurement must
+ * never introduce the stall it is trying to measure. A readback later in the
+ * same present normally makes the just-ended result available anyway. */
+static void gpu_query_record(uint64_t ns) {
+    g.gpu_samples++;
+    g.gpu_total_ns += ns;
+    if (ns > g.gpu_max_ns) g.gpu_max_ns = ns;
+    uint64_t bin = ns / UINT64_C(100000);       /* tenths of a millisecond */
+    if (bin > 255) bin = 255;
+    g.gpu_tenth_ms[bin]++;
+}
+
+static void gpu_query_poll(void) {
+    for (int i = 0; i < GPU_QUERY_RING; i++) {
+        if (!g.gpu_query_pending[i]) continue;
+        GLint available = 0;
+        p_glGetQueryObjectiv(g.gpu_query[i], GL_QUERY_RESULT_AVAILABLE,
+                             &available);
+        if (!available) continue;
+        GLuint64 ns = 0;
+        p_glGetQueryObjectui64v(g.gpu_query[i], GL_QUERY_RESULT, &ns);
+        g.gpu_query_pending[i] = 0;
+        gpu_query_record((uint64_t)ns);
+    }
+}
+
+static void gpu_query_begin_frame(void) {
+    if (g.gpu_query_active >= 0 || g.gpu_query_suppressed) return;
+    gpu_query_poll();
+    for (int n = 0; n < GPU_QUERY_RING; n++) {
+        const int i = (int)((g.gpu_query_next + (unsigned)n) % GPU_QUERY_RING);
+        if (g.gpu_query_pending[i]) continue;
+        p_glBeginQuery(GL_TIME_ELAPSED, g.gpu_query[i]);
+        g.gpu_query_active = i;
+        g.gpu_query_next = ((unsigned)i + 1u) % GPU_QUERY_RING;
+        return;
+    }
+    g.gpu_query_suppressed = 1;
+    g.gpu_dropped++;
+}
+
+static void gpu_query_end_frame(void) {
+    if (g.gpu_query_active >= 0) {
+        p_glEndQuery(GL_TIME_ELAPSED);
+        g.gpu_query_pending[g.gpu_query_active] = 1;
+        g.gpu_query_active = -1;
+    }
+    g.gpu_query_suppressed = 0;
 }
 
 /* ---- shaders ---------------------------------------------------------------
@@ -648,6 +715,7 @@ static int claim(void) {
 
     g.batch = calloc(GL_MAX_VERTS * FLOATS_PER_VERT, sizeof(float));
     if (!g.batch) { g.failed = 1; return -1; }
+    p_glGenQueries(GPU_QUERY_RING, g.gpu_query);
 
     fprintf(stderr, "gl: context claimed on thread %lu, %dx%d target\n",
             me, g.w, g.h);
@@ -1123,6 +1191,7 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
     if (claim() != 0) return;
     g.draws++;
     g.verts += (uint64_t)count;
+    if (g.bs.stencil_test) g.unsupported_stencil_draws++;
 
     switch (prim) {
     case 3:                                        /* triangles */
@@ -1316,6 +1385,7 @@ static void flush(void) {
     p_glBufferSubData(GL_ARRAY_BUFFER, 0,
                       (GLsizeiptr)(g.batch_n * FLOATS_PER_VERT * sizeof(float)),
                       g.batch);
+    gpu_query_begin_frame();
     p_glDrawArrays(GL_TRIANGLES, 0, (GLsizei)g.batch_n);
     g.batch_n = 0;
 }
@@ -1429,7 +1499,11 @@ static void gl_present(void) {
     const int out_x = (draw_w - out_w) / 2;
     const int out_y = (draw_h - out_h) / 2;
 
-    if (rt_prepare(g.cur_rt) != 0) return;
+    if (rt_prepare(g.cur_rt) != 0) {
+        gpu_query_end_frame();
+        gpu_query_poll();
+        return;
+    }
     rendertarget *shown = &g.rts[g.cur_rt];
     p_glBindFramebuffer(GL_READ_FRAMEBUFFER, shown->fbo);
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
@@ -1442,6 +1516,7 @@ static void gl_present(void) {
                         shown->h < g.h ? shown->h : g.h,
                         out_x, out_y, out_x + out_w, out_y + out_h,
                         GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    gpu_query_end_frame();
     present_gl_swap();
 
     /* Read every target that has been drawn into since the last flip. The
@@ -1455,6 +1530,7 @@ static void gl_present(void) {
         g.rts[i].dirty = 0;
         rendered = 1;
     }
+    gpu_query_poll();
     p_glBindFramebuffer(GL_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
     /* This game calls sceDisplaySetFrameBuf twice per rendered frame. Counting
      * both callbacks produced a fictitious 63 fps with alternating 12/20 ms
@@ -1526,6 +1602,26 @@ void render_gl_report(FILE *out) {
             g.tex_decode_ns / 1.0e9, g.tex_upload_ns / 1.0e9,
             g.tex_upload_pixels * 4.0 / (1024.0 * 1024.0),
             g.readback_ns / 1.0e9);
+    if (g.gpu_samples) {
+        const uint64_t p50_at = (g.gpu_samples + 1) / 2;
+        const uint64_t p95_at = (g.gpu_samples * 95 + 99) / 100;
+        uint64_t seen = 0;
+        int p50 = -1, p95 = -1;
+        for (int tenth = 0; tenth < 256; tenth++) {
+            seen += g.gpu_tenth_ms[tenth];
+            if (p50 < 0 && seen >= p50_at) p50 = tenth;
+            if (seen >= p95_at) { p95 = tenth; break; }
+        }
+        fprintf(out, "\n          gpu: %llu draw+blit sample(s), mean %.2f ms, "
+                     "p50 %.1f ms, p95 %.1f ms, max %.2f ms",
+                (unsigned long long)g.gpu_samples,
+                g.gpu_total_ns / (double)g.gpu_samples / 1.0e6,
+                p50 / 10.0, p95 / 10.0, g.gpu_max_ns / 1.0e6);
+        if (g.gpu_dropped)
+            fprintf(out, ", %llu frame(s) unmeasured because the query ring "
+                         "was full",
+                    (unsigned long long)g.gpu_dropped);
+    }
     if (g.frames > 1 && g.frame_last_ns > g.frame_first_ns) {
         const uint64_t intervals = g.frames - 1;
         const uint64_t p50_at = (intervals + 1) / 2;
@@ -1556,6 +1652,9 @@ void render_gl_report(FILE *out) {
         fprintf(out, ", blend not represented: %llu factor, %llu equation",
                 (unsigned long long)g.unsupported_blend_factor,
                 (unsigned long long)g.unsupported_blend_eq);
+    if (g.unsupported_stencil_draws)
+        fprintf(out, ", %llu draw(s) need alpha-backed stencil",
+                (unsigned long long)g.unsupported_stencil_draws);
     fprintf(out, "\n");
 }
 

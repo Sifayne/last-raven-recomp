@@ -5040,3 +5040,37 @@ faithful execution of that test.
     is 374.760 on 16-bit ImageMagick's scale, 0.005718 normalized. The fixed-list
     comparison gate therefore has a visual oracle now, not only matching
     counters.
+
+60. **The mission is paced at ~30 fps; draw plus blit is below 3 ms** (4 Sep).
+    Wall intervals alone could not distinguish a busy GPU from a game that
+    deliberately advances every other vblank, so M5 now measures both.
+
+    Eight `GL_TIME_ELAPSED` queries rotate across frames. A query begins with
+    the frame's first native-resolution draw and ends after its final window
+    blit. Pending objects are only read after `GL_QUERY_RESULT_AVAILABLE`; if
+    all eight are still busy, the report counts an unmeasured frame instead of
+    stalling the guest. Texture decode/upload and framebuffer readback keep
+    their existing CPU timers because they bracket host work as well as GL
+    commands.
+
+    The fixed 14,806-command hangar capture measures 1.27 ms of GPU work, with
+    its output byte-identical before and after the query path. The full mission
+    records 1,791/1,791 rendered frames at 0.80 ms mean, 0.8 ms p50, 2.1 ms p95
+    and 2.67 ms maximum, with no query-ring drops. Texture binding totals
+    1.219 s and readback 0.860 s across the entire 56.5 s run; their aggregate
+    CPU cost is also far too small to explain a 33 ms cadence. Its final
+    framebuffer remains byte-identical to the pacing, bounded-cache and mip/LOD
+    baselines.
+
+    This separates the two rates cleanly: rendered-frame wall intervals are
+    33 ms p50 / 35 ms p95 because this PSP port's game loop is ~30 fps, while
+    the GPU has ample headroom even against a 16.7 ms budget. The half-second
+    maximum *interval* is a loading gap with no new rendered frame, not a
+    half-second GPU frame; the maximum measured GPU work is 2.67 ms.
+
+    The same fixed capture reports no skipped point/line draws, no blend factor
+    or equation without a GL representation, and no stencil-enabled draws.
+    Its remaining normalized RMSE is 0.005718; 99.5% of pixels are either exact
+    or differ only by two levels in one or more channels after the game's final
+    doubling pass. That points the next fidelity work at exact blend/interpolant
+    arithmetic, not at missing texture coordinates or geometry.
