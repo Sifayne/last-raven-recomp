@@ -23,34 +23,44 @@ past the logo, and an explicit rule for when the conformance suite is worked.
 
 ## Where things stand
 
+**Refreshed 3 Sep.** This section had drifted to describing 1 Sep — five of
+its claims were false by the time anyone read them again, which is the exact
+failure the rest of this file is written to prevent. Re-check it whenever a
+milestone closes.
+
 Translation is finished — the differential oracle agrees on every function it
 can compare, and nothing on the critical path is codegen. The environment is
-where the work is: 154 of the module's 218 firmware imports are implemented
-(`reports/03-imports.txt`). Of the 64 missing, 27 are ad-hoc networking, 13
-are ATRAC3+ — all of the game's music — and the rest are small.
+where the work is, and most of it now exists: **207 of the module's 218
+firmware imports are implemented** (`reports/03-imports.txt`). The 11 missing
+are 7 in `sceUtility` and one each in `ModuleMgrForUser`, `sceImpose`,
+`sceOpenPSID` and `scePower`. Networking is registered and refuses honestly
+(M6's item, done 3 Sep).
 
-Measured 1 Sep, decoder on, from `scenarios/`: the intro plays, circle skips
-it, the title menu renders headless (7,506 GE lists, 0 bad accesses), and by
-the end of the day NEW GAME runs through to the game's sound-settings panel
-(18,006 GE lists, a million textured draws, 0 bad accesses) — M1's gate. The
-fault behind it was a codegen bug in the VFPU condition branches, reached
-only after three audio lies were removed; see M1 below. The full table is in
-[findings/state.md](findings/state.md) under *pad-driven*.
+Measured 3 Sep, decoder on, from `scenarios/`: the intro plays with sound,
+circle skips it, the title menu renders headless (2,503 GE lists, 0 bad
+accesses), NEW GAME reaches the sound-settings panel (6,003 lists, 0 bad
+accesses), and `mission-1.pad` plays a sortie through to its chatter box.
+Every row is in [findings/state.md](findings/state.md)'s regression table,
+re-baselined the same day.
 
-Known from that run and belonging to M2: the panel's glyphs are smeared
-(affine texturing), and the GE reports non-finite texture coordinates from
-the new geometry.
+The renderer is a software rasterizer, exact where it is implemented and a
+placeholder where it is not. Implemented since this paragraph last said
+otherwise: all five texture functions, a clip-space near clipper and the
+guard band, the scissor, mip chains, lighting, fog, the blend factors and the
+stencil. Still affine, still undithered — that is what the M2 gate's frame
+comparison had left over, and it is M5's. It costs 43–66 ns/pixel depending
+on how textured the scene is: `mission-1.pad` spends 84.6 s of raster across
+1,793 GE finishes, which is 47 ms of rasterizing per frame against a 16.7 ms
+budget — **about 2.8× over, on the scene M5 has to hold at 60 fps**. It is the
+reference any faster backend gets checked against, and it stays.
 
-The renderer is a software rasterizer that is exact where it is implemented
-and a placeholder where it is not: one texture function of five, no clipper,
-affine interpolation. It costs 12.9 ms of a 16.7 ms frame on the intro movie.
-It is the reference any faster backend gets checked against, and it stays.
+Sound: `sceSasCore` is a real synthesiser and all twelve `audio/sascore`
+files are byte-exact; `sceAtrac3plus` decodes through libavcodec, and so does
+the movie's audio substream. Reverb and the noise generator are the only
+pieces not built, deliberately.
 
-Sound: `sceSasCore` is a real synthesiser (VAG decode, ADSR, 32 voices, SDL
-output) with seven no-op entry points. `sceAtrac3plus` does not exist.
-
-Saves: the savedata dialog runs its lifecycle and completes; nothing is read or
-written, and the result code is never filled in.
+Saves: the game writes a real save to `ms0:` and loads it back — M4's gate,
+passed 3 Sep.
 
 ## M1 — Past New Game ✅ 1 Sep
 
@@ -396,8 +406,14 @@ pixel-comparable to the software path on a fixed set of display lists
 - Windows: `src/os.c`'s Win32 half has never been compiled. `mingw-w64-gcc`
   is packaged on this machine and not installed; compile-check it, then a CI
   matrix.
-- Networking: the 27 `sceNet*` / `sceNetAdhoc*` imports registered to fail
-  honestly, so the multiplayer menu cannot hang on a zero.
+- ~~Networking: the 27 `sceNet*` / `sceNetAdhoc*` imports registered to fail
+  honestly, so the multiplayer menu cannot hang on a zero.~~ **Done 3 Sep**
+  (`50ec2b6`). The refusal is split where hardware splits it: `sceNetInit`
+  validates its pool arguments and succeeds vacuously, the adhoc and adhocctl
+  inits refuse outright because radio firmware cannot exist here, and
+  everything behind them reports the prerequisite it will never meet with its
+  out-parameters untouched. The game calls none of them on any measured path,
+  so this is preventive.
 - Upstream: the PRs drafted in [upstream/README.md](upstream/README.md), in
   its suggested order.
 

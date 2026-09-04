@@ -4590,3 +4590,16 @@ faithful execution of that test.
     and sounds correct, nothing standing out as wrong. M3 is struck. The dump
     is not made redundant by that -- it is what makes the claim re-checkable
     after every later change, which is the half an ear cannot provide.
+
+    **The imports report was staler than anything else here.** It read
+    171/218 and is 207/218: `IoFileMgrForUser`, `UtilsForUser` and
+    `sceSasCore` all complete, and the 27 networking imports registered to fail
+    honestly (`50ec2b6`, M6's item, done). Eleven are missing -- seven in
+    `sceUtility`, one each in `ModuleMgrForUser`, `sceImpose`, `sceOpenPSID`
+    and `scePower`. `reports/03-imports.txt` is regenerated.
+
+    ROADMAP's "Where things stand" was refreshed at the same time: five of
+    its claims had gone false (the import count, "`sceAtrac3plus` does not
+    exist", "no clipper", "one texture function of five", and savedata
+    writing nothing). It is the first thing a session reads, which makes it
+    the worst place in the tree to let drift.
