@@ -254,17 +254,18 @@ speed, both M5's.
   is what feeds it. Implement the 13 calls to the streaming contract the game
   actually uses. The `.expected` files carry exact buffer-info numbers; read
   the layout out of them as `vpl/order`'s was.
-- **SAS:** `__sceSasSetVoicePCM` and `__sceSasGetAllEnvelopeHeights` are in
-  (3 Sep, findings item 44) -- the only two of the game's 27 `sceSasCore`
-  imports that were missing -- along with `SetSL`, the already-on refusal,
-  and the 32-sample delay between keying a voice on and it starting.
-  `getheight` is byte-exact. The ADSR curves are in (item 45): the parity
-  rule that decides which phase takes which curve, and all six shapes, with
-  the envelope stepping by them -- 48 of adsrcurve's 53 sweeps byte-exact,
-  its differing lines from 1,988 to 24, and `setadsr` from 378 to 304. What
-  is left there is a bent crossing sample and four decay sweeps at the
-  sustain-level boundary; then `SetSimpleADSR`'s own curves, grain and
-  output mode. Reverb last, or never.
+- **SAS: done, all twelve files byte-exact** (3 Sep, findings items 44-48).
+  `__sceSasSetVoicePCM` and `__sceSasGetAllEnvelopeHeights` were the only two
+  of the game's 27 `sceSasCore` imports that were missing; from there the
+  suite drove the rest. The ADSR curves and the parity rule that decides
+  which phase takes which curve (item 45); the argument rules every setter
+  enforces (item 46); the two clocks inside a voice, the filter table
+  hardware reads past the end of, and `sceIoLseek32`, which had never been
+  registered and made every VAG test read an empty file (item 47); then the
+  guest-side struct hardware keeps up to date, the real `SetSimpleADSR`
+  decode, and output mode 1's four mono blocks (item 48). What is *not*
+  implemented, and is not measured by this corpus: reverb, and the noise
+  generator. Reverb last, or never.
 
 **ATRAC3+ (3 Sep).** libavcodec behind sceAtrac3plus, optional and dynamic,
 the openh264 shape. The game holds each track whole and loops it forever;
@@ -281,7 +282,7 @@ within a frame across the whole intro. A movie can now reach its end, which
 nothing had done before: the player waits for the ring buffer to read empty
 and deadlocks if it never does (item 42). Still to do here: the context structure stream.prx prints
 (`_sceAtracGetContextAddress`), which would turn on the streaming oracle; the
-seek tests; and the SAS curves in the bullet below. And a cleanup worth doing
+seek tests. And a cleanup worth doing
 once: with libavcodec linked,
 its H.264 decoder can replace openh264 for the video and leave one optional
 dependency instead of two.

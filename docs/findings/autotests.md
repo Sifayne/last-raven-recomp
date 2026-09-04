@@ -4461,3 +4461,84 @@ faithful execution of that test.
     than kept here. `adsrcurve`'s 24 are the two boundary rules in item 45.
     The game reaches none of them: it runs in mode 0 and reads nothing back
     out of the struct.
+
+48. **The rest of SAS: the struct hardware keeps, the packed envelope, and
+    what output mode 1 actually is** (3 Sep). Five more rules take the last
+    three files to zero. **All twelve sascore files are byte-exact.**
+
+    **The caller's SasCore is not a handle -- hardware keeps it up to date.**
+    setadsr.expected does not call a getter: it reads
+    `sasCore->voices[v].attackType` and the rest straight out of the struct it
+    passed in, so every value it printed here was zero. The layout is
+    pspautotests' sascore.h -- a 20-byte header, then 56-byte voices, with the
+    four rates at +24, the sustain level at +40 and the four curve bytes at
+    +44 -- and the setters now write the ADSR block back before returning.
+    Only that block: it is what the corpus reads, and inventing the rest of
+    the struct's defaults would be writing into a game's memory on the
+    strength of a comment.
+
+    **`__sceSasSetADSR`'s fourth value is the sustain *rate*, not the sustain
+    level.** That is what the struct says -- it reads back from `sustainRate`
+    -- and it is what item 45's four unresolved decay sweeps were saying too:
+    the test sets that value to 1 and hardware's decay runs past it to 0.
+    Filing it as the level made the decay stop there.
+
+    **Direct is instant.** A phase whose curve is direct ends immediately with
+    the height it already has, rather than ramping to the next phase's target.
+    That is what lets pcm and vag hold at full scale -- a full-rate attack
+    reaches the top, and a direct decay hands it straight to sustain -- while
+    a decay with a real curve runs all the way down to the sustain level,
+    which only `SetSL` and `SetSimpleADSR` set. These two rules are one
+    change: together they close the four decay sweeps.
+
+    **The bend is past the knee, not at it.** At three-quarter height exactly
+    the bent curve still steps the full rate. adsrcurve's crossing core moves
+    0x028C0000 where a full core moves 0x02800000, and 33 full steps with 31
+    quarter ones is the only split of 64 samples that lands on it -- one more
+    full step than a strict comparison gives. That was item 45's "does
+    something one measurement cannot name"; one more measurement named it.
+
+    **A negative rate is refused** with 0x80420019, checked per selected flag
+    before anything is stored: 0x7FFFFFFF is fine, 0x80000000 and -1 are not,
+    and passing -1 with no flag set is accepted and changes nothing.
+
+    **`__sceSasSetSimpleADSR`, the packed envelope.** Two 16-bit words --
+    attack type and rate, decay rate and sustain level in the first; sustain
+    type and rate, release type and rate in the second -- and what stood here
+    before was an invented approximation. All 106 of setadsr's rows are
+    reproduced now, and the four fields do not share one decode:
+
+    - attack and sustain use a three-bit step placed at bit 26 and shifted
+      down by the five bits above it; sustain type 3 takes a further quarter
+    - decay is 0x80000000 shifted down by its four bits and saturated, so a
+      rate of 0 reads back as INT_MAX rather than a negative number
+    - release is 0x80000000 >> rate for the exponential type and 0x40000000
+      >> (rate + 2) for the linear one -- and that is a MIPS shift, taken
+      modulo 32, which is why release rate 30 comes back as 0x40000000
+      instead of the 0 the arithmetic gives. A field of all ones is zero for
+      every one of them, and anything that shifts away to nothing is one.
+    - the types are not the raw bits: attack picks between linear-increase
+      and bent, release between linear-decrease and exponent-rev, decay is
+      always exponent-rev, and only sustain passes its two bits through
+    - bit 13 of the second word is reserved, and setting it is refused
+
+    **Output mode 1 is a different shape, not a different mix.** Four mono
+    blocks of `grain` samples, one after another -- dry left, dry right, then
+    the two reverb sends -- where mode 0 writes one block of interleaved
+    stereo. The evidence is that the four blocks hold the same samples at
+    four volumes: -33 in the first reads -25, -17 and -9 in the others, which
+    is the voice's 0x1000, 0x0C00, 0x0800 and 0x0400 with the product shifted
+    down rather than rounded. The two effect volumes were being discarded;
+    they are kept now, which is all a mode-0 game notices.
+
+    **Where it lands.** Twelve of twelve byte-exact: adsrcurve, getheight,
+    keyoff, keyon, noise, outputmode, pause, pcm, pitch, sascore, setadsr,
+    vag. ctest 13/13, and the game unchanged where it should be and better
+    where it should not: title-idle, the hangar, the garage and New Game at
+    their baseline command counts with 0 bad accesses, New Game's music and
+    movie channels identical to the sample, and its effects channel fuller --
+    peak 5,960 to 7,946, the same 4.9% of samples sounding, no clipping --
+    which is what correct envelopes and a real SetSimpleADSR should do.
+
+    Not implemented, and not measured by this corpus: reverb, and the noise
+    generator (the frequency is validated, the generator is not there).
