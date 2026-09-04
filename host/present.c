@@ -338,6 +338,57 @@ static int64_t present_audio(int ch, uint32_t samples, uint32_t fmt,
     return us > 100000 ? 100000 : us;          /* never claim more than 100ms */
 }
 
+/* ---- the GL handoff -------------------------------------------------------
+ *
+ * A GL context belongs to one thread, and it is not this one. SDL owns the
+ * window and the event queue here, but display lists execute on the guest
+ * thread that submitted them -- measured as exactly one thread, which is what
+ * makes this arrangement possible at all (findings item 51).
+ *
+ * So the SDL thread creates the window and the context and then *releases*
+ * the context, and the GE thread claims it once and keeps it. The handshake
+ * below exists because present_start returns as soon as the thread is spawned:
+ * the GE thread can reach present_gl_make_current before the window exists,
+ * and has to wait rather than fail. */
+static int             g_gl_want;        /* set before present_start */
+static SDL_Window     *g_gl_win;
+static SDL_GLContext   g_gl_ctx;
+static int             g_gl_state;       /* 0 pending, 1 ready, -1 failed */
+static pthread_mutex_t g_gl_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_gl_cv   = PTHREAD_COND_INITIALIZER;
+
+void present_want_gl(void) { g_gl_want = 1; }
+
+static void gl_publish(SDL_Window *win, SDL_GLContext ctx, int ok) {
+    pthread_mutex_lock(&g_gl_lock);
+    g_gl_win = win; g_gl_ctx = ctx; g_gl_state = ok ? 1 : -1;
+    pthread_cond_broadcast(&g_gl_cv);
+    pthread_mutex_unlock(&g_gl_lock);
+}
+
+int present_gl_make_current(void) {
+    pthread_mutex_lock(&g_gl_lock);
+    while (g_gl_state == 0) pthread_cond_wait(&g_gl_cv, &g_gl_lock);
+    const int st = g_gl_state;
+    SDL_Window *win = g_gl_win;
+    SDL_GLContext ctx = g_gl_ctx;
+    pthread_mutex_unlock(&g_gl_lock);
+    if (st < 0) return -1;
+    if (SDL_GL_MakeCurrent(win, ctx) != 0) {
+        fprintf(stderr, "present: cannot make the GL context current: %s\n",
+                SDL_GetError());
+        return -1;
+    }
+    /* Swap on the GE thread's own schedule; the game paces itself and the
+     * frame limiter is the clock's job, not the driver's. */
+    SDL_GL_SetSwapInterval(0);
+    return 0;
+}
+
+void present_gl_swap(void) { if (g_gl_win) SDL_GL_SwapWindow(g_gl_win); }
+
+void *present_gl_proc(const char *name) { return SDL_GL_GetProcAddress(name); }
+
 /* ---- the SDL thread -------------------------------------------------------- */
 
 static void *sdl_thread(void *arg) {
@@ -349,12 +400,40 @@ static void *sdl_thread(void *arg) {
         return NULL;
     }
 
+    if (g_gl_want) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                            SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    }
     SDL_Window *win = SDL_CreateWindow(
         "Armored Core: Last Raven -- recompiled",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         SCREEN_W * 2, SCREEN_H * 2,
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    SDL_Renderer *ren = win ?
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
+        (g_gl_want ? SDL_WINDOW_OPENGL : 0));
+
+    /* With GL the renderer, the streaming texture and the blit below are all
+     * skipped: the backend draws into the window itself. Creating an
+     * SDL_Renderer on the same window would fight it for the context. */
+    if (g_gl_want) {
+        SDL_GLContext ctx = win ? SDL_GL_CreateContext(win) : NULL;
+        if (ctx) {
+            /* Created here because SDL wants it on the thread that made the
+             * window, released here because it has to be current on the GE
+             * thread instead. */
+            SDL_GL_MakeCurrent(win, NULL);
+            fprintf(stderr, "present: GL 3.3 core context created, "
+                            "handed to the GE thread\n");
+        } else {
+            fprintf(stderr, "present: no GL 3.3 core context: %s\n",
+                    SDL_GetError());
+        }
+        gl_publish(win, ctx, ctx != NULL);
+    }
+
+    SDL_Renderer *ren = (win && !g_gl_want) ?
         SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED |
                                     SDL_RENDERER_PRESENTVSYNC) : NULL;
     if (ren) SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
@@ -364,7 +443,8 @@ static void *sdl_thread(void *arg) {
     SDL_Texture *tex = ren ?
         SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888,
                           SDL_TEXTUREACCESS_STREAMING, SCREEN_W, SCREEN_H) : NULL;
-    if (!tex) fprintf(stderr, "present: no window/renderer -- frames go nowhere\n");
+    if (!tex && !g_gl_want)
+        fprintf(stderr, "present: no window/renderer -- frames go nowhere\n");
 
     SDL_AudioSpec want = { 0 };
     want.freq     = 44100;
@@ -477,7 +557,10 @@ static void *sdl_thread(void *arg) {
 
 int present_start(void) {
     psp_clock_realtime(1);
-    psp_display_set_present(present_frame);
+    /* Under GL the backend owns the window and swaps for itself, so the
+     * guest-thread conversion this hook does -- 130k pixels into RGBA, every
+     * frame -- would be work whose result nothing reads. */
+    if (!g_gl_want) psp_display_set_present(present_frame);
     psp_audio_set_output(present_audio);
 
     /* Queue depth target: two buffers -- deep enough that jitter never

@@ -4701,3 +4701,52 @@ faithful execution of that test.
 
     No regression from either instrument: hanger and mission-1 identical to
     the baseline in `8f50501`, 0 bad accesses, ctest 13/13.
+
+52. **A GL context, and a skeleton backend that draws** (3 Sep). M5's first
+    increment. `PSPRECOMP_RENDER=gl` now selects a real OpenGL 3.3 core
+    backend living in `host/render_gl.c`.
+
+    **The handoff.** SDL's thread creates the window and the 3.3 core context
+    and immediately releases it with `SDL_GL_MakeCurrent(win, NULL)`; the
+    backend claims it lazily, on whichever thread the GE turns out to be,
+    because `init()` runs on boot.c's thread and the GE runs on a guest one.
+    Every entry point goes through that claim, so a call arriving on a second
+    host thread is refused at the boundary with a message rather than becoming
+    corruption inside the driver. Entry points are loaded through
+    `SDL_GL_GetProcAddress`, GL 1.1 included, which keeps `-lGL` out of the
+    link -- on Windows GL 1.1 comes from opengl32 and anything newer from
+    `wglGetProcAddress`, so one uniform path is the only one that works on
+    both.
+
+    **Two entry points had never been called.** `present()` and `finish()`
+    were in the interface from the start with no caller anywhere. Neither gap
+    is visible from the software path -- it writes pixels straight into guest
+    memory so it has nothing to present, and rasterizes each primitive
+    immediately so it has nothing to flush -- and both bite the moment a
+    backend batches. `present()` is now wired at the flip in `display.c`,
+    deliberately *before* `score_frame` and `dump_frame_seq`, because that is
+    where a GPU backend reads back into the guest framebuffer those two are
+    about to read; wiring it after them would make every instrument in that
+    file report the previous frame.
+
+    **What was verified, and how.** Not by looking at the picture. A known
+    triangle pushed through the batch renders 38,000 red pixels on black, so
+    shader, VAO, VBO, FBO and viewport are sound. A forced constant written in
+    place of the readback reaches the frame dump, so guest memory is being
+    written where the instruments read. A clear reaches the readback. The
+    stages are independently correct.
+
+    **The game's frame is uniformly white, and that is the scope.** There is
+    no depth test, no blending and no clear handling yet, so a frame is every
+    primitive painted in submission order with the last one winning. Chasing
+    it produced two useful eliminations on the way -- it is not the
+    full-screen fade sprites (skipping every sprite covering 90% of the target
+    changed nothing) and not the readback (forcing a colour proved that path)
+    -- and the colour histogram says 1.86M of 1.89M vertices carry
+    non-white colours, so the white is accumulation, not the data.
+    Approximating the missing state now would produce a plausible picture that
+    is not the software path's, which is the one thing the oracle arrangement
+    exists to prevent.
+
+    No regression: the software bar is unchanged, 433 lists / 1,613,365
+    commands on the hangar with 0 bad accesses, ctest 13/13.

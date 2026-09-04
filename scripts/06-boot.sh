@@ -67,7 +67,20 @@ if [ -n "$SDL_DEF" ]; then
     cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2) \
        -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
        -c "$ROOT/host/present.c" -o "$OUT/present.o"
-    PRESENT="$OUT/present.o $(pkg-config --libs sdl2)"
+    # The GL backend is compiled here rather than with the runtime: it needs a
+    # window and a GL context, and the core stays dependency-free on purpose.
+    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2) \
+       -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
+       -c "$ROOT/host/render_gl.c" -o "$OUT/render_gl.o"
+    PRESENT="$OUT/present.o $OUT/render_gl.o $(pkg-config --libs sdl2)"
+fi
+
+# Without SDL2 there is no window, so render_gl.c compiles to its
+# no-backend stub and boot.c still links.
+if [ -z "$SDL_DEF" ]; then
+    cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
+       -c "$ROOT/host/render_gl.c" -o "$OUT/render_gl.o"
+    PRESENT="$OUT/render_gl.o"
 fi
 
 info "linking"

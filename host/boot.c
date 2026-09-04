@@ -24,6 +24,7 @@
 #include "loader.h"
 #include "container.h"
 #include "present.h"
+#include "render_gl.h"
 
 #include "decode.h"          /* PSP_RA_INDEX */
 #include "psprecomp/clock.h"
@@ -775,6 +776,15 @@ int main(int argc, char **argv) {
     const char *render = getenv("PSPRECOMP_RENDER");
     if (render && !*render) render = NULL;   /* set-but-empty means unset,
                                               * as PSPRECOMP_AUDIO_DUMP has it */
+
+    /* Backends the runtime cannot carry are registered before anything can
+     * select one. "gl" is absent from the list on a host built without SDL2,
+     * so asking for it there is refused by name with the others rather than
+     * failing later in a way that needs explaining. */
+    const psp_render_backend *gl = render_gl_backend();
+    if (gl && psp_render_register(gl) != 0)
+        fprintf(stderr, "render: could not register the GL backend\n");
+
     if (render && psp_render_select(render) != 0) {
         fprintf(stderr, "unknown render backend \"%s\"\navailable:", render);
         for (size_t i = 0; psp_render_backend_name(i); i++)
@@ -793,11 +803,27 @@ int main(int argc, char **argv) {
     printf("      render    %s%s\n", psp_render_current()->name,
            render ? " (PSPRECOMP_RENDER)" : " (default)");
 
+    /* A GL backend needs somewhere to put a context, so it brings the window
+     * with it whether or not PSPRECOMP_WINDOW was asked for -- and if there is
+     * no window there is no run, rather than a run that quietly draws nothing.
+     *
+     * The cost is that a GL run is paced in real time, because the window
+     * implies it. Comparing GL against the software path therefore is not yet
+     * comparing like with like: headless replays are unpaced and reach
+     * different frame counts. That is the display-list capture prerequisite's
+     * job and is why it exists. */
+    const int want_gl = strcmp(psp_render_current()->name, "gl") == 0;
+
     int windowed = 0;
-    if (getenv("PSPRECOMP_WINDOW")) {
+    if (getenv("PSPRECOMP_WINDOW") || want_gl) {
+        if (want_gl) present_want_gl();
         if (present_start() == 0) {
             windowed = 1;
             printf("      window    on (SDL2: video, pad, audio; implies real-time pacing)\n");
+        } else if (want_gl) {
+            fprintf(stderr, "render: the gl backend needs a window and there "
+                            "is none -- refusing rather than drawing nowhere\n");
+            return 1;
         } else {
             printf("      window    unavailable -- running headless\n");
         }
@@ -972,6 +998,7 @@ int main(int argc, char **argv) {
         }
     }
     psp_ge_dump_stats(stdout);
+    render_gl_report(stdout);
     find_pointer(li.lo, li.hi - li.lo);
     reached_report();
     peek();
