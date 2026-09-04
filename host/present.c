@@ -347,9 +347,8 @@ static int64_t present_audio(int ch, uint32_t samples, uint32_t fmt,
  *
  * So the SDL thread creates the window and the context and then *releases*
  * the context, and the GE thread claims it once and keeps it. The handshake
- * below exists because present_start returns as soon as the thread is spawned:
- * the GE thread can reach present_gl_make_current before the window exists,
- * and has to wait rather than fail. */
+ * below also keeps presentation startup out of guest time: present_start does
+ * not enable the real-time clock until SDL has a usable window/context. */
 static int             g_gl_want;        /* set before present_start */
 static SDL_Window     *g_gl_win;
 static SDL_GLContext   g_gl_ctx;
@@ -359,6 +358,16 @@ static _Atomic int     g_gl_draw_h;
 static pthread_mutex_t g_gl_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_gl_cv   = PTHREAD_COND_INITIALIZER;
 
+/* GL has its own handoff because its context is claimed later by the GE
+ * thread. This second handshake covers both presentation paths and is waited
+ * by present_start itself. Without it, SDL window/context/audio setup happened
+ * after the wall-clock origin was captured; the first game frame therefore
+ * inherited several hundred milliseconds of host startup as elapsed guest
+ * time. Light and heavy scenes then began from different apparent times. */
+static int             g_start_state;    /* 0 pending, 1 ready, -1 failed */
+static pthread_mutex_t g_start_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_start_cv   = PTHREAD_COND_INITIALIZER;
+
 void present_want_gl(void) { g_gl_want = 1; }
 
 static void gl_publish(SDL_Window *win, SDL_GLContext ctx, int ok) {
@@ -366,6 +375,13 @@ static void gl_publish(SDL_Window *win, SDL_GLContext ctx, int ok) {
     g_gl_win = win; g_gl_ctx = ctx; g_gl_state = ok ? 1 : -1;
     pthread_cond_broadcast(&g_gl_cv);
     pthread_mutex_unlock(&g_gl_lock);
+}
+
+static void start_publish(int ok) {
+    pthread_mutex_lock(&g_start_lock);
+    g_start_state = ok ? 1 : -1;
+    pthread_cond_broadcast(&g_start_cv);
+    pthread_mutex_unlock(&g_start_lock);
 }
 
 int present_gl_make_current(void) {
@@ -407,6 +423,8 @@ static void *sdl_thread(void *arg) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "present: SDL_Init: %s -- running headless\n",
                 SDL_GetError());
+        if (g_gl_want) gl_publish(NULL, NULL, 0);
+        start_publish(0);
         return NULL;
     }
 
@@ -423,6 +441,14 @@ static void *sdl_thread(void *arg) {
         SCREEN_W * 2, SCREEN_H * 2,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
         (g_gl_want ? SDL_WINDOW_OPENGL : 0));
+    if (!win) {
+        fprintf(stderr, "present: cannot create window: %s -- running headless\n",
+                SDL_GetError());
+        if (g_gl_want) gl_publish(NULL, NULL, 0);
+        start_publish(0);
+        SDL_Quit();
+        return NULL;
+    }
 
     /* With GL the renderer, the streaming texture and the blit below are all
      * skipped: the backend draws into the window itself. Creating an
@@ -445,6 +471,12 @@ static void *sdl_thread(void *arg) {
                     SDL_GetError());
         }
         gl_publish(win, ctx, ctx != NULL);
+        if (!ctx) {
+            start_publish(0);
+            SDL_DestroyWindow(win);
+            SDL_Quit();
+            return NULL;
+        }
     }
 
     SDL_Renderer *ren = (win && !g_gl_want) ?
@@ -457,8 +489,14 @@ static void *sdl_thread(void *arg) {
     SDL_Texture *tex = ren ?
         SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888,
                           SDL_TEXTUREACCESS_STREAMING, SCREEN_W, SCREEN_H) : NULL;
-    if (!tex && !g_gl_want)
+    if (!tex && !g_gl_want) {
         fprintf(stderr, "present: no window/renderer -- frames go nowhere\n");
+        start_publish(0);
+        if (ren) SDL_DestroyRenderer(ren);
+        SDL_DestroyWindow(win);
+        SDL_Quit();
+        return NULL;
+    }
 
     SDL_AudioSpec want = { 0 };
     want.freq     = 44100;
@@ -476,6 +514,7 @@ static void *sdl_thread(void *arg) {
     fprintf(stderr, "present: keys arrows dpad | z cross, x circle, "
                     "a square, s triangle | q/e shoulders | enter start | "
                     "backspace select | close window to stop\n");
+    start_publish(1);
 
     for (;;) {
         /* Logical window pixels and GL drawable pixels differ under desktop
@@ -580,7 +619,6 @@ static void *sdl_thread(void *arg) {
 }
 
 int present_start(void) {
-    psp_clock_realtime(1);
     /* Under GL the backend owns the window and swaps for itself, so the
      * guest-thread conversion this hook does -- 130k pixels into RGBA, every
      * frame -- would be work whose result nothing reads. */
@@ -590,10 +628,37 @@ int present_start(void) {
     /* Queue depth target: two buffers -- deep enough that jitter never
      * underruns, shallow enough that the backlog tracks real playback. */
 
-    if (pthread_cond_init(&g_frame_cv, NULL) != 0) return -1;
-    if (pthread_create(&g_thread, NULL, sdl_thread, NULL) != 0) {
-        fprintf(stderr, "present: cannot start the SDL thread\n");
+    if (pthread_cond_init(&g_frame_cv, NULL) != 0) {
+        psp_display_set_present(NULL);
+        psp_audio_set_output(NULL);
         return -1;
     }
+    if (pthread_create(&g_thread, NULL, sdl_thread, NULL) != 0) {
+        fprintf(stderr, "present: cannot start the SDL thread\n");
+        psp_display_set_present(NULL);
+        psp_audio_set_output(NULL);
+        pthread_cond_destroy(&g_frame_cv);
+        return -1;
+    }
+
+    /* Presentation is host setup, not game execution. Wait until it is usable
+     * before anchoring the real-time guest clock, so driver and audio startup
+     * cannot become an initial animation jump. All SDL failure exits publish
+     * a negative state, so this also makes present_start's documented return
+     * value truthful instead of reporting success before SDL has run. */
+    pthread_mutex_lock(&g_start_lock);
+    while (g_start_state == 0)
+        pthread_cond_wait(&g_start_cv, &g_start_lock);
+    const int ready = g_start_state > 0;
+    pthread_mutex_unlock(&g_start_lock);
+    if (!ready) {
+        psp_display_set_present(NULL);
+        psp_audio_set_output(NULL);
+        pthread_join(g_thread, NULL);
+        pthread_cond_destroy(&g_frame_cv);
+        return -1;
+    }
+
+    psp_clock_realtime(1);
     return 0;
 }

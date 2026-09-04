@@ -415,7 +415,19 @@ pixel-comparable to the software path on a fixed set of display lists
   Still standing: `psp_render_raster_ns` is cumulative rather than per-frame,
   and `ge.c`'s pixel/depth counters are software-backend concepts that read
   zero under another backend.
-- Frame pacing on the vblank grid the clock already owns.
+- **Frame pacing on the vblank grid — done 4 Sep.** In a presented run,
+  `GetVcount` and `GetAccumulatedHcount` are derived from the monotonic-backed
+  guest clock rather than advanced by being read; the old read-driven counters
+  let a cheap scene advance its own time simply by polling. Deterministic
+  headless runs retain their synthetic read advance so a busy wait cannot
+  deadlock the oracle. Presentation now finishes creating its SDL window, GL
+  context and audio device before anchoring the real-time clock, so host/driver
+  startup is not charged as the game's opening time. Every paced summary prints
+  guest elapsed time beside wall elapsed time. On `hanger.pad`, null and GL
+  reach the same 430th update at 14.769 s and 14.787 s respectively, with
+  0.015/0.013 ms clock drift; before the startup barrier GL inherited roughly
+  435 ms. The full GL mission reports 56.639 s guest over 56.639 s wall and
+  0.018 ms drift, with its framebuffer byte-identical to the mip/cache baseline.
 - **The backend lives in the host, and the context on the GE thread** (3 Sep,
   findings item 51). SDL2 is the host's by policy, so a backend needing a
   window cannot live in the runtime; `psp_render_register()` is the seam, and

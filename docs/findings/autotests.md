@@ -4972,3 +4972,35 @@ faithful execution of that test.
     difference between them is still a real difference. What is missing is a
     replay that looks like the frame it came from, which is what makes the
     result readable. Fix the memory image before using this to chase the floor.
+
+58. **Real-time pacing has one clock, and presentation startup is outside it**
+    (4 Sep). The report that light scenes felt fast while the mission felt slow
+    had two measurable parts rather than one renderer throttle.
+
+    **Display-counter reads were advancing time.** The virtual clock has to
+    advance a synthetic counter on read or a headless guest busy-waiting on
+    `GetVcount` can never leave. Carrying that rule into a windowed run was
+    wrong: wall time already advances there, so the number of times a cheap
+    scene managed to poll became the speed of its animation. In real-time mode
+    both vcount and accumulated hcount are now derived from the monotonic-backed
+    guest clock. The deterministic headless path keeps its read-driven fallback.
+
+    **SDL/GL startup was game time.** `present_start` enabled real time and
+    returned immediately after spawning the SDL thread. Window, context and
+    audio-device setup then ran concurrently with the opening game frames; the
+    GE's first context claim waited for it, but the guest clock kept measuring
+    it. Presentation now publishes a ready/failure state, `present_start` waits
+    for it, and only then anchors real time. Failure also reaches the caller
+    instead of a successful return followed by a black headless run.
+
+    **Measured independently of rendering.** `hanger.pad` with the null backend
+    reaches poll 430 at 14.769 s guest over 14.769 s wall (0.015 ms drift). GL
+    reaches the same poll at 14.787/14.787 s (0.013 ms drift), an 18 ms total
+    difference; before the startup barrier its stop was 15.203 s, about 435 ms
+    behind the null control. Both execute 433 lists and 1,613,104 commands.
+    The full GL mission records 56.639 s guest over 56.639 s wall with 0.018 ms
+    drift, 33 ms median / 34 ms p95 rendered-frame intervals, zero bad memory
+    accesses, and a final framebuffer byte-identical to the pre-pacing
+    mip/cache result. The PSP port's ~30 fps game loop is therefore distinct
+    from the panel's ~60 Hz scanout; two SetFrameBuf calls per rendered game
+    frame must not be reported as 60 fps.

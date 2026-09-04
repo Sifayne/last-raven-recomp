@@ -933,6 +933,13 @@ int main(int argc, char **argv) {
     }
     if (live > 0) live = psp_sched_drain(drain_s);
 
+    /* Capture this before frame dumps and reports do host-side work. The two
+     * values describe the run at the point guest execution stopped, not how
+     * long printing its diagnostics happened to take. */
+    uint64_t clock_guest_us = 0, clock_wall_us = 0;
+    const int clock_realtime =
+        psp_clock_realtime_stats(&clock_guest_us, &clock_wall_us);
+
     /* Disarm before the summary. Everything below reads guest memory --
      * dump_framebuffer, survey_vram, find_pointer -- and a trap armed for the
      * guest firing inside the report would kill the process while printing
@@ -954,6 +961,12 @@ int main(int argc, char **argv) {
         printf("threads:  %s\n",
                live == 0 ? "all finished" : "still alive (see the deadlock report above)");
     printf("bad mem:  %llu accesses\n", (unsigned long long)psp_mem_bad_access);
+    if (clock_realtime) {
+        const int64_t lag_us = (int64_t)clock_wall_us - (int64_t)clock_guest_us;
+        printf("clock:    %.3f s guest / %.3f s wall (%+.3f ms wall minus guest)\n",
+               clock_guest_us / 1.0e6, clock_wall_us / 1.0e6,
+               lag_us / 1000.0);
+    }
     if (psp_clock_is_realtime()) { psp_audio_dump_gaps(stdout); psp_mpeg_dump_sync(stdout); }
     psp_mem_dump_bad(stdout, g_bad_top);
     if (g_bad_snapshot && g_bad_snapshot[0]) {
