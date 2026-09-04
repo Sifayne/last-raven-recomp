@@ -500,6 +500,20 @@ pixel-comparable to the software path on a fixed set of display lists
   and both its image and the mission end frame are byte-identical before and
   after the instrumentation. The observed 33--35 ms game-frame cadence is not
   GPU saturation: there is ample headroom inside a 16.7 ms rendering budget.
+- **Exact fragment, blend and raster arithmetic — done 4 Sep.** GL now
+  quantizes interpolated colour and texture-function results at the same RGBA8
+  boundaries as the software oracle, applies the measured integer fog rule,
+  honours the alpha-test mask, and rewrites masked source-alpha blends so the
+  GE's separately truncated terms survive GL's combine-then-round pipeline.
+  A 1/256-pixel vertical raster bias reconciles GL's lower-left half-open edge
+  ownership with the PSP's top-edge rule after the Y flip; it removes the
+  missing horizontal rows on half-pixel UI boxes. Implicit desktop-GL dithering
+  is disabled until GE dither state is represented explicitly. On the fixed
+  14,806-command hangar, exact pixels rise from 62,870 to 122,818 of 130,560
+  and normalized RMSE falls from 0.005718 to 0.001168 (79.6%); only seven
+  pixels differ by more than two levels. The full mission remains stable at
+  zero bad accesses, +0.013 ms clock drift and 0.81 ms mean / 2.85 ms maximum
+  measured draw-plus-blit time.
 
 ## M6 — Ship shape
 

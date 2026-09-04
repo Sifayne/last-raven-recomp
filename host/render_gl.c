@@ -213,7 +213,7 @@ static struct {
     unsigned long thread;
 
     GLuint   prog, vao, vbo, fbo, colour, depth;
-    GLint    u_viewport, u_atest, u_aref;
+    GLint    u_viewport, u_atest, u_aref, u_amask, u_preblend_src;
     GLint    u_texenable, u_texfunc, u_tcc, u_double, u_env, u_tex;
     GLint    u_minfilter, u_magfilter, u_wraps, u_wrapt, u_miptop;
     GLint    u_fogenable, u_fogcolour;
@@ -363,7 +363,11 @@ static const char *VS_SRC =
     "flat out int v_lod16;\n"
     "void main() {\n"
     "    vec2 ndc = vec2( (a_pos.x / u_viewport.x) * 2.0 - 1.0,\n"
-    "                     1.0 - (a_pos.y / u_viewport.y) * 2.0 );\n"
+    /* The PSP owns a pixel on its top edge; GL's lower-left half-open rule
+     * owns the opposite horizontal edge after the Y flip. Move geometry by
+     * one GL subpixel, sixteen times smaller than the PSP's 1/16-pixel vertex
+     * grid, so exact horizontal ties land on the PSP-owned side. */
+    "                     1.0 - ((a_pos.y - 1.0 / 256.0) / u_viewport.y) * 2.0 );\n"
     /* Window depth arrives on the PSP's 0..65535 scale, already divided by
      * w by the interpreter. GL wants clip space, and with w = 1 the
      * perspective divide is the identity, so mapping to -1..1 here puts it
@@ -391,7 +395,9 @@ static const char *FS_SRC =
     "in float v_fog;\n"
     "flat in int v_lod16;\n"
     "uniform int u_atest;\n"
-    "uniform float u_aref;\n"
+    "uniform int u_aref;\n"
+    "uniform int u_amask;\n"
+    "uniform int u_preblend_src;\n"
     "uniform int u_texenable;\n"
     "uniform int u_texfunc;\n"
     "uniform int u_tcc;\n"
@@ -455,7 +461,15 @@ static const char *FS_SRC =
     "    ivec4 c1 = sample_level(uv, level + 1, linear);\n"
     "    return vec4(c0 + (c1 - c0) * f / 16) / 255.0;\n"
     "}\n"
+    /* The software oracle and the GE tests put an RGBA8 quantisation point at
+     * the interpolated vertex colour, and another after the texture function.
+     * Leaving either value fractional lets fog and blending see precision the
+     * PSP did not carry, which becomes a two-level error after colour-double. */
+    "vec4 rgba8(vec4 c) {\n"
+    "    return floor(clamp(c, 0.0, 1.0) * 255.0 + 0.5) / 255.0;\n"
+    "}\n"
     "vec4 texfunc(vec4 c) {\n"
+    "    c = rgba8(c);\n"
     "    vec2 uv = (v_uvq.z != 0.0) ? v_uvq.xy / v_uvq.z : vec2(0.0);\n"
     "    vec4 t = sample_psp(uv);\n"
     "    vec3 tc = t.rgb; float ta = (u_tcc != 0) ? t.a : 1.0;\n"
@@ -476,24 +490,56 @@ static const char *FS_SRC =
     "        rgb = c.rgb * tc;\n"
     "        a   = c.a * ta;\n"
     "    }\n"
-    "    if (u_double != 0) rgb = min(rgb * 2.0, vec3(1.0));\n"
-    "    return vec4(rgb, a);\n"
+    "    vec4 q = rgba8(vec4(rgb, a));\n"
+    "    if (u_double != 0) q.rgb = min(q.rgb * 2.0, vec3(1.0));\n"
+    "    return q;\n"
+    "}\n"
+    "vec4 fog_psp(vec4 c) {\n"
+    "    ivec4 ci = ivec4(floor(clamp(c, 0.0, 1.0) * 255.0 + 0.5));\n"
+    "    int f = int(floor(clamp(v_fog, 0.0, 1.0) * 255.0 + 0.5));\n"
+    "    if (f < 255) {\n"
+    "        ivec3 fc = ivec3(floor(clamp(u_fogcolour, 0.0, 1.0) * 255.0 + 0.5));\n"
+    "        ci.rgb = (ci.rgb * f + fc * (255 - f) + ivec3(255)) / 256;\n"
+    "    }\n"
+    "    return vec4(ci) / 255.0;\n"
     "}\n"
     "void main() {\n"
-    "    vec4 c = (u_texenable != 0) ? texfunc(v_col) : v_col;\n"
+    "    vec4 c = (u_texenable != 0) ? texfunc(v_col) : rgba8(v_col);\n"
     "    if (u_fogenable != 0)\n"
-    "        c.rgb = mix(u_fogcolour, c.rgb, clamp(v_fog, 0.0, 1.0));\n"
+    "        c = fog_psp(c);\n"
     "    if (u_atest != 1) {\n"
-    "        float a = c.a;\n"
+    "        int a = int(floor(c.a * 255.0 + 0.5)) & u_amask;\n"
+    "        int ref = u_aref & u_amask;\n"
     "        bool pass = true;\n"
     "        if      (u_atest == 0) pass = false;\n"
-    "        else if (u_atest == 2) pass = (a == u_aref);\n"
-    "        else if (u_atest == 3) pass = (a != u_aref);\n"
-    "        else if (u_atest == 4) pass = (a <  u_aref);\n"
-    "        else if (u_atest == 5) pass = (a <= u_aref);\n"
-    "        else if (u_atest == 6) pass = (a >  u_aref);\n"
-    "        else if (u_atest == 7) pass = (a >= u_aref);\n"
+    "        else if (u_atest == 2) pass = (a == ref);\n"
+    "        else if (u_atest == 3) pass = (a != ref);\n"
+    "        else if (u_atest == 4) pass = (a <  ref);\n"
+    "        else if (u_atest == 5) pass = (a <= ref);\n"
+    "        else if (u_atest == 6) pass = (a >  ref);\n"
+    "        else if (u_atest == 7) pass = (a >= ref);\n"
     "        if (!pass) discard;\n"
+    "    }\n"
+    /* Fixed-function GL keeps the source-alpha multiplication fractional and
+     * rounds after combining both blend terms. The GE first truncates each
+     * term with ((channel + 1) * factor) >> 8. Source alpha depends only on
+     * this fragment, so do that term exactly here and ask GL to add it whole;
+     * the original alpha remains available to scale the destination term. */
+    "    if (u_preblend_src != 0) {\n"
+    "        ivec4 ci = ivec4(floor(c * 255.0 + 0.5));\n"
+    "        ci.rgb = ((ci.rgb + ivec3(1)) * ci.a) / 256;\n"
+    "        if (u_preblend_src == 2) {\n"
+    /* For destination (1-src-alpha), make GL's final round reproduce
+     * floor((dst+1)*(255-a)/256): use the exact f/256 scale, then add
+     * f/256 - 1/2 to the already-integer source term before that round. The
+     * 1/4096 bias resolves an exact half tie upward and is smaller than the
+     * expression's smallest non-zero 1/256 fractional step. */
+    "            float f = float(255 - ci.a) / 256.0;\n"
+    "            c.rgb = (vec3(ci.rgb) + vec3(f - 0.5 + 1.0 / 4096.0)) / 255.0;\n"
+    "            c.a = float(ci.a + 1) / 256.0;\n"
+    "        } else {\n"
+    "            c.rgb = vec3(ci.rgb) / 255.0;\n"
+    "        }\n"
     "    }\n"
     "    o_col = c;\n"
     "}\n";
@@ -535,6 +581,8 @@ static int build_program(void) {
     g.u_viewport = p_glGetUniformLocation(g.prog, "u_viewport");
     g.u_atest    = p_glGetUniformLocation(g.prog, "u_atest");
     g.u_aref     = p_glGetUniformLocation(g.prog, "u_aref");
+    g.u_amask    = p_glGetUniformLocation(g.prog, "u_amask");
+    g.u_preblend_src = p_glGetUniformLocation(g.prog, "u_preblend_src");
     g.u_texenable = p_glGetUniformLocation(g.prog, "u_texenable");
     g.u_texfunc   = p_glGetUniformLocation(g.prog, "u_texfunc");
     g.u_tcc       = p_glGetUniformLocation(g.prog, "u_tcc");
@@ -677,6 +725,11 @@ static int claim(void) {
     g.thread = me;
 
     if (build_program() != 0) { g.failed = 1; return -1; }
+
+    /* Desktop GL starts with dithering enabled. The backend contract is the
+     * currently undithered software GE, so an implicit host dither pattern is
+     * never valid state and turns exact RGBA8 arithmetic back into LSB noise. */
+    p_glDisable(GL_DITHER);
 
     p_glGenVertexArrays(1, &g.vao);
     p_glBindVertexArray(g.vao);
@@ -1316,9 +1369,9 @@ static void apply_state(void) {
     if (g.bs.enable) {
         int ok = 1;
         int src_constant = 0, dst_constant = 0;
-        const GLenum src = g.bs.src == 10
-                         ? gl_fixed_factor(g.bs.fixa, &src_constant)
-                         : gl_factor(g.bs.src, 1, &ok);
+        GLenum src = g.bs.src == 10
+                   ? gl_fixed_factor(g.bs.fixa, &src_constant)
+                   : gl_factor(g.bs.src, 1, &ok);
         const GLenum dst = g.bs.dst == 10
                          ? gl_fixed_factor(g.bs.fixb, &dst_constant)
                          : gl_factor(g.bs.dst, 0, &ok);
@@ -1329,6 +1382,13 @@ static void apply_state(void) {
         int eq_ok = 1;
         const GLenum eq = gl_equation(g.bs.eq, &eq_ok);
         if (!eq_ok) g.unsupported_blend_eq++;
+        /* This rewrite changes fragment alpha to carry an exact destination
+         * factor, so only use it when alpha is the framebuffer's masked-off
+         * stencil byte. MIN/MAX ignore factors; abs-difference is not
+         * represented by this fixed-function path. */
+        const int preblend_src = g.bs.src == 2 && g.bs.eq <= 2 &&
+                                 !g.bs.write_alpha;
+        if (preblend_src) src = GL_ONE;
         p_glEnable(GL_BLEND);
         p_glBlendFunc(src, dst);
         p_glBlendEquation(eq);
@@ -1341,8 +1401,11 @@ static void apply_state(void) {
                        (float)((fx >>  8) & 0xFF) / 255.0f,
                        (float)((fx >> 16) & 0xFF) / 255.0f,
                        (float)((fx >> 24) & 0xFF) / 255.0f);
+        p_glUniform1i(g.u_preblend_src,
+                      preblend_src ? (g.bs.dst == 3 ? 2 : 1) : 0);
     } else {
         p_glDisable(GL_BLEND);
+        p_glUniform1i(g.u_preblend_src, 0);
     }
 
     p_glUniform1i(g.u_texenable, g.tex_enable ? 1 : 0);
@@ -1367,7 +1430,8 @@ static void apply_state(void) {
                   (float)((g.fog_colour >> 16) & 0xFF) / 255.0f);
 
     p_glUniform1i(g.u_atest, g.bs.alpha_test ? g.bs.alpha_func : 1);
-    p_glUniform1f(g.u_aref,  (float)g.bs.alpha_ref / 255.0f);
+    p_glUniform1i(g.u_aref,  g.bs.alpha_ref);
+    p_glUniform1i(g.u_amask, g.bs.alpha_mask);
 }
 
 static void flush(void) {

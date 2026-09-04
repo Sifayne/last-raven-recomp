@@ -5074,3 +5074,47 @@ faithful execution of that test.
     or differ only by two levels in one or more channels after the game's final
     doubling pass. That points the next fidelity work at exact blend/interpolant
     arithmetic, not at missing texture coordinates or geometry.
+
+61. **The remaining fixed-capture error was arithmetic and edge ownership,
+    not texture mapping** (4 Sep). The selected 14,806-command hangar made
+    both defects repeatable, and each correction was kept only after its image
+    improved against the same software replay.
+
+    The software path converts interpolated vertex colour to RGBA8 before the
+    texture function, quantizes that result again before colour doubling, and
+    runs fog with integer `/256` arithmetic. GL had carried fractional values
+    through all three stages. The fragment shader now places those same
+    quantization boundaries, implements the measured fog equation with integer
+    channels, and applies the alpha-test mask to byte values rather than
+    comparing unmasked floats.
+
+    Blend arithmetic had the larger effect. The GE computes each term as
+    `((channel + 1) * factor) >> 8` and then combines the two integers; fixed
+    GL blending combines fractional terms and rounds once. When framebuffer
+    alpha is the masked-off stencil byte, the shader can precompute a
+    source-alpha term exactly and use `GL_ONE`. For the common inverse-source-
+    alpha destination it carries the exact `(255-a)/256` factor in fragment
+    alpha and adds the sub-half bias that turns GL's final rounding into the
+    GE's destination-term floor. MIN/MAX, unrepresented equations and draws
+    that write alpha stay on the ordinary path.
+
+    The large residual was one-row coverage, visible across the tooltip at
+    `y=119`. Its vertices land at half-pixel Y: the PSP/software top-edge rule
+    includes that row, while GL's lower-left half-open convention excludes it
+    after the coordinate-system flip. Moving GL geometry upward by one
+    1/256-pixel subpixel, sixteen times smaller than the PSP vertex grid,
+    changes only those exact ownership ties in this capture and removes every
+    large horizontal seam. Desktop GL's implicit dithering is also disabled;
+    it has no effect on this Mesa RGBA8 result, but is not valid state for an
+    explicitly undithered backend.
+
+    The fixed-frame result moves from 62,870 exact pixels and normalized RMSE
+    0.005718 to 122,818/130,560 exact and 0.001168, a 79.6% RMSE reduction.
+    All but seven pixels are now exact or differ by at most two RGB levels;
+    the maximum difference is six. A full `mission-1.pad` replay completes
+    with zero bad accesses, 56.455 s guest over 56.456 s wall (+0.013 ms),
+    31.75 rendered frames/s, and draw-plus-blit timing of 0.81 ms mean,
+    2.1 ms p95 and 2.85 ms maximum. Its sortie and chatter frame remain
+    visually stable. The sparse residual is now an interpolation/filter
+    precision question, not evidence of stretched coordinates or missing
+    geometry.
