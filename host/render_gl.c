@@ -60,6 +60,7 @@ typedef void (APIENTRY *PFN_glTexImage2D)(GLenum, GLint, GLint, GLsizei,
                                           GLsizei, GLint, GLenum, GLenum,
                                           const void *);
 typedef void (APIENTRY *PFN_glTexParameteri)(GLenum, GLenum, GLint);
+typedef void (APIENTRY *PFN_glDeleteTextures)(GLsizei, const GLuint *);
 typedef GLenum (APIENTRY *PFN_glGetError)(void);
 typedef void (APIENTRY *PFN_glEnable)(GLenum);
 typedef void (APIENTRY *PFN_glDisable)(GLenum);
@@ -80,6 +81,7 @@ typedef void (APIENTRY *PFN_glClearDepth)(GLdouble);
     X(PFN_glBindTexture,                glBindTexture) \
     X(PFN_glTexImage2D,                 glTexImage2D) \
     X(PFN_glTexParameteri,              glTexParameteri) \
+    X(PFN_glDeleteTextures,             glDeleteTextures) \
     X(PFN_glGetError,                   glGetError) \
     X(PFN_glEnable,                     glEnable) \
     X(PFN_glDisable,                    glDisable) \
@@ -109,6 +111,7 @@ typedef void (APIENTRY *PFN_glClearDepth)(GLdouble);
     X(PFNGLUNIFORM2FPROC,               glUniform2f) \
     X(PFNGLUNIFORM1IPROC,               glUniform1i) \
     X(PFNGLUNIFORM1FPROC,               glUniform1f) \
+    X(PFNGLUNIFORM3FPROC,               glUniform3f) \
     X(PFNGLGENVERTEXARRAYSPROC,         glGenVertexArrays) \
     X(PFNGLBINDVERTEXARRAYPROC,         glBindVertexArray) \
     X(PFNGLGENBUFFERSPROC,              glGenBuffers) \
@@ -141,6 +144,30 @@ static int gl_load(void) {
     return missing ? -1 : 0;
 }
 
+/* ---- the texture cache ------------------------------------------------------
+ *
+ * Keyed on everything that changes the decoded texels: where they live, how
+ * they are laid out, and -- for the CLUT formats -- the palette and the paging
+ * applied to the index. Two bindings with the same key decode identically, so
+ * one upload serves both.
+ *
+ * What this does NOT do yet is notice the game overwriting a texture in place
+ * at the same address. That is real (render-to-texture is one way it happens,
+ * and the census in item 50 found one such target) and it needs an
+ * invalidation signal the interface does not carry. Until then a stale entry
+ * is possible, which is a wrong picture rather than a crash -- recorded here
+ * so it is looked for rather than discovered.
+ */
+enum { TEXCACHE_MAX = 512, TEXEL_CAP = 512 * 512 };
+
+typedef struct {
+    int      used;
+    uint32_t addr, stride, clut_addr;
+    int      w, h, fmt, swizzled;
+    int      clut_fmt, clut_shift, clut_mask, clut_start;
+    GLuint   tex;
+} texcache_entry;
+
 /* ---- state ------------------------------------------------------------------
  *
  * Everything the interpreter sets is recorded. Most of it is not acted on yet;
@@ -153,6 +180,7 @@ static struct {
 
     GLuint   prog, vao, vbo, fbo, colour, depth;
     GLint    u_viewport, u_atest, u_aref;
+    GLint    u_texenable, u_texfunc, u_tcc, u_double, u_env, u_tex;
 
     uint32_t target_addr, target_stride;
     int      target_fmt;
@@ -166,13 +194,23 @@ static struct {
     psp_blend_state bs;
     uint64_t unsupported_blend_eq, unsupported_blend_factor;
 
+    /* Texture state as the interpreter last set it, plus what is bound. */
+    psp_tex_state tex;
+    int      tex_enable;
+    uint32_t clut_addr;
+    int      clut_fmt, clut_shift, clut_mask, clut_start;
+    GLuint   bound;
+
+    texcache_entry cache[TEXCACHE_MAX];
+    uint64_t tex_uploads, tex_hits, tex_evictions, tex_too_big;
+
     float   *batch;          /* x, y, r, g, b, a per vertex */
     size_t   batch_n;
 
     uint64_t draws, verts, unsupported_prims, readbacks;
 } g;
 
-enum { FLOATS_PER_VERT = 7 };   /* x, y, z, r, g, b, a */
+enum { FLOATS_PER_VERT = 9 };   /* x, y, z, r, g, b, a, u, v */
 
 static void flush(void);
 static int  claim(void);
@@ -192,8 +230,10 @@ static const char *VS_SRC =
     "#version 330 core\n"
     "layout(location=0) in vec3 a_pos;\n"
     "layout(location=1) in vec4 a_col;\n"
+    "layout(location=2) in vec2 a_uv;\n"
     "uniform vec2 u_viewport;\n"
     "out vec4 v_col;\n"
+    "out vec2 v_uv;\n"
     "void main() {\n"
     "    vec2 ndc = vec2( (a_pos.x / u_viewport.x) * 2.0 - 1.0,\n"
     "                     1.0 - (a_pos.y / u_viewport.y) * 2.0 );\n"
@@ -203,19 +243,58 @@ static const char *VS_SRC =
      * on GL's depth range without a second projection. */
     "    gl_Position = vec4(ndc, a_pos.z * 2.0 - 1.0, 1.0);\n"
     "    v_col = a_col;\n"
+    "    v_uv = a_uv;\n"
     "}\n";
 
 /* GL 3.3 core removed the fixed-function alpha test, so it is a discard. The
  * comparison codes are the GE's own, shared with the depth test. */
+/* The five texture functions are the GE's own codes, and their arithmetic is
+ * what gpu/texfunc pinned for the software path: MODULATE multiplies, DECAL
+ * interpolates by the texture's alpha when the alpha channel takes part and
+ * replaces when it does not, BLEND mixes toward the environment colour, REPLACE
+ * takes the texel, ADD sums colour and keeps the vertex alpha. `u_tcc` says
+ * whether the texture's alpha participates at all; `u_double` is the doubling
+ * bit, applied after the function and clamped. */
 static const char *FS_SRC =
     "#version 330 core\n"
     "in vec4 v_col;\n"
+    "in vec2 v_uv;\n"
     "uniform int u_atest;\n"
     "uniform float u_aref;\n"
+    "uniform int u_texenable;\n"
+    "uniform int u_texfunc;\n"
+    "uniform int u_tcc;\n"
+    "uniform int u_double;\n"
+    "uniform vec3 u_env;\n"
+    "uniform sampler2D u_tex;\n"
     "out vec4 o_col;\n"
+    "vec4 texfunc(vec4 c) {\n"
+    "    vec4 t = texture(u_tex, v_uv);\n"
+    "    vec3 tc = t.rgb; float ta = (u_tcc != 0) ? t.a : 1.0;\n"
+    "    vec3 rgb; float a;\n"
+    "    if (u_texfunc == 1) {\n"          /* DECAL */
+    "        rgb = (u_tcc != 0) ? mix(c.rgb, tc, t.a) : tc;\n"
+    "        a   = (u_tcc != 0) ? c.a : c.a;\n"
+    "    } else if (u_texfunc == 2) {\n"    /* BLEND */
+    "        rgb = mix(c.rgb, u_env, tc);\n"
+    "        a   = c.a * ta;\n"
+    "    } else if (u_texfunc == 3) {\n"    /* REPLACE */
+    "        rgb = tc;\n"
+    "        a   = (u_tcc != 0) ? t.a : c.a;\n"
+    "    } else if (u_texfunc == 4) {\n"    /* ADD */
+    "        rgb = c.rgb + tc;\n"
+    "        a   = c.a * ta;\n"
+    "    } else {\n"                        /* MODULATE */
+    "        rgb = c.rgb * tc;\n"
+    "        a   = c.a * ta;\n"
+    "    }\n"
+    "    if (u_double != 0) rgb = min(rgb * 2.0, vec3(1.0));\n"
+    "    return vec4(rgb, a);\n"
+    "}\n"
     "void main() {\n"
+    "    vec4 c = (u_texenable != 0) ? texfunc(v_col) : v_col;\n"
     "    if (u_atest != 1) {\n"
-    "        float a = v_col.a;\n"
+    "        float a = c.a;\n"
     "        bool pass = true;\n"
     "        if      (u_atest == 0) pass = false;\n"
     "        else if (u_atest == 2) pass = (a == u_aref);\n"
@@ -226,7 +305,7 @@ static const char *FS_SRC =
     "        else if (u_atest == 7) pass = (a >= u_aref);\n"
     "        if (!pass) discard;\n"
     "    }\n"
-    "    o_col = v_col;\n"
+    "    o_col = c;\n"
     "}\n";
 
 static GLuint compile(GLenum type, const char *src, const char *what) {
@@ -266,6 +345,12 @@ static int build_program(void) {
     g.u_viewport = p_glGetUniformLocation(g.prog, "u_viewport");
     g.u_atest    = p_glGetUniformLocation(g.prog, "u_atest");
     g.u_aref     = p_glGetUniformLocation(g.prog, "u_aref");
+    g.u_texenable = p_glGetUniformLocation(g.prog, "u_texenable");
+    g.u_texfunc   = p_glGetUniformLocation(g.prog, "u_texfunc");
+    g.u_tcc       = p_glGetUniformLocation(g.prog, "u_tcc");
+    g.u_double    = p_glGetUniformLocation(g.prog, "u_double");
+    g.u_env       = p_glGetUniformLocation(g.prog, "u_env");
+    g.u_tex       = p_glGetUniformLocation(g.prog, "u_tex");
     return 0;
 }
 
@@ -338,6 +423,10 @@ static int claim(void) {
                             FLOATS_PER_VERT * sizeof(float),
                             (void *)(3 * sizeof(float)));
     p_glEnableVertexAttribArray(1);
+    p_glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE,
+                            FLOATS_PER_VERT * sizeof(float),
+                            (void *)(7 * sizeof(float)));
+    p_glEnableVertexAttribArray(2);
 
     g.batch = calloc(GL_MAX_VERTS * FLOATS_PER_VERT, sizeof(float));
     if (!g.batch) { g.failed = 1; return -1; }
@@ -374,9 +463,89 @@ static void gl_scissor(int x0, int y0, int x1, int y1) {
     flush();
     g.sc_x0 = x0; g.sc_y0 = y0; g.sc_x1 = x1; g.sc_y1 = y1; g.sc_valid = 1;
 }
-static void gl_texture(const psp_tex_state *t) { (void)t; }
+/* GE wrap codes: 0 repeat, 1 clamp. GE filter: bit 0 selects linear within a
+ * level; 4..7 are the mipmap variants, which this does not build yet, so the
+ * level bit is all that is read. */
+static GLenum gl_wrap(int w) { return w ? GL_CLAMP_TO_EDGE : GL_REPEAT; }
+static GLenum gl_filter(int f) { return (f & 1) ? GL_LINEAR : GL_NEAREST; }
+
+static GLuint texcache_get(const psp_tex_state *t) {
+    if (!t->addr || t->w <= 0 || t->h <= 0) return 0;
+    if ((size_t)t->w * (size_t)t->h > TEXEL_CAP) { g.tex_too_big++; return 0; }
+
+    size_t slot = ((size_t)t->addr >> 4) ^ ((size_t)t->w * 31u)
+                ^ ((size_t)t->h * 131u) ^ ((size_t)t->fmt * 7919u)
+                ^ ((size_t)g.clut_addr >> 3);
+    slot %= TEXCACHE_MAX;
+
+    for (size_t probe = 0; probe < 8; probe++) {
+        texcache_entry *e = &g.cache[(slot + probe) % TEXCACHE_MAX];
+        if (e->used && e->addr == t->addr && e->w == t->w && e->h == t->h &&
+            e->fmt == t->fmt && e->stride == t->stride &&
+            e->swizzled == t->swizzled && e->clut_addr == g.clut_addr &&
+            e->clut_fmt == g.clut_fmt && e->clut_shift == g.clut_shift &&
+            e->clut_mask == g.clut_mask && e->clut_start == g.clut_start) {
+            g.tex_hits++;
+            return e->tex;
+        }
+        if (!e->used) { slot = (slot + probe) % TEXCACHE_MAX; goto upload; }
+    }
+    /* Every probe taken: reuse the first, which is a cheap eviction rather than
+     * an LRU. If this counter climbs the table is too small or the key is too
+     * loose, and the number says which. */
+    g.tex_evictions++;
+upload: {
+    texcache_entry *e = &g.cache[slot];
+    static uint32_t *texels;
+    if (!texels) texels = malloc(TEXEL_CAP * sizeof(uint32_t));
+    if (!texels) return 0;
+
+    int dw = 0, dh = 0;
+    /* One decoder for every backend -- the formats, the CLUT paging and the
+     * swizzle are the runtime's, not repeated here. */
+    const psp_clut_state clut = { g.clut_addr, g.clut_fmt, g.clut_shift,
+                                  g.clut_mask, g.clut_start };
+    if (psp_render_decode_level(t, 0, &clut, texels, TEXEL_CAP, &dw, &dh) == 0)
+        return 0;
+
+    if (!e->tex) p_glGenTextures(1, &e->tex);
+    p_glBindTexture(GL_TEXTURE_2D, e->tex);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, dw, dh, 0,
+                   GL_RGBA, GL_UNSIGNED_BYTE, texels);
+    e->used = 1; e->addr = t->addr; e->stride = t->stride;
+    e->w = t->w; e->h = t->h; e->fmt = t->fmt; e->swizzled = t->swizzled;
+    e->clut_addr = g.clut_addr; e->clut_fmt = g.clut_fmt;
+    e->clut_shift = g.clut_shift; e->clut_mask = g.clut_mask;
+    e->clut_start = g.clut_start;
+    g.tex_uploads++;
+    return e->tex;
+}
+}
+
+static void gl_texture(const psp_tex_state *t) {
+    if (claim() != 0) return;
+    flush();
+    g.tex = *t;
+    g.tex_enable = t->addr != 0;
+    g.bound = g.tex_enable ? texcache_get(t) : 0;
+    if (g.bound) {
+        p_glBindTexture(GL_TEXTURE_2D, g.bound);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (GLint)gl_wrap(t->wrap_s));
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (GLint)gl_wrap(t->wrap_t));
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)gl_filter(t->min_filter));
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)gl_filter(t->mag_filter));
+    } else {
+        g.tex_enable = 0;
+    }
+}
 static void gl_clut(uint32_t a, int f, int sh, int m, int st) {
-    (void)a; (void)f; (void)sh; (void)m; (void)st;
+    if (claim() != 0) return;
+    flush();
+    /* Part of the cache key rather than state of its own: the palette is what
+     * a CLUT texture's texels decode through, so a new palette is a new
+     * texture even at the same address. */
+    g.clut_addr = a; g.clut_fmt = f;
+    g.clut_shift = sh; g.clut_mask = m; g.clut_start = st;
 }
 static void gl_depth(int test, int func, int write) {
     if (claim() != 0) return;
@@ -404,6 +573,11 @@ static void push(const psp_vertex *v) {
     o[4] = (float)((v->rgba >>  8) & 0xFF) / 255.0f;
     o[5] = (float)((v->rgba >> 16) & 0xFF) / 255.0f;
     o[6] = (float)((v->rgba >> 24) & 0xFF) / 255.0f;
+    /* UVs arrive in texels, as the software path takes them; GL wants them
+     * normalised, and dividing here keeps the shader free of the texture's
+     * dimensions. */
+    o[7] = g.tex.w > 0 ? v->u / (float)g.tex.w : 0.0f;
+    o[8] = g.tex.h > 0 ? v->v / (float)g.tex.h : 0.0f;
     g.batch_n++;
 }
 
@@ -549,6 +723,16 @@ static void apply_state(void) {
         p_glDisable(GL_BLEND);
     }
 
+    p_glUniform1i(g.u_texenable, g.tex_enable ? 1 : 0);
+    p_glUniform1i(g.u_texfunc, g.tex.func);
+    p_glUniform1i(g.u_tcc, g.tex.tcc_rgba ? 1 : 0);
+    p_glUniform1i(g.u_double, g.tex.color_double ? 1 : 0);
+    p_glUniform3f(g.u_env, (float)( g.tex.env        & 0xFF) / 255.0f,
+                           (float)((g.tex.env >>  8) & 0xFF) / 255.0f,
+                           (float)((g.tex.env >> 16) & 0xFF) / 255.0f);
+    p_glUniform1i(g.u_tex, 0);
+    if (g.bound) p_glBindTexture(GL_TEXTURE_2D, g.bound);
+
     p_glUniform1i(g.u_atest, g.bs.alpha_test ? g.bs.alpha_func : 1);
     p_glUniform1f(g.u_aref,  (float)g.bs.alpha_ref / 255.0f);
 }
@@ -653,6 +837,10 @@ void render_gl_report(FILE *out) {
         fprintf(out, " -- %llu draw(s), %llu vertices, %llu readback(s)",
                 (unsigned long long)g.draws, (unsigned long long)g.verts,
                 (unsigned long long)g.readbacks);
+    fprintf(out, "\n          textures: %llu upload(s), %llu hit(s), %llu eviction(s),"
+                 " %llu too big",
+            (unsigned long long)g.tex_uploads, (unsigned long long)g.tex_hits,
+            (unsigned long long)g.tex_evictions, (unsigned long long)g.tex_too_big);
     if (g.unsupported_prims)
         fprintf(out, ", %llu point/line draw(s) skipped",
                 (unsigned long long)g.unsupported_prims);
