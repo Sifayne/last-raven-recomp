@@ -103,6 +103,7 @@ they end at the same place, and `stop` is what makes that true.
 | `hanger.pad` | the option menu over the 3D hangar | 430 |
 | `new-game.pad` | the sound-settings panel | 6,000 |
 | `mission-1.pad` | name entry, garage, mission select, into a sortie | 1,790 |
+| `mission-effects.pad` | same route, then combat firing and boost input | 2,210 |
 | `main-menu.pad` | the main menu with the AC behind it — M2's first frame | 748 |
 | `garage.pad` | the sortie launch, the AC alone in the hangar — M2's second frame | 925 |
 | `option.pad` | the option box, by taps rather than a recording | 3,900 |
@@ -110,6 +111,11 @@ they end at the same place, and `stop` is what makes that true.
 `hanger.pad` and `new-game.pad` reach the same scene; the short one exists
 because a run that takes fourteen seconds gets measured twenty times and one
 that takes minutes gets measured twice. Pair either with `title-idle.pad`.
+
+`render-checks.json` selects six poll-stamped frames from `mission-effects.pad`
+for fixed-input software/GL regression checks. See
+[the renderer-check guide](../docs/RENDER-CHECKS.md) for capture/replay commands
+and the distinction between pixel parity and shared unsupported features.
 
 ## Authoring: play it, then keep the recording
 

@@ -110,6 +110,8 @@ int main(int argc, char **argv) {
     if (fread(&h, sizeof h, 1, f) != 1) return die("short capture");
     if (h.magic != GE_CAP_MAGIC) return die("not a GE capture");
     if (h.version != GE_CAP_VER) return die("capture is a different version");
+    if (h.state_bytes != psp_ge_state_size())
+        return die("capture state layout differs; recapture with this build");
 
     uint8_t *state = malloc(h.state_bytes);
     ge_cap_list *lists = malloc(sizeof *lists * (h.n_lists ? h.n_lists : 1));

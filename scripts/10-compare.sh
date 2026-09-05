@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Render one scenario through both backends and put the frames side by side.
 #
-# The software path is the oracle: what this produces is a picture of the gap,
-# not a verdict. Read it with the caveats in tools/psprecomp/docs/RENDERER.md --
-# in particular that GL cannot be bit-identical through a blend, because the
-# software term is ((c+1)*f)>>8 and GL's is c*f/255.
+# These are independent live runs with different clock/presentation paths.
+# For a fixed-input comparison and regression verdict, use 11-render-check.py;
+# it replays the same captured GE lists and memory through both backends.
 #
 # usage: scripts/10-compare.sh <scenario> [drain] [out.png]
 set -euo pipefail

@@ -520,6 +520,20 @@ scenario frame dumps).
   zero bad accesses, +0.013 ms clock drift and 0.81 ms mean / 2.85 ms maximum
   measured draw-plus-blit time.
 
+- **Expanded fixed-list regression coverage — done 4 Sep.** Six captures now
+  cover the garage menu, launch, mission ground/smoke, and combat firing/boost
+  input. `scripts/11-render-check.py` records them in one poll-stamped run and
+  replays each twice per backend, requiring identical repeats and unchanged
+  command counts. Saved capture hashes and software-output hashes anchor
+  full-frame and lower-left-region regression checks. All six normalized
+  RMSEs are between 0.002474 and 0.003105; complete results and commands are in
+  `docs/RENDER-CHECKS.md`. Combat adds coverage absent from the earlier gate:
+  each combat frame enables stencil on 801 draws and submits 8/9 lines, which
+  both backends currently omit. The full run also changes a scratch target's
+  format after its first allocation; that history-dependent case needs its
+  own regression. These are the next correctness targets, rather than evidence
+  of complete PSP rendering from a small RGB error alone.
+
 ## M6 — Ship shape
 
 - Publish the fork and point `.gitmodules` at it (`FORK-NOTES.md` in the

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "scenario": "scenarios/mission-effects.pad",
+  "stop_poll": 2210,
+  "timeout_seconds": 170,
+  "min_commands": 5000,
+  "min_mean": 8,
+  "cases": [
+    {"name": "garage-menu", "poll": 740},
+    {"name": "garage-launch", "poll": 915},
+    {"name": "mission-ground", "poll": 1770, "regions": {"lower-left": [0, 136, 240, 136]}},
+    {"name": "mission-smoke", "poll": 1840},
+    {"name": "combat-fire", "poll": 2050},
+    {"name": "combat-boost", "poll": 2090, "regions": {"lower-left": [0, 136, 240, 136]}}
+  ]
+}
