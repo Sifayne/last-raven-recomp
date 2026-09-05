@@ -72,3 +72,17 @@
 # travel was a full-rate press. host/replacements.c makes it proportional
 # under `dual`. Interior thunks: 20, all ordinary branch targets.
 00053234   # look (pitch) integrator -- see host/replacements.c
+
+# The push: psp_func_0004F06C(ac, dir, accel, cap), the primitive every
+# moving state uses -- walk (psp_func_000440B4), jump, boost. `dir` indexes an
+# eight-entry table of unit vectors at 0x0030AEB0 (x right, z back); the
+# vector is scaled by `accel`, rotated by the AC's yaw through the VFPU
+# helpers psp_func_002B007C/00255BBC into the scratch at 0x0030AF00, and
+# psp_func_0004EE9C adds four times it to the velocity at ac+80/88 and clamps
+# the speed to `cap`. The walk handler passes accel = ac+1392 and cap =
+# 2 * ac+1400 -- the legs' own numbers -- which is why the walk was two-state:
+# the stick chose one of eight directions and the cap was always the full
+# one. host/replacements.c gives the player the stick's true direction and a
+# cap scaled by its magnitude, and leaves the game's accel, clamp and
+# overspeed decay alone. No interior thunks.
+0004F06C   # the push (walk/strafe/boost direction and speed) -- see host/replacements.c

@@ -1,0 +1,126 @@
+# Walk sweep -- how fast, and which way, does the AC move for a given stick?
+#
+# mission-1.pad's prefix into the first mission (gameplay from ~poll 2050),
+# then thirty-poll holds of the left stick with twenty polls of centre between
+# them, kept short and ordered so the AC stays inside the ground the classic
+# run proved clear: forward at 127; straight right; forward-left at 30 degrees;
+# straight back; forward at 96, 64 and 45. With PSPRECOMP_INPUT_LOG the push
+# primitive (host/replacements.c) writes the direction, the cap it asked for
+# and the speed reached, every frame:
+#
+#   scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual \
+#     --env PSPRECOMP_INPUT_LOG=reports/walk-sweep.log scenarios/walk-sweep.pad
+#   scripts/walk-analyze.py reports/walk-sweep.log
+#
+# The same file under `modern` walks by Y alone and turns by X; under classic
+# (PSPRECOMP_INPUT unset) the game thresholds each axis at 100, so 96 and
+# below do nothing, the 30-degree push walks straight ahead, and straight
+# right is a turn. The position in the log tells a wall from the law: a speed
+# that falls back under its cap while the stick holds still is terrain.
+
+drain 500
+
+@76     state circle 128 128   # t=3.080s
+@78     state none 128 128   # t=3.160s
+@176    state circle 128 128   # t=7.458s
+@178    state none 128 128   # t=7.553s
+@317    state circle 128 128   # t=13.327s
+@318    state none 128 128   # t=13.379s
+@331    state start 128 128   # t=14.028s
+@333    state none 128 128   # t=14.135s
+@359    state cross 128 128   # t=15.475s
+@361    state none 128 128   # t=15.567s
+@409    state circle 128 128   # t=18.664s
+@411    state none 128 128   # t=18.800s
+@439    state down 128 128   # t=20.530s
+@440    state none 128 128   # t=20.593s
+@442    state down 128 128   # t=20.718s
+@444    state none 128 128   # t=20.826s
+@446    state cross 128 128   # t=20.951s
+@448    state none 128 128   # t=21.082s
+@474    state start 128 128   # t=23.119s
+@475    state none 128 128   # t=23.208s
+@484    state cross 128 128   # t=24.001s
+@485    state none 128 128   # t=24.091s
+@496    state cross 128 128   # t=25.017s
+@498    state none 128 128   # t=25.184s
+@501    state down 128 128   # t=25.436s
+@502    state none 128 128   # t=25.520s
+@503    state down 128 128   # t=25.604s
+@504    state none 128 128   # t=25.672s
+@505    state down 128 128   # t=25.757s
+@506    state none 128 128   # t=25.842s
+@507    state down 128 128   # t=25.926s
+@508    state none 128 128   # t=26.010s
+@509    state down 128 128   # t=26.094s
+@511    state none 128 128   # t=26.245s
+@512    state down 128 128   # t=26.329s
+@513    state none 128 128   # t=26.413s
+@515    state down 128 128   # t=26.581s
+@516    state none 128 128   # t=26.648s
+@519    state right 128 128   # t=26.900s
+@520    state none 128 128   # t=26.984s
+@521    state right 128 128   # t=27.067s
+@522    state none 128 128   # t=27.151s
+@523    state right 128 128   # t=27.234s
+@524    state none 128 128   # t=27.318s
+@525    state right 128 128   # t=27.403s
+@527    state none 128 128   # t=27.572s
+@528    state right 128 128   # t=27.640s
+@529    state none 128 128   # t=27.724s
+@530    state right 128 128   # t=27.807s
+@531    state none 128 128   # t=27.892s
+@532    state right 128 128   # t=27.975s
+@534    state none 128 128   # t=28.144s
+@539    state cross 128 128   # t=28.564s
+@541    state none 128 128   # t=28.725s
+@554    state cross 128 128   # t=29.917s
+@556    state none 128 128   # t=30.105s
+@623    state start 128 128   # t=34.010s
+@626    state none 128 128   # t=34.135s
+@640    state circle 128 128   # t=34.759s
+@642    state none 128 128   # t=34.853s
+@733    state circle 128 128   # t=39.075s
+@735    state none 128 128   # t=39.222s
+@751    state down 128 128   # t=40.234s
+@752    state none 128 128   # t=40.297s
+@778    state cross 128 128   # t=41.900s
+@781    state none 128 128   # t=42.079s
+@817    state cross 128 128   # t=44.676s
+@818    state none 128 128   # t=44.769s
+@849    state cross 128 128   # t=47.916s
+@850    state none 128 128   # t=48.025s
+@863    state triangle 128 128   # t=49.218s
+@864    state none 128 128   # t=49.333s
+@876    state left 128 128   # t=50.540s
+@878    state none 128 128   # t=50.749s
+@881    state cross 128 128   # t=51.061s
+@882    state none 128 128   # t=51.139s
+@1698   state circle 128 128   # t=106.511s
+@1699   state none 128 128   # t=106.589s
+@1715   state circle 128 128   # t=107.848s
+@1716   state none 128 128   # t=107.935s
+
+@2100  mark "walk: forward 127 (128 1)"
+@2100  analog 128 1
+@2130  analog center
+@2150  mark "walk: right, full (255 128)"
+@2150  analog 255 128
+@2180  analog center
+@2200  mark "walk: forward-left, 30 degrees, full (64 18)"
+@2200  analog 64 18
+@2230  analog center
+@2250  mark "walk: back, full (128 255)"
+@2250  analog 128 255
+@2280  analog center
+@2300  mark "walk: forward 96 (128 32)"
+@2300  analog 128 32
+@2330  analog center
+@2350  mark "walk: forward 64 (128 64)"
+@2350  analog 128 64
+@2380  analog center
+@2400  mark "walk: forward 45 (128 83)"
+@2400  analog 128 83
+@2430  analog center
+
+@2450  stop

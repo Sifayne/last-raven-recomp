@@ -59,6 +59,14 @@ cc -O2 -std=gnu11 $SDL_DEF \
 
 # Native replacements for the functions host/replace.txt names. Linked into the
 # boot host as well as stage 04's probe, because this is the build that runs.
+#
+# The emitted header declares psp_func_<addr>__orig only for the addresses the
+# list held when stage 04 last ran, so a list edited since then fails here as
+# an implicit declaration of that one symbol -- which reads like a typo in
+# replacements.c and is not. Say what it is.
+if [ "$ROOT/host/replace.txt" -nt "$GEN/aclr_funcs.h" ]; then
+    die "host/replace.txt is newer than the emitted C -- run scripts/04-emit-build.sh first"
+fi
 cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" -I "$GEN" \
    -c "$ROOT/host/replacements.c" -o "$OUT/replacements.o"
 
