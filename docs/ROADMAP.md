@@ -529,10 +529,24 @@ scenario frame dumps).
   RMSEs are between 0.002474 and 0.003105; complete results and commands are in
   `docs/RENDER-CHECKS.md`. Combat adds coverage absent from the earlier gate:
   each combat frame enables stencil on 801 draws and submits 8/9 lines, which
-  both backends currently omit. The full run also changes a scratch target's
+  were omitted at that checkpoint (addressed below). The full run also changes a scratch target's
   format after its first allocation; that history-dependent case needs its
   own regression. These are the next correctness targets, rather than evidence
   of complete PSP rendering from a small RGB error alone.
+
+- **HUD lines and RGBA8888 stencil — done 4 Sep.** The missing targeting
+  outline was eight skipped line segments, not a texture or game-logic bug.
+  Both backends now render points/lines/line strips, including strip batch
+  boundaries and transformed near-plane clipping. GL's stencil is synchronized
+  with framebuffer alpha by lazy GPU passes; captures exercise 801 supported
+  stencil draws with one import/export apiece. `scripts/12-render-tests.sh`
+  passes 430 exact RGBA assertions on each backend and caught a software
+  alpha-only-clear bug, now fixed. All six fixed-scene comparisons remain
+  stable or improve, with no skipped lines or unsupported stencil in those
+  scenes. Next: target format/size reuse across frames and reduced-bit-depth
+  stencil (30 unsupported draws remain in the full replay); remaining blend
+  modes/dithering and wider scene validation follow. The full 2210-poll run
+  remains paced, with zero bad accesses and 0.98 ms mean GPU work.
 
 ## M6 — Ship shape
 

@@ -15,12 +15,12 @@
  * one ever appears this refuses loudly rather than issuing calls against a
  * context that is not current.
  *
- * The backend translates triangles, strips, fans and sprites at native PSP
+ * The backend translates points, lines, triangles, strips, fans and sprites at native PSP
  * resolution, including texture decode/cache, perspective UVs, the full mip
  * chain and the measured PSP LOD/filter rules, depth, scissor, blending, alpha
- * test and fog. The software path remains the oracle it is diffed against.
- * Points, lines, the alpha-backed stencil and blend operations without a fixed
- * GL equivalent stay explicitly counted below rather than approximated.
+ * test, RGBA8888 alpha-backed stencil and fog. The software path remains the
+ * differential oracle. Reduced-bit-depth stencil and blend operations without
+ * a fixed GL equivalent stay explicitly counted rather than approximated.
  */
 
 #include "present.h"
@@ -73,6 +73,12 @@ typedef void (APIENTRY *PFN_glBlendFunc)(GLenum, GLenum);
 typedef void (APIENTRY *PFN_glClear)(GLbitfield);
 typedef void (APIENTRY *PFN_glClearColor)(GLfloat, GLfloat, GLfloat, GLfloat);
 typedef void (APIENTRY *PFN_glClearDepth)(GLdouble);
+typedef void (APIENTRY *PFN_glStencilFunc)(GLenum, GLint, GLuint);
+typedef void (APIENTRY *PFN_glStencilOp)(GLenum, GLenum, GLenum);
+typedef void (APIENTRY *PFN_glStencilMask)(GLuint);
+typedef void (APIENTRY *PFN_glClearStencil)(GLint);
+typedef void (APIENTRY *PFN_glCopyTexSubImage2D)(GLenum, GLint, GLint, GLint,
+                                               GLint, GLint, GLsizei, GLsizei);
 
 #define GL_FUNCS(X) \
     X(PFN_glViewport,                   glViewport) \
@@ -94,6 +100,11 @@ typedef void (APIENTRY *PFN_glClearDepth)(GLdouble);
     X(PFN_glClear,                      glClear) \
     X(PFN_glClearColor,                 glClearColor) \
     X(PFN_glClearDepth,                 glClearDepth) \
+    X(PFN_glStencilFunc,                glStencilFunc) \
+    X(PFN_glStencilOp,                  glStencilOp) \
+    X(PFN_glStencilMask,                glStencilMask) \
+    X(PFN_glClearStencil,               glClearStencil) \
+    X(PFN_glCopyTexSubImage2D,           glCopyTexSubImage2D) \
     X(PFNGLBLENDEQUATIONPROC,           glBlendEquation) \
     X(PFNGLBLENDCOLORPROC,              glBlendColor) \
     X(PFNGLCREATESHADERPROC,            glCreateShader) \
@@ -188,6 +199,7 @@ typedef struct {
     uint32_t addr, stride;
     int      fmt, w, h;
     GLuint   fbo, colour, depth;
+    int      stencil_valid, alpha_dirty;
 } rendertarget;
 
 typedef struct {
@@ -212,7 +224,10 @@ static struct {
     int      ready, failed;
     unsigned long thread;
 
-    GLuint   prog, vao, vbo, fbo, colour, depth;
+    GLuint   prog, vao, vbo;
+    GLuint   stencil_prog, stencil_copy;
+    GLint    s_mode, s_bit, s_value;
+    int      stencil_copy_w, stencil_copy_h;
     GLint    u_viewport, u_atest, u_aref, u_amask, u_preblend_src;
     GLint    u_texenable, u_texfunc, u_tcc, u_double, u_env, u_tex;
     GLint    u_minfilter, u_magfilter, u_wraps, u_wrapt, u_miptop;
@@ -232,6 +247,7 @@ static struct {
     psp_blend_state bs;
     uint64_t unsupported_blend_eq, unsupported_blend_factor;
     uint64_t unsupported_stencil_draws;
+    uint64_t stencil_draws, stencil_imports, stencil_exports;
 
     /* Texture state as the interpreter last set it, plus what is bound. */
     psp_tex_state tex;
@@ -276,6 +292,7 @@ enum { FLOATS_PER_VERT = 13 };  /* x,y,z, r,g,b,a, u,v, fog, 1/w, texture q, lod
 static void flush(void);
 static int  claim(void);
 static void readback_rt(int i);
+static void stencil_to_alpha(rendertarget *r);
 
 static unsigned long this_thread(void) {
     return (unsigned long)pthread_self();
@@ -560,6 +577,104 @@ static GLuint compile(GLenum type, const char *src, const char *what) {
     return sh;
 }
 
+/* GL 3.3 cannot sample the stencil attachment directly. These tiny bit-plane
+ * passes keep the hardware stencil and the PSP's framebuffer alpha byte in
+ * sync entirely on the GPU. Import copies the colour first to avoid texture
+ * feedback; export tests each stencil bit and adds its exact byte weight.
+ * Normal rendering does not pay for a copy on every draw. */
+static int build_stencil_program(void) {
+    const char *vs_src =
+        "#version 330 core\n"
+        "void main() {\n"
+        " vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+        " gl_Position = vec4(p * 2.0 - 1.0, 0, 1);\n"
+        "}\n";
+    const char *fs_src =
+        "#version 330 core\n"
+        "uniform sampler2D u_copy; uniform int u_mode, u_bit;\n"
+        "uniform float u_value; out vec4 o_col;\n"
+        "void main() {\n"
+        " if (u_mode == 1) {\n"
+        "  int a = int(floor(texelFetch(u_copy, ivec2(gl_FragCoord.xy), 0).a * 255.0 + 0.5));\n"
+        "  if ((a & u_bit) == 0) discard;\n"
+        " }\n"
+        " o_col = vec4(0, 0, 0, u_value);\n"
+        "}\n";
+    GLuint vs = compile(GL_VERTEX_SHADER, vs_src, "stencil vertex");
+    GLuint fs = compile(GL_FRAGMENT_SHADER, fs_src, "stencil fragment");
+    if (!vs || !fs) return -1;
+    g.stencil_prog = p_glCreateProgram();
+    p_glAttachShader(g.stencil_prog, vs); p_glAttachShader(g.stencil_prog, fs);
+    p_glLinkProgram(g.stencil_prog);
+    p_glDeleteShader(vs); p_glDeleteShader(fs);
+    GLint ok = 0;
+    p_glGetProgramiv(g.stencil_prog, GL_LINK_STATUS, &ok);
+    if (!ok) { fprintf(stderr, "gl: stencil program failed to link\n"); return -1; }
+    g.s_mode = p_glGetUniformLocation(g.stencil_prog, "u_mode");
+    g.s_bit = p_glGetUniformLocation(g.stencil_prog, "u_bit");
+    g.s_value = p_glGetUniformLocation(g.stencil_prog, "u_value");
+    p_glGenTextures(1, &g.stencil_copy);
+    return 0;
+}
+
+static void stencil_pass_state(rendertarget *r) {
+    p_glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    p_glViewport(0, 0, r->w, r->h);
+    p_glUseProgram(g.stencil_prog);
+    p_glBindVertexArray(g.vao);
+    p_glDisable(GL_SCISSOR_TEST);
+    p_glDisable(GL_DEPTH_TEST);
+    p_glDepthMask(GL_FALSE);
+    p_glDisable(GL_BLEND);
+    p_glEnable(GL_STENCIL_TEST);
+}
+
+static void alpha_to_stencil(rendertarget *r) {
+    if (r->stencil_valid || r->fmt != 3) return;
+    stencil_pass_state(r);
+    p_glBindTexture(GL_TEXTURE_2D, g.stencil_copy);
+    if (g.stencil_copy_w != r->w || g.stencil_copy_h != r->h) {
+        p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, r->w, r->h, 0,
+                       GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        g.stencil_copy_w = r->w; g.stencil_copy_h = r->h;
+    }
+    p_glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, r->w, r->h);
+    p_glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    p_glStencilMask(255);
+    p_glClearStencil(0); p_glClear(GL_STENCIL_BUFFER_BIT);
+    p_glUniform1i(g.s_mode, 1);
+    p_glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+    for (int bit = 1; bit <= 128; bit <<= 1) {
+        p_glStencilMask((GLuint)bit);
+        p_glStencilFunc(GL_ALWAYS, bit, 255);
+        p_glUniform1i(g.s_bit, bit);
+        p_glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+    r->stencil_valid = 1;
+    g.stencil_imports++;
+}
+
+static void stencil_to_alpha(rendertarget *r) {
+    if (!r->alpha_dirty) return;
+    stencil_pass_state(r);
+    p_glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+    p_glClearColor(0, 0, 0, 0); p_glClear(GL_COLOR_BUFFER_BIT);
+    p_glStencilMask(0);
+    p_glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+    p_glUniform1i(g.s_mode, 0);
+    p_glEnable(GL_BLEND);
+    p_glBlendFunc(GL_ONE, GL_ONE); p_glBlendEquation(GL_FUNC_ADD);
+    for (int bit = 1; bit <= 128; bit <<= 1) {
+        p_glStencilFunc(GL_NOTEQUAL, 0, (GLuint)bit);
+        p_glUniform1f(g.s_value, (float)bit / 255.0f);
+        p_glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+    r->alpha_dirty = 0;
+    g.stencil_exports++;
+}
+
 static int build_program(void) {
     GLuint vs = compile(GL_VERTEX_SHADER, VS_SRC, "vertex");
     GLuint fs = compile(GL_FRAGMENT_SHADER, FS_SRC, "fragment");
@@ -596,36 +711,6 @@ static int build_program(void) {
     g.u_miptop    = p_glGetUniformLocation(g.prog, "u_miptop");
     g.u_fogenable = p_glGetUniformLocation(g.prog, "u_fogenable");
     g.u_fogcolour = p_glGetUniformLocation(g.prog, "u_fogcolour");
-    return 0;
-}
-
-/* An off-screen target at the PSP's own size. Rendering into the window
- * directly would tie the picture to whatever the user dragged the window to;
- * this keeps the backend's output the same shape as the software path's, which
- * is what makes the two comparable at all. */
-static int build_fbo(void) {
-    p_glGenFramebuffers(1, &g.fbo);
-    p_glBindFramebuffer(GL_FRAMEBUFFER, g.fbo);
-
-    p_glGenTextures(1, &g.colour);
-    p_glBindTexture(GL_TEXTURE_2D, g.colour);
-    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g.w, g.h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                             GL_TEXTURE_2D, g.colour, 0);
-
-    p_glGenRenderbuffers(1, &g.depth);
-    p_glBindRenderbuffer(GL_RENDERBUFFER, g.depth);
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, g.w, g.h);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                                GL_RENDERBUFFER, g.depth);
-
-    if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        fprintf(stderr, "gl: framebuffer incomplete\n");
-        return -1;
-    }
     return 0;
 }
 
@@ -675,7 +760,6 @@ static int rt_prepare(int i) {
         return 0;
     }
 
-    r->configured = 1;
     r->stride = (uint32_t)stride;
     r->fmt = g.target_fmt;
     r->w = w;
@@ -685,19 +769,36 @@ static int rt_prepare(int i) {
     p_glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
     p_glGenTextures(1, &r->colour);
     p_glBindTexture(GL_TEXTURE_2D, r->colour);
+    /* A newly allocated GL target must inherit the guest's alpha/stencil,
+     * including when the first draw only clears depth. Preserve RGB too. */
+    uint8_t *initial = NULL;
+    if (r->fmt == 3) {
+        initial = calloc((size_t)r->w * r->h, 4);
+        if (!initial) return -1;
+        const size_t row_bytes = (size_t)(r->w < (int)r->stride ? r->w : (int)r->stride) * 4;
+        for (int y = 0; y < r->h; y++) {
+            const void *row = psp_mem_ptr(r->addr + (uint32_t)y * r->stride * 4u, row_bytes);
+            if (row) memcpy(initial + (size_t)(r->h - 1 - y) * r->w * 4, row, row_bytes);
+        }
+    }
     p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, r->w, r->h, 0,
-                   GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+                   GL_RGBA, GL_UNSIGNED_BYTE, initial);
+    free(initial);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                              GL_TEXTURE_2D, r->colour, 0);
     p_glGenRenderbuffers(1, &r->depth);
     p_glBindRenderbuffer(GL_RENDERBUFFER, r->depth);
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, r->w, r->h);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, r->w, r->h);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
                                 GL_RENDERBUFFER, r->depth);
-    if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         fprintf(stderr, "gl: framebuffer for target %08X is incomplete\n", r->addr);
+        g.failed = 1;
+        return -1;
+    }
+    r->configured = 1;
     return 0;
 }
 
@@ -725,6 +826,7 @@ static int claim(void) {
     g.thread = me;
 
     if (build_program() != 0) { g.failed = 1; return -1; }
+    if (build_stencil_program() != 0) { g.failed = 1; return -1; }
 
     /* Desktop GL starts with dithering enabled. The backend contract is the
      * currently undithered software GE, so an implicit host dither pattern is
@@ -955,6 +1057,7 @@ static GLuint texcache_get(const psp_tex_state *t) {
                 !t->swizzled && t->stride == r->stride &&
                 t->w == r->w && t->h == r->h && top == 0) {
                 g.bound_top = 0;
+                stencil_to_alpha(r);
                 return r->colour;
             }
             if (r->dirty) {
@@ -1240,13 +1343,52 @@ static void push_sprite(const psp_vertex *v) {
     push(&a, lod16); push(&c, lod16); push(&d, lod16);
 }
 
+/* Explicit pixel quads avoid GL's implementation-dependent native line/point
+ * coverage. The shared walker defines coverage only; these fragments still
+ * pass through the normal texture, alpha, depth, stencil and blend pipeline. */
+static void push_point_sample(const psp_vertex *v, void *opaque) {
+    psp_vertex a = *v, b = *v, c = *v, d = *v;
+    const int x = (int)floorf((float)v->x / PSP_SUBPX);
+    const int y = (int)floorf((float)v->y / PSP_SUBPX);
+    if (x < 0 || y < 0 || x >= g.rts[g.cur_rt].w || y >= g.rts[g.cur_rt].h) return;
+    a.x = d.x = x * PSP_SUBPX; b.x = c.x = a.x + PSP_SUBPX;
+    a.y = b.y = y * PSP_SUBPX; c.y = d.y = a.y + PSP_SUBPX;
+    const int lod16 = *(const int *)opaque;
+    reserve_vertices(6);
+    push(&a, lod16); push(&b, lod16); push(&c, lod16);
+    push(&a, lod16); push(&c, lod16); push(&d, lod16);
+}
+
 static void gl_draw(int prim, const psp_vertex *v, int count) {
     if (claim() != 0) return;
     g.draws++;
     g.verts += (uint64_t)count;
-    if (g.bs.stencil_test) g.unsupported_stencil_draws++;
+    if (g.bs.stencil_test) {
+        const rendertarget *r = &g.rts[g.cur_rt];
+        if (g.target_fmt == 3 && (!r->configured || r->fmt == 3)) g.stencil_draws++;
+        else g.unsupported_stencil_draws++;
+    }
+    if (prim <= PSP_PRIM_LINE_STRIP && rt_prepare(g.cur_rt) != 0) return;
 
     switch (prim) {
+    case PSP_PRIM_POINTS: {
+        int lod16 = psp_render_lod16(&g.tex, 1.0f);
+        for (int i = 0; i < count; i++) push_point_sample(&v[i], &lod16);
+        break;
+    }
+    case PSP_PRIM_LINES:
+    case PSP_PRIM_LINE_STRIP: {
+        const rendertarget *r = &g.rts[g.cur_rt];
+        const int x0 = g.sc_valid && g.sc_x0 > 0 ? g.sc_x0 : 0;
+        const int y0 = g.sc_valid && g.sc_y0 > 0 ? g.sc_y0 : 0;
+        const int x1 = g.sc_valid && g.sc_x1 < r->w - 1 ? g.sc_x1 : r->w - 1;
+        const int y1 = g.sc_valid && g.sc_y1 < r->h - 1 ? g.sc_y1 : r->h - 1;
+        for (int i = 0; i + 1 < count; i += prim == PSP_PRIM_LINES ? 2 : 1) {
+            int lod16 = psp_render_line_lod16(&g.tex, &v[i], &v[i + 1]);
+            psp_render_walk_line(&v[i], &v[i + 1], x0, y0, x1, y1, push_point_sample, &lod16);
+        }
+        break;
+    }
     case 3:                                        /* triangles */
         for (int i = 0; i + 2 < count; i += 3)
             push_triangle(&v[i], &v[i + 1], &v[i + 2]);
@@ -1267,9 +1409,6 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
         for (int i = 0; i + 1 < count; i += 2) push_sprite(&v[i]);
         break;
     default:
-        /* Points and lines. The software path does not draw them either, so
-         * counting them is the honest thing rather than inventing geometry
-         * the reference does not produce. */
         g.unsupported_prims++;
         break;
     }
@@ -1288,6 +1427,24 @@ static GLenum gl_compare(int func) {
     case 7:  return GL_GEQUAL;
     default: return GL_ALWAYS;
     }
+}
+
+static GLenum gl_stencil_op(int op) {
+    switch (op) {
+    case 1: return GL_ZERO;
+    case 2: return GL_REPLACE;
+    case 3: return GL_INVERT;
+    case 4: return GL_INCR;
+    case 5: return GL_DECR;
+    default: return GL_KEEP;
+    }
+}
+
+static int uses_dest_alpha(void) {
+    return g.bs.enable && ((g.bs.src >= 4 && g.bs.src <= 5) ||
+                           (g.bs.src >= 8 && g.bs.src <= 9) ||
+                           (g.bs.dst >= 4 && g.bs.dst <= 5) ||
+                           (g.bs.dst >= 8 && g.bs.dst <= 9));
 }
 
 /* Blend factors. Codes 6..9 are the doubled forms, which GL has no factor for
@@ -1334,6 +1491,20 @@ static GLenum gl_equation(int eq, int *ok) {
 /* Apply what the interpreter last set. Called once per flush rather than per
  * primitive: the batch is by construction all one state. */
 static void apply_state(void) {
+    if (g.bs.stencil_test && g.rts[g.cur_rt].fmt == 3) {
+        p_glEnable(GL_STENCIL_TEST);
+        p_glStencilMask(255);
+        /* GL compares reference against stored stencil; the GE backend
+         * contract compares stored stencil against reference. */
+        const int func = g.bs.stencil_func;
+        p_glStencilFunc(gl_compare(func >= 4 && func <= 7 ? func ^ 2 : func),
+                         g.bs.stencil_ref & 255, (GLuint)g.bs.stencil_mask & 255);
+        p_glStencilOp(gl_stencil_op(g.bs.op_sfail), gl_stencil_op(g.bs.op_zfail),
+                       gl_stencil_op(g.bs.op_zpass));
+    } else {
+        p_glDisable(GL_STENCIL_TEST);
+        p_glStencilMask(0);
+    }
     /* In OpenGL, disabling GL_DEPTH_TEST also disables depth-buffer writes,
      * regardless of glDepthMask.  The GE treats those controls separately:
      * clear-mode draws disable the comparison but still write the clear depth.
@@ -1438,6 +1609,11 @@ static void flush(void) {
     if (!g.ready || g.batch_n == 0) return;
     if (rt_prepare(g.cur_rt) != 0) { g.batch_n = 0; return; }
     rendertarget *r = &g.rts[g.cur_rt];
+    gpu_query_begin_frame();
+    /* Clear-mode alpha writes invalidate the hardware stencil. Synchronise
+     * pending stencil first so a scissored alpha clear preserves the rest. */
+    if (g.bs.write_alpha || uses_dest_alpha()) stencil_to_alpha(r);
+    if (g.bs.stencil_test) alpha_to_stencil(r);
     p_glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
     r->dirty = 1;
     p_glViewport(0, 0, r->w, r->h);
@@ -1449,8 +1625,26 @@ static void flush(void) {
     p_glBufferSubData(GL_ARRAY_BUFFER, 0,
                       (GLsizeiptr)(g.batch_n * FLOATS_PER_VERT * sizeof(float)),
                       g.batch);
-    gpu_query_begin_frame();
-    p_glDrawArrays(GL_TRIANGLES, 0, (GLsizei)g.batch_n);
+    const int stencil_writes = g.bs.stencil_test && r->fmt == 3 &&
+                              (g.bs.op_sfail || g.bs.op_zfail || g.bs.op_zpass);
+    if (stencil_writes && uses_dest_alpha()) {
+        /* Later overlapping primitives must blend against the updated alpha,
+         * not the value at the start of the batch. Only this dependency needs
+         * a synchronisation per triangle; ordinary stencil batches stay batched. */
+        for (size_t i = 0; i < g.batch_n; i += 3) {
+            if (i) {
+                stencil_to_alpha(r);
+                p_glUseProgram(g.prog);
+                apply_state();
+            }
+            p_glDrawArrays(GL_TRIANGLES, (GLint)i, 3);
+            r->alpha_dirty = 1;
+        }
+    } else {
+        p_glDrawArrays(GL_TRIANGLES, 0, (GLsizei)g.batch_n);
+        if (stencil_writes) r->alpha_dirty = 1;
+    }
+    if (g.bs.write_alpha) { r->stencil_valid = 0; r->alpha_dirty = 0; }
     g.batch_n = 0;
 }
 
@@ -1489,6 +1683,7 @@ static void readback_rt(int i) {
     }
 
     const uint64_t readback_t0 = psp_os_mono_ns();
+    stencil_to_alpha(r);
     p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
     p_glReadPixels(0, 0, r->w, r->h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
@@ -1544,6 +1739,8 @@ static void gl_present(void) {
     if (claim() != 0) return;
     g.presents++;
     flush();
+    /* Count deferred alpha/stencil transfers inside the GPU frame timer. */
+    for (int i = 0; i < g.n_rts; i++) stencil_to_alpha(&g.rts[i]);
 
     /* The current target, scaled into the window's physical GL drawable. SDL
      * window sizes are logical pixels on a high-DPI desktop; blitting to the
@@ -1719,6 +1916,10 @@ void render_gl_report(FILE *out) {
     if (g.unsupported_stencil_draws)
         fprintf(out, ", %llu draw(s) need alpha-backed stencil",
                 (unsigned long long)g.unsupported_stencil_draws);
+    if (g.stencil_draws)
+        fprintf(out, "\n          stencil: %llu RGBA8888 draw(s), %llu alpha import(s), %llu export(s)",
+                (unsigned long long)g.stencil_draws,
+                (unsigned long long)g.stencil_imports, (unsigned long long)g.stencil_exports);
     fprintf(out, "\n");
 }
 
