@@ -552,6 +552,72 @@ measurements land in this file once they exist.
    is an **alpha mask**: white throughout, letterforms in the alpha channel, cut
    out by the blend. Its RGB dump being uniformly white is correct.
 
+   **There was a second speckle, and it *was* the sampler** (patches 0058–0061).
+   The paragraph above is still true and its diagnostic rule is still worth
+   keeping — but "legible-but-speckled means the palette" is a rule about
+   *colours* being wrong. This one was about *coverage*: the letterforms came
+   out with texel-sized holes punched along every edge, against a reference
+   render whose edges are smooth.
+
+   `sw_tri` evaluated its edge functions at the pixel **corner**, interpolated
+   u/v there, and truncated. At a 1:1 blit — which is what this logo is — the
+   exact u at a corner is an *integer*, so the sample point sits precisely on a
+   texel boundary, and the few ULP of error in the barycentric reconstruction
+   (`1.0f/(float)area`, then three multiplies and two adds) chose texel N or
+   N-1 pseudo-randomly, per pixel. Inside a glyph both texels are the same and
+   nothing shows; on its outline the neighbour is background. Sampling half a
+   pixel across puts the point half a texel from that discontinuity and the
+   error stops deciding anything.
+
+   The measurement, on the best frame: **127 pixels of 130,560 changed**, all of
+   them on glyph edges. That was the prediction before the change — both this
+   and the fill-rule defect below live only on edges — and it is the kind of
+   claim worth stating in advance, because "the picture looks better" cannot be
+   distinguished from "the picture looks different" after the fact.
+
+   Three things were found in the same pass and are worth separating:
+
+   - **No fill rule.** `w == 0` was accepted in *both* winding branches, so a
+     quad's shared diagonal rasterized twice. Opaque geometry hides it; with
+     blending on it double-composites, on exactly the antialiased rim of each
+     letter. A 13x11 quad wrote **170 pixels for 143 positions**. The fix
+     normalises the winding first and then applies a top-left rule — applied to
+     a mixed pair it would drop the shared edge instead of assigning it.
+   - **Wrap modes did not exist.** `GE_TEXWRAP` was never decoded and the
+     sampler clamped unconditionally. This game sets **repeat on both axes**, so
+     the default was not a neutral one.
+   - **`GE_TEXFILTER` was parsed and read by nothing.** `set_texture` had no
+     filter parameter, so the state could not reach a backend even in
+     principle. This game asks for **mag linear**.
+
+   The sampling state is now in the GE report, which is what settled all three:
+
+   ```
+   sampling   filter min lin/mip-near mag linear, wrap s repeat t repeat
+   ```
+
+   **Bilinear changed nothing on this frame, and that is correct rather than
+   disappointing.** Texel k covers [k, k+1), so the taps belong around u - 0.5;
+   at an exact 1:1 blit the fractional part is zero, all the weight lands on one
+   tap, and the result is bit-identical to nearest. That is the property that
+   keeps a UI layer sharp, and `test_bilinear_equals_nearest_at_1to1` pins it.
+   Bilinear buys smoothness where a blit is *scaled* or sub-pixel offset, and
+   the mechanism there is specific: linear filtering ramps the mask's alpha
+   across the glyph boundary, alpha test GEQUAL ref 1 kills only exact zero so
+   the ramp survives, and blend src 2 / dst 3 composites it.
+
+   One consequence for reading reference renders: PPSSPP screenshots are
+   normally taken at a raised internal resolution, so some of the smoothness
+   difference against ours is resolution and not correctness. The speckle was
+   ours; the residual softness is not the same claim.
+
+   `tests/test_raster.c` had ten tests and **no texture coverage at all** — the
+   whole sampling path was unmeasured, which is how this survived. It now has
+   seven more. Against the pre-fix build they produce 13 failures, and the shape
+   of them is the diagnosis: at 1:1 the texels at k = 1, 2, 4 and 7 come back
+   wrong while 0, 3, 5 and 6 come back right, which is the pseudo-random flip
+   and not an off-by-one.
+
    **The intro movie plays.** With `PSPRECOMP_MPEG_DECODE=1` and patch `0030`'s
    clock fix, the decoder run reaches 13,064 GE lists and 1.7 billion pixels,
    and the frames are the real intro — ruined cityscapes, mechs, a lit sensor
@@ -734,6 +800,34 @@ measurements land in this file once they exist.
 
    **Also left:** perspective-correct interpolation is absent (affine only,
    exact on a fullscreen quad), and there is no clipper.
+
+   **And sub-pixel vertex precision.** `ge.c`'s `o->x = (int)sx` truncates a
+   projected vertex to whole pixels, where the hardware rasterizes at
+   sixteenths. This was deliberately *not* bundled with 0058–0061, because it
+   does not cause the speckle those fix: truncating a vertex shifts a whole quad
+   uniformly and the UVs stay coherent with the shifted geometry, rather than
+   scattering texels. It matters for 3D silhouettes and for 2D elements that
+   should slide smoothly instead of jittering a pixel at a time.
+
+   `sw_tri` was written with the substitution in mind — `SUBPX`/`SUBPX_HALF`
+   become 16 and 8, positions snap with `lrintf(x * 16.0f)`, and the integer
+   edge functions and the top-left rule carry over untouched. The real cost is
+   elsewhere: `ge.c`'s culling area becomes a float and `area != 0` stops being
+   a reliable degeneracy test, so that wants snapping to 28.4 too. The tests are
+   unaffected — they write guest memory, not `psp_vertex` structs. Note also
+   that `(int)sx` is undefined for out-of-range floats, and `to_screen` only
+   guards `clip[3] > 1e-6f`, so `sx` can reach ~1e9; a clamp belongs with this.
+
+   **Still stored and never read:** `TEXFUNC` (`modulate()` is hard-coded, so
+   REPLACE/DECAL/ADD would all draw as modulate — this game only sets modulate),
+   and `MASKRGB`/`MASKALPHA`, logged by 0033 and never applied. `TEXSCALEU/V`
+   and `TEXOFFSETU/V` (0x48–0x4B) are not decoded anywhere.
+
+   One texture oddity, visible in the texdump and not yet chased: the logo is
+   declared **512 wide with a stride of 352**, so `sample_texel` will clamp u to
+   511 while a row is only 352 bytes, and texels 352..511 read into the next
+   row. The alpha dump shows exactly that — the letterforms, then the start of
+   the next row wrapping in. Harmless while nothing samples past 352.
 
 1. **How the renderer got there.** *(Closed — kept for the measurements, which
    are the reusable part.)*
