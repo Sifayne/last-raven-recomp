@@ -258,12 +258,38 @@ static void mouse_hold_update(int mdx, int mdy) {
     if (mdy) { g_mouse_hold.y_left = MOUSE_HOLD_POLLS; g_mouse_hold.sy = mdy > 0 ? 1 : -1; }
 }
 
+/* Is the player being played? The converter runs everywhere the pad is read
+ * -- menus, the garage, the intro -- and the first windowed try of `dual`
+ * showed why that matters: mouse jitter read as circle, which cancels menus,
+ * and an off-axis push read as L/R, which changes tabs. The game's own
+ * answer is the one its yaw integrator uses: the player's movement-state
+ * object at ac+9728, which is NULL in the garage and set in a mission, with
+ * its byte at +182 equal to -1 while the AC is under control; and the pause
+ * flag the integrator also honours. Outside that, every mode is the shipped
+ * converter, bit for bit. The registers this reads are caller-saved and the
+ * stick bytes were taken before the call, so calling into the guest here is
+ * what the original function could have done itself. */
+static int in_play(void) {
+    const uint32_t state = psp_read32(PLAYER_AC + AC_STATE_PTR);
+    if (!state || (int8_t)psp_read8(state + 182) != -1) return 0;
+    psp_func_000506F8();
+    const uint32_t g = r_v0;
+    return !(g && (int16_t)(psp_read32(g + 24) & 0xFFFFu) != 0);
+}
+
 void psp_func_00279A50(void) {
     const int mode = input_mode();
     if (mode == INPUT_CLASSIC) { psp_func_00279A50__orig(); return; }
 
     const int ax = (int8_t)(psp_cpu.r[5] & 0xFF);       /* a1 */
     const int ay = (int8_t)(psp_cpu.r[6] & 0xFF);       /* a2 */
+    if (!in_play()) {
+        /* The originals read a1/a2 themselves; hand them back untouched. */
+        psp_cpu.r[5] = (uint32_t)(uint8_t)ax;
+        psp_cpu.r[6] = (uint32_t)(uint8_t)ay;
+        psp_func_00279A50__orig();
+        return;
+    }
     const int ty = (int32_t)psp_read32(STICK_THRESHOLD);
     const int tx = MODERN_TURN_THRESHOLD;
 
