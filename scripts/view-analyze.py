@@ -36,8 +36,14 @@ import sys
 from collections import Counter
 
 
+MATS = {}   # row index -> the twelve floats of a W line, for --deltas
+
+
 def read_log(path):
-    """-> [(tag, poll, yaw, pitch)]; F lines carry None for the angles."""
+    """-> [(tag, poll, yaw, pitch)]; F lines carry None for the angles.
+
+    Each W line's matrix is kept aside in MATS, so --deltas can recover the
+    camera's own motion between frames."""
     rows = []
     with open(path) as f:
         for line in f:
@@ -49,7 +55,50 @@ def read_log(path):
             elif len(parts) == 16:
                 rows.append((parts[0], int(parts[1]),
                              float(parts[14]), float(parts[15])))
+                if parts[0] == "W":
+                    MATS[len(rows) - 1] = [float(x) for x in parts[2:14]]
     return rows
+
+
+def camera_motion(m1, m2):
+    """The camera's motion between two uploads of one static object.
+
+    A world matrix here is V*M, view times model, 3x4 column-major: three
+    basis columns then a translation. For a static object M is the same in
+    both frames, so W2 * inv(W1) = V2 * inv(V1) -- the camera's own change,
+    with the object cancelled out. Its rotation is the turn; its translation
+    is how far the camera moved, in the new frame's own axes. M carries the
+    object's own scale -- terrain pieces are scaled -- so the inverse is a
+    real one, not a transpose: a transpose leaves M's scale squared in the
+    result and the translations come out in the thousands.
+    Returns (yaw_deg, (tx, ty, tz)), or None if W1 is singular."""
+    import math
+
+    def R(m):   # R[i][j] = m[3*j + i]
+        return [[m[3 * j + i] for j in range(3)] for i in range(3)]
+
+    def inv3(r):
+        a, b, c = r[0]; d, e, f = r[1]; g, h, i = r[2]
+        det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+        if abs(det) < 1e-12:
+            return None
+        return [[(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det],
+                [(f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det],
+                [(d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det]]
+
+    r1, r2 = R(m1), R(m2)
+    t1, t2 = m1[9:12], m2[9:12]
+    r1i = inv3(r1)
+    if r1i is None:
+        return None
+    # R_D = R2 * inv(R1), which is V2's rotation times inv(V1)'s: M cancels.
+    rd = [[sum(r2[i][k] * r1i[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+    # t_D = t2 - R_D * t1
+    td = [t2[i] - sum(rd[i][k] * t1[k] for k in range(3)) for i in range(3)]
+    # yaw of R_D from where it sends the forward axis (column 2), the same
+    # convention as the log's own yaw column
+    yaw = math.degrees(math.atan2(rd[0][2], rd[2][2]))
+    return yaw, tuple(td)
 
 
 def wrap(d):
@@ -95,15 +144,15 @@ def summarise(rows, lo, hi, label):
 
 def deltas(rows, bucket):
     """Per frame: the clusters of per-object yaw delta against the previous frame."""
-    frames = []           # (poll the frame closed at, [yaw per upload])
+    frames = []           # (poll the frame closed at, [(yaw, matrix)])
     cur = []
-    for tag, poll, yaw, _ in rows:
+    for i, (tag, poll, yaw, _) in enumerate(rows):
         if tag == "F":
             if cur:
                 frames.append((poll, cur))
             cur = []
         elif tag == "W":
-            cur.append(yaw)
+            cur.append((yaw, MATS.get(i)))
     if len(frames) < 2:
         print("  fewer than two complete frames -- was the log written with "
               "PSPRECOMP_VIEW_LOG_WORLD=all?")
@@ -122,7 +171,7 @@ def deltas(rows, bucket):
             print(f"    @{p1:<6} -- window opens ({p1 - p0} polls after the "
                   f"previous frame; first frame is partial)")
             continue
-        ds = [wrap(b[i] - a[i]) for i in range(n)]
+        ds = [wrap(b[i][0] - a[i][0]) for i in range(n)]
         clusters = Counter(round(d / bucket) * bucket for d in ds)
         top = clusters.most_common(3)
         # The bucket centre is coarse; the mean of the members is the number.
@@ -132,7 +181,21 @@ def deltas(rows, bucket):
             near = [d for d in ds if abs(d - v) <= bucket]
             return sum(near) / len(near) if near else v
         desc = "  ".join(f"{mean_near(v):+.4f}deg x{c}" for v, c in top)
-        print(f"    @{p1:<6} {len(a):>3}->{len(b):<3} objects  {desc}")
+        # How far the camera itself moved, from the same static objects: the
+        # median of W2*inv(W1) over the dominant cluster's members, which is
+        # the camera's own change with the object cancelled out. In the
+        # camera's axes, so a walk is a z, a strafe an x, and a turn in place
+        # shows almost nothing -- walking and turning told apart in one line.
+        v0 = top[0][0] if top else 0.0
+        members = [i for i in range(n) if abs(ds[i] - v0) <= bucket
+                   and a[i][1] is not None and b[i][1] is not None]
+        move = ""
+        if members:
+            moves = [cm[1] for cm in (camera_motion(a[i][1], b[i][1]) for i in members) if cm]
+        if members and moves:
+            med = tuple(sorted(mv[k] for mv in moves)[len(moves) // 2] for k in range(3))
+            move = f"  camera moved ({med[0]:+.3f} {med[1]:+.3f} {med[2]:+.3f})"
+        print(f"    @{p1:<6} {len(a):>3}->{len(b):<3} objects  {desc}{move}")
 
 
 def main():

@@ -1,0 +1,118 @@
+# Walking and turning at once -- can the game do it when asked?
+#
+# The shipped converter thresholds each stick axis at 100 of 127, so forward
+# and turn could never both be requested from one round stick. In `dual` they
+# can: left stick up walks, right stick turns. This holds each alone and both
+# together, plus a diagonal push of the left stick and a walk back, with the
+# camera's yaw and translation measured per frame.
+#
+#   scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual \
+#     --env PSPRECOMP_VIEW_LOG=reports/walk-turn.view \
+#     --env PSPRECOMP_VIEW_LOG_WORLD=all \
+#     --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2450-2455,2530-2535 \
+#     scenarios/walk-turn.pad
+#   scripts/view-analyze.py reports/walk-turn.view --deltas
+
+drain 500
+
+@76     state circle 128 128   # t=3.080s
+@78     state none 128 128   # t=3.160s
+@176    state circle 128 128   # t=7.458s
+@178    state none 128 128   # t=7.553s
+@317    state circle 128 128   # t=13.327s
+@318    state none 128 128   # t=13.379s
+@331    state start 128 128   # t=14.028s
+@333    state none 128 128   # t=14.135s
+@359    state cross 128 128   # t=15.475s
+@361    state none 128 128   # t=15.567s
+@409    state circle 128 128   # t=18.664s
+@411    state none 128 128   # t=18.800s
+@439    state down 128 128   # t=20.530s
+@440    state none 128 128   # t=20.593s
+@442    state down 128 128   # t=20.718s
+@444    state none 128 128   # t=20.826s
+@446    state cross 128 128   # t=20.951s
+@448    state none 128 128   # t=21.082s
+@474    state start 128 128   # t=23.119s
+@475    state none 128 128   # t=23.208s
+@484    state cross 128 128   # t=24.001s
+@485    state none 128 128   # t=24.091s
+@496    state cross 128 128   # t=25.017s
+@498    state none 128 128   # t=25.184s
+@501    state down 128 128   # t=25.436s
+@502    state none 128 128   # t=25.520s
+@503    state down 128 128   # t=25.604s
+@504    state none 128 128   # t=25.672s
+@505    state down 128 128   # t=25.757s
+@506    state none 128 128   # t=25.842s
+@507    state down 128 128   # t=25.926s
+@508    state none 128 128   # t=26.010s
+@509    state down 128 128   # t=26.094s
+@511    state none 128 128   # t=26.245s
+@512    state down 128 128   # t=26.329s
+@513    state none 128 128   # t=26.413s
+@515    state down 128 128   # t=26.581s
+@516    state none 128 128   # t=26.648s
+@519    state right 128 128   # t=26.900s
+@520    state none 128 128   # t=26.984s
+@521    state right 128 128   # t=27.067s
+@522    state none 128 128   # t=27.151s
+@523    state right 128 128   # t=27.234s
+@524    state none 128 128   # t=27.318s
+@525    state right 128 128   # t=27.403s
+@527    state none 128 128   # t=27.572s
+@528    state right 128 128   # t=27.640s
+@529    state none 128 128   # t=27.724s
+@530    state right 128 128   # t=27.807s
+@531    state none 128 128   # t=27.892s
+@532    state right 128 128   # t=27.975s
+@534    state none 128 128   # t=28.144s
+@539    state cross 128 128   # t=28.564s
+@541    state none 128 128   # t=28.725s
+@554    state cross 128 128   # t=29.917s
+@556    state none 128 128   # t=30.105s
+@623    state start 128 128   # t=34.010s
+@626    state none 128 128   # t=34.135s
+@640    state circle 128 128   # t=34.759s
+@642    state none 128 128   # t=34.853s
+@733    state circle 128 128   # t=39.075s
+@735    state none 128 128   # t=39.222s
+@751    state down 128 128   # t=40.234s
+@752    state none 128 128   # t=40.297s
+@778    state cross 128 128   # t=41.900s
+@781    state none 128 128   # t=42.079s
+@817    state cross 128 128   # t=44.676s
+@818    state none 128 128   # t=44.769s
+@849    state cross 128 128   # t=47.916s
+@850    state none 128 128   # t=48.025s
+@863    state triangle 128 128   # t=49.218s
+@864    state none 128 128   # t=49.333s
+@876    state left 128 128   # t=50.540s
+@878    state none 128 128   # t=50.749s
+@881    state cross 128 128   # t=51.061s
+@882    state none 128 128   # t=51.139s
+@1698   state circle 128 128   # t=106.511s
+@1699   state none 128 128   # t=106.589s
+@1715   state circle 128 128   # t=107.848s
+@1716   state none 128 128   # t=107.935s
+
+@2100  mark "walk-turn: walk forward only"
+@2100  analog 128 1 128 128
+@2160  analog center
+@2180  mark "walk-turn: walk forward + right stick right"
+@2180  analog 128 1 255 128
+@2240  analog center
+@2260  mark "walk-turn: walk forward + right stick left"
+@2260  analog 128 1 1 128
+@2320  analog center
+@2340  mark "walk-turn: left stick diagonal forward-left"
+@2340  analog 40 40 128 128
+@2400  analog center
+@2420  mark "walk-turn: walk back only"
+@2420  analog 128 255 128 128
+@2480  analog center
+@2500  mark "walk-turn: turn only, right stick right"
+@2500  analog 128 128 255 128
+@2560  analog center
+
+@2600  stop

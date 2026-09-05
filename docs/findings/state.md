@@ -372,10 +372,35 @@ numbers to the command with the lanes changed under them. `host/present.c`
 feeds the lanes from the right stick, and with `PSPRECOMP_MOUSE=1` captures
 the pointer (Escape releases it, focus loss releases it, a click retakes).
 
-Still open, in the order they matter: forward/back, still two-state (the walk
-law is unread); the turn animation, which plays at one speed whatever the
-rate; whether the camera filter should stay; strafe and pitch, still the
-game's own digital actions; and a keyboard layout for mouse players — `a`
+**Walking and turning at once, and why they never were.** The first
+windowed try of `dual` still felt like separate motions, so the question
+"does the game turn while walking when both are asked for" was measured
+rather than assumed: `scenarios/walk-turn.pad` holds the left stick up alone,
+then up with the right stick each way, then back, then the right stick
+alone, and `view-analyze.py --deltas` now also reports the **camera's own
+motion** per frame — `W₂·W₁⁻¹` over the static objects, which is `V₂·V₁⁻¹`
+with the object cancelled out (a true inverse, not a transpose: the world
+matrices carry the objects' scale). Forward alone moves the camera 1.23
+units a frame with no yaw; **forward with the right stick yaws 2.06°/frame
+and still walks at 1.17** — the game combines them, with a mild coupling of
+its own (2 % off the solo turn, 5 % off the solo walk); back is 0.56, about
+half speed, as AC games have it; a turn in place orbits the camera 0.64 a
+frame sideways. So the game was never the obstacle. The obstacle is the
+converter thresholding **each axis on its own at 100 of 127**: on a round
+stick that makes forward a cone of about ±38°, leaves every diagonal dead,
+and puts the corner where two directions would both pass outside the stick's
+reach — walking and turning were physically impossible to request together,
+and that is the "narrow". `dual`'s left stick is now mapped by direction
+instead: eight sectors, each of forward, back, left, right spanning 135°, so
+a diagonal asks for a walk and a strafe together, gated at a magnitude just
+above the game's 30-unit deadzone circle (`scenarios/sectors.pad` measures
+the seven directions). The walk and the strafe are still the game's own
+two-state actions; only the asking follows the stick.
+
+Still open, in the order they matter: forward/back and strafe, still
+two-state (the walk law is unread); the turn animation, which plays at one
+speed whatever the rate; whether the camera filter should stay; pitch, still
+the game's own digital action; and a keyboard layout for mouse players — `a`
 and `s` are face buttons in `KEYS[]` today, so WASD is a rebinding question,
 not an addition.
 
@@ -395,7 +420,7 @@ All are off by default and cost nothing when off.
 | `PSPRECOMP_PEEK=<hex>[,...]` | The word and the byte at each address when the run stops. Answers "what is this field", where FINDPTR answers "where is this value". |
 | `PSPRECOMP_WATCHMEM_FROM=<poll>` | Holds `PSPRECOMP_WATCHMEM`'s 32-report budget until that poll, so a word cleared at mission start and rewritten every frame does not spend it all on the clears. Each report now also lists the four functions entered before the writer — the ring, not a stack, but enough to see past a memcpy and its wrapper to the caller that decided the value. |
 | `PSPRECOMP_REACHED_DUMP=<file>` | Every label control reached, one address per line — the whole mark bitmap rather than 32 named addresses. For diffing a run that turned against one that did not. Same label-not-function caveat as `REACHED`; needs `TRACE=1`. |
-| `PSPRECOMP_VIEW_LOG=<file>` | The GE's matrices as they are uploaded, poll-stamped: tag `V` for view, `W` for the k-th world upload of each frame (`_WORLD=<k>`, default 1). `_WORLD=all` with `_POLLS=lo-hi[,lo-hi]` dumps every world upload in those polls with an `F <poll>` line per frame; `scripts/view-analyze.py --deltas` clusters per-object yaw change across frames and the largest cluster is the camera. The only camera observable this game offers — its view matrix is a constant. |
+| `PSPRECOMP_VIEW_LOG=<file>` | The GE's matrices as they are uploaded, poll-stamped: tag `V` for view, `W` for the k-th world upload of each frame (`_WORLD=<k>`, default 1). `_WORLD=all` with `_POLLS=lo-hi[,lo-hi]` dumps every world upload in those polls with an `F <poll>` line per frame; `scripts/view-analyze.py --deltas` clusters per-object yaw change across frames and the largest cluster is the camera; it also prints the camera's own motion per frame, `W₂·W₁⁻¹` over that cluster with a true inverse (the matrices carry object scale), so a walk reads as z and a strafe as x beside the turn. The only camera observable this game offers — its view matrix is a constant. |
 | `PSPRECOMP_RAMSNAP=<prefix>` + `_POLLS=n[,...]` | The 32 MB of RAM and the module image (guest 0; where this game keeps its player object) at each named poll, before that poll's pad state is written. `scripts/ram-diff.py` finds the words stepping by a constant across three or more — an integrator's output — at 16-bit, 32-bit and float, without knowing the representation. Half a gigabyte for sixteen; capped there. |
 | `PSPRECOMP_INPUT=modern\|dual` / `PSPRECOMP_INPUT_LOG=<file>` | The port's control schemes, from `host/replacements.c`; unset, every replacement defers to the game's own code. `modern` honours the left stick's magnitude; `dual` looks with the right stick and the mouse and moves with the left. The log is one line per call of the yaw integrator — poll, object, sticks, gate — which is how "the game did not even ask" was told apart from "the law is wrong". |
 | `PSPRECOMP_MOUSE=1` / `PSPRECOMP_MOUSE_SENS=<k>` | Windowed only: capture the pointer for mouse-look (Escape releases, a click retakes, losing focus releases). Travel reaches the game through the sceCtrl lanes, so a recording holds it and a replay reproduces it; `k` scales the 0.001 rad per count default. Means nothing outside `PSPRECOMP_INPUT=dual`. |
@@ -1547,6 +1572,8 @@ baseline; the question is whose 261 commands stopped being counted.
 | `scripts/09-replay.sh --decode scenarios/look-probe.pad` | `stop` at poll 2620, 0 bad mem, 2,623 lists, 31,629,673 commands — the mission played into: a hard-left hold from poll 2100, centre, hard-right from 2360. With `PSPRECOMP_INPUT` unset this must not move, and did not when the two replacements landed (4 Sep); the same day mission-1, garage and main-menu reproduced their rows above to the command. The classic-mode check for `host/replacements.c`. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=modern --env PSPRECOMP_VIEW_LOG=reports/sweep.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2210-2215,2290-2295,2370-2375,2450-2455,2530-2535,2610-2615,2690-2695 scenarios/yaw-sweep.pad` then `scripts/view-analyze.py reports/sweep.view --deltas` | `stop` at poll 3100, 0 bad mem, 3,103 lists, 41,601,520 commands (4 Sep). The largest cluster in each window is the camera's yaw per frame at that hold: **R127 −2.105, L96 +1.588, R96 −1.590, L64 +1.056, R64 −1.058, L32 +0.528, R32 −0.528** — the stick's deflection times the 2.1019°/frame cap. The functional gate for proportional turning. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/look.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2440-2445,2500-2505,2570-2575 scenarios/look-sweep.pad` then `scripts/view-analyze.py reports/look.view --deltas` | `stop` at poll 2640, 0 bad mem, 2,643 lists, 33,857,103 commands, and the view log identical across two runs (4 Sep). Per window: **right stick 127 → −2.099°/frame, left 127 → +2.100, right 64 → −1.051, left 64 → +1.053, a mouse drag of −30 then +30 counts a poll → +1.683 / −1.684, the left stick at 32 → −0.002** — the second stick and the mouse turn, the first stick strafes. The functional gate for the look channel, and proof it replays. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/wt.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2450-2455,2530-2535 scenarios/walk-turn.pad` then `scripts/view-analyze.py reports/wt.view --deltas` | `stop` at poll 2600, 0 bad mem, 2,603 lists, 32,902,603 commands (4 Sep). Per window, yaw and the camera's own motion (x sideways, z forward): **forward alone 0°, z −1.23; forward + right stick −2.06°, z −1.17; forward + left +2.06°, z −1.17; back 0°, z +0.56; right stick alone −2.10°, x +0.64 (the chase camera orbiting)**. The proof that the game walks and turns at once when both are asked for. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/sect.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2450-2455,2530-2535,2610-2615 scenarios/sectors.pad` then `scripts/view-analyze.py reports/sect.view --deltas` | `stop` at poll 2680, 0 bad mem, 2,683 lists, 34,580,662 commands (4 Sep). The left stick at 120 of travel in seven directions, camera motion per frame (x sideways, z forward): **straight forward 0, −1.23; forward 30° off −0.88, −0.87; the forward diagonals −0.88, −0.87 and +0.86, −0.78; back-right −0.40, +0.40; straight strafe −1.08, −0.30 with the game's own lock-on yaw of −0.39°; a half-deflection forward 0, −1.24**. The gate for the eight-sector map: a push in any direction moves in that direction. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_AUDIO_DUMP=<prefix> scenarios/garage.pad` | **three channels of non-silent PCM** (3 Sep, item 49 -- M3's gate, headless half): ch1 5.5 s / peak 9,466 / ZCR 0.252, ch2 4.0 s / peak 32,768 / ZCR 0.294, ch3 15.7 s / peak 10,158 / **ZCR 0.075** -- the low crossing rate and the length make ch3 the music and the other two effects. In the same run `__sceSasCore` is called 2,712 times and `PSPRECOMP_ATRAC_LOG=1` shows 3 tracks opened, **125 `DecodeData`** and 2 `SetLoopNum`. This measures that sound is *generated*; *audible* is the windowed half, confirmed by Sif on 3 Sep (M3 struck) and re-checkable only by this dump |
 | `scripts/08-autotest-sweep.sh` | **138 MATCH** of 432, 3 NOOUTPUT (3 Sep, after blend and stencil: no row moved; after fog: `gpu/commands/fog.prx` DIFFER 528 → MATCH and nothing else moved); `utility/msgdialog/dialog.prx` is back at DIFFER 139 since the interp's teardown fix (item 35); diff per test, the total is not a goal |
 | `scripts/07-autotests.sh <dir with gpu/commands/blend.prx, blend565.prx + .expected>` | **every value matches** on both (3 Sep, item 37); the runner reports 128 / 140 differing lines, all of them the `[r]`/`[x]` checkpoint prefix, a scheduling artifact -- strip it before diffing |

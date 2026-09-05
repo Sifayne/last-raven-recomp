@@ -287,12 +287,33 @@ void psp_func_00279A50(void) {
     if      (rx >  tx) bits = 0x8000u;
     else if (rx < -tx) bits = 0x4000u;
     else if (g_mouse_hold.x_left > 0) bits = g_mouse_hold.sx > 0 ? 0x8000u : 0x4000u;
-    /* Forward/back: left stick Y, the game's own threshold. */
-    if      (ay < -ty) bits |= 0x1000u;
-    else if (ay >  ty) bits |= 0x2000u;
-    /* Strafe: left stick X as L/R. */
-    if      (ax >  tx) bits |= 0x200u;
-    else if (ax < -tx) bits |= 0x100u;
+
+    /* Movement: the left stick as eight sectors, not two axes.
+     *
+     * The game's own map thresholds each axis at 100 of 127 on its own, which
+     * on a round stick makes "forward" a cone of about +/-38 degrees, leaves
+     * every diagonal dead, and puts the corner where two directions would
+     * both pass outside the stick's reach. This is the "narrow" in the feel.
+     * Here a direction is asked for when the stick points within 67.5
+     * degrees of it, so each of the four spans 135 degrees and a diagonal
+     * asks for two at once -- a walk and a strafe together, which the game
+     * does support, it just could never be told to. The magnitude gate sits
+     * just above the game's 30-unit deadzone circle. The actions themselves
+     * are still the game's two-state walk and strafe; only the asking is
+     * proportional to where the stick points. */
+    {
+        const int r2 = ax * ax + ay * ay;
+        if (r2 >= 40 * 40) {
+            /* cos 67.5 deg = 0.383; compare squares to stay in integers:
+             * |component| > 0.383 r  <=>  component^2 > 0.1464 r^2 */
+            const int fwd = -ay, back = ay, right = ax, left = -ax;
+            if (fwd   > 0 && fwd   * fwd   * 1000 > 146 * r2) bits |= 0x1000u;
+            if (back  > 0 && back  * back  * 1000 > 146 * r2) bits |= 0x2000u;
+            if (right > 0 && right * right * 1000 > 146 * r2) bits |= 0x200u;
+            if (left  > 0 && left  * left  * 1000 > 146 * r2) bits |= 0x100u;
+        }
+    }
+    (void)ty;
     /* Look up/down: right stick Y, else recent mouse Y, as triangle/circle.
      * Stick up and mouse away from the player both look up. */
     if      (ry < -DUAL_LOOK_THRESHOLD) bits |= 0x40u;
