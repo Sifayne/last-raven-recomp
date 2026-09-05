@@ -26,7 +26,11 @@ mkdir -p "$OBJ"
 
 info "emitting C"
 rm -rf "${GEN:?}"/*
-"$AR" emit "$ELF" "$GEN" "$PREFIX" | tee "$REPORTS/04-emit.txt"
+# host/replace.txt names the functions this project implements natively. Their
+# bodies are still emitted, as psp_func_<addr>__orig, but the public symbol is
+# left for host/replacements.c to define. An empty list changes nothing.
+"$AR" emit "$ELF" "$GEN" "$PREFIX" --replace @"$ROOT/host/replace.txt" \
+    | tee "$REPORTS/04-emit.txt"
 echo
 info "$(cat "$GEN"/*.c | wc -l) lines of C in $(ls "$GEN" | wc -l) files, $(du -sh "$GEN" | cut -f1)"
 
@@ -47,6 +51,9 @@ for src in "$GEN"/*.c; do
     cc -c "${CFLAGS[@]}" -o "$OBJ/$(basename "${src%.c}").o" "$src"
 done
 cc -c "${CFLAGS[@]}" -o "$OBJ/link_probe.o" "$ROOT/host/link_probe.c"
+# The native replacements for whatever host/replace.txt names. Compiled even
+# when that list is empty, so adding the first one needs no build change here.
+cc -c "${CFLAGS[@]}" -I "$GEN" -o "$OBJ/replacements.o" "$ROOT/host/replacements.c"
 
 info "linking"
 # Named explicitly rather than globbed: stage 05 also builds into this
@@ -55,6 +62,7 @@ info "linking"
 GEN_OBJS=()
 for src in "$GEN"/*.c; do GEN_OBJS+=("$OBJ/$(basename "${src%.c}").o"); done
 cc -o "$OBJ/${PREFIX}_probe" "${GEN_OBJS[@]}" "$OBJ/link_probe.o" \
+      "$OBJ/replacements.o" \
       "$ROOT/build/psprecomp/libpsprecomp.a" -lm $HOST_LIBS
 
 info "link closed: $(du -h "$OBJ/${PREFIX}_probe" | cut -f1) executable"

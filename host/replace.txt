@@ -1,0 +1,61 @@
+# Functions this project implements natively, replacing the game's own.
+#
+# One hex address per line; `#` comments to end of line. Passed to the emitter
+# as `--replace @host/replace.txt` by scripts/04-emit-build.sh.
+#
+# For each address listed here the emitter keeps the translated body but names
+# it `psp_func_<addr>__orig`, and leaves the public `psp_func_<addr>` for
+# host/replacements.c to define. Every call site in the emitted C -- direct
+# `jal`s included, which no run-time hook can reach -- then binds to ours.
+#
+# ---------------------------------------------------------------------------
+# Before adding an address, three things are worth knowing.
+#
+# 1. Say why. A bare address here is unreadable six months from now, and the
+#    reason is the part that cannot be recovered from the binary.
+#
+# 2. Check for interior entries. Replacing a function does not replace jumps
+#    *into* it: the emitter's `psp_at_<addr>` thunks enter the original body
+#    directly. If the generated C has psp_at_ thunks inside the function's
+#    extent, control can still reach the original past its prologue, and the
+#    substitution is not as clean as it looks.
+#
+#        grep -n 'psp_at_' game/generated/aclr_funcs.c
+#
+# 3. The differential oracle will report it as a mismatch, and that is correct
+#    rather than a bug. scripts/05-oracle.sh compares each psp_func_<addr>
+#    against the interpreter running the original instructions; a replaced
+#    function is *meant* to behave differently, so it differs by construction.
+#    Skip replaced addresses there rather than reading the differ as a codegen
+#    fault -- docs/findings/oracle.md is about emitter correctness, and a
+#    deliberate replacement is not evidence either way.
+# ---------------------------------------------------------------------------
+#
+# With no addresses listed, the emitter's output is byte-identical to a build
+# without this file, so nothing downstream changes.
+
+# The AC's yaw integrator: psp_func_0004F248(ac, accel, max_rate). Called by
+# the fourteen movement-state handlers (walk, boost, jump...), it turns the pad
+# into a yaw rate at ac+8312 and adds it to the yaw at ac+36. The game's default
+# control path reduces the stick to two button bits first -- pressed(2) left,
+# pressed(3) right -- so it ramps at 4*accel per frame to the cap and never
+# sees how far the stick moved. host/replacements.c uses that magnitude.
+#
+# Two things the call log (PSPRECOMP_INPUT_LOG) established: every AC in the
+# mission runs this, the enemies every frame, so the replacement acts only on
+# the player's object; and the player's handler calls it only while the
+# thresholded turn bit is set, so lowering that threshold is the other half of
+# the job. Interior thunks: 18, all ordinary branch targets. Findings:
+# docs/findings/state.md, controls.
+0004F248   # yaw integrator -- see host/replacements.c
+
+# The stick-to-buttons converter: psp_func_00279A50(state, ax, ay), from the
+# pad adaptor psp_func_002797D4. The PSP stick, after a circular deadzone of
+# radius 30, becomes four virtual bits -- 0x8000 right, 0x4000 left, 0x1000
+# forward, 0x2000 back -- when an axis passes the threshold at 0x0042B784
+# (100 of 127). Physical buttons occupy bits 0-11, so these four are the whole
+# of what the game ever learns about the stick's direction, and the
+# key-assign rows bind actions 0-3 to exactly them. The movement state machine
+# keys on these bits, which is why the yaw integrator above is never even
+# called below the threshold. Interior thunks: 5, all ordinary branch targets.
+00279A50   # stick -> virtual buttons -- see host/replacements.c

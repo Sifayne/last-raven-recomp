@@ -57,6 +57,11 @@ cc -O2 -std=gnu11 $SDL_DEF \
    -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
    -c "$ROOT/host/boot.c" -o "$OUT/boot.o"
 
+# Native replacements for the functions host/replace.txt names. Linked into the
+# boot host as well as stage 04's probe, because this is the build that runs.
+cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" -I "$GEN" \
+   -c "$ROOT/host/replacements.c" -o "$OUT/replacements.o"
+
 for src in loader container decode; do
     cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
        -c "$RECOMP_DIR/$src.c" -o "$OUT/$src.o"
@@ -93,7 +98,7 @@ cc -O2 -std=gnu11 $SDL_DEF ${SDL_DEF:+$(pkg-config --cflags sdl2)} \
 
 info "linking"
 cc "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT \
-   "$OUT/aclr_funcs.o" "$OUT/aclr_imports.o" "$LIB" \
+   "$OUT/aclr_funcs.o" "$OUT/aclr_imports.o" "$OUT/replacements.o" "$LIB" \
    -o "$OUT/boot" -lm -lpthread $HOST_LIBS
 
 cc "$OUT/gereplay.o" $PRESENT "$LIB" \

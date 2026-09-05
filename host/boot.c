@@ -359,17 +359,60 @@ static void watch_memory(void) {
 enum { MAX_REACHED = 32 };
 static uint32_t g_reached[MAX_REACHED];
 static int      g_reached_n;
+static uint32_t g_marks_lo, g_marks_hi;
+
+/* PSPRECOMP_REACHED_DUMP=<file> writes every label control actually reached.
+ *
+ * PSPRECOMP_REACHED answers "was this address reached" for up to 32 addresses
+ * named in advance, which is the wrong shape for the question "which code runs
+ * when the player turns and not when they stand still". That one is answered by
+ * running twice and diffing, and diffing needs the whole set rather than a
+ * sample of it.
+ *
+ * The bitmap already covers every label in the module -- marks_init sizes it to
+ * the whole range -- so nothing new has to be recorded. Only the readout was
+ * missing.
+ *
+ * Same caveat as PSPRECOMP_REACHED, and it matters more here because the output
+ * invites being read as a function list: PSP_MARK is emitted at *labels*, so
+ * this is the set of reached basic-block entries, not of reached functions. A
+ * function appears by whichever of its labels ran. Map an address back with
+ *
+ *     grep -n 'L_<ADDR>: PSP_MARK' game/generated/aclr_funcs.c
+ *
+ * Needs a PSPRECOMP_TRACE build, like everything else that reads the ring. */
+static void reached_dump(void) {
+    const char *v = getenv("PSPRECOMP_REACHED_DUMP");
+    if (!v || !*v) return;
+    if (!g_marks_hi) { printf("reached-dump: no mark bitmap\n"); return; }
+    FILE *f = fopen(v, "w");
+    if (!f) { printf("reached-dump: cannot write %s\n", v); return; }
+    fprintf(f, "# labels reached this run, one address per line.\n"
+               "# Basic-block entries, not functions -- see PSPRECOMP_REACHED_DUMP.\n");
+    uint64_t n = 0;
+    for (uint32_t a = g_marks_lo; a < g_marks_hi; a += 4)
+        if (psp_trace_was_marked(a) > 0) { fprintf(f, "%08X\n", a); n++; }
+    fclose(f);
+    printf("reached-dump: %llu label(s) reached, written to %s\n",
+           (unsigned long long)n, v);
+}
 
 static void reached_init(uint32_t lo, uint32_t hi) {
     const char *v = getenv("PSPRECOMP_REACHED");
-    if (!v || !*v) return;
-    for (const char *p = v; *p && g_reached_n < MAX_REACHED; ) {
+    const char *d = getenv("PSPRECOMP_REACHED_DUMP");
+    /* The dump reads the same bitmap, so either request has to allocate it --
+     * otherwise asking only for the dump gets an empty one and reads as "no
+     * code ran". */
+    if ((!v || !*v) && (!d || !*d)) return;
+    for (const char *p = v ? v : ""; *p && g_reached_n < MAX_REACHED; ) {
         char *end;
         const uint32_t a = (uint32_t)strtoul(p, &end, 0);
         if (end == p) break;
         g_reached[g_reached_n++] = a;
         p = (*end == ',') ? end + 1 : end;
     }
+    g_marks_lo = lo;
+    g_marks_hi = hi;
     psp_trace_marks_init(lo, (hi - lo) / 4);
     printf("      reached   %d address(es) watched (needs a PSPRECOMP_TRACE build)\n",
            g_reached_n);
@@ -1014,6 +1057,7 @@ int main(int argc, char **argv) {
     render_gl_report(stdout);
     find_pointer(li.lo, li.hi - li.lo);
     reached_report();
+    reached_dump();
     peek();
     survey_vram();
     dump_framebuffer();

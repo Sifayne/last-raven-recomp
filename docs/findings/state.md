@@ -274,6 +274,88 @@ own. Before patch 0021 it was printed for force-stops too, because
 `psp_sched_stop_all` marks every thread dead and the drain then counts zero —
 indistinguishable from success. See *Six ways to measure nothing*.
 
+### Controls — measured, read, and the first two functions replaced (4 Sep)
+
+The scheme as shipped: left stick Y is forward/back, left stick X is **turn**,
+L/R strafe, triangle/circle look up/down. The complaint was that turning and
+moving feel like separate motions. Every number below is pad-driven, decoder
+on, headless, on `scenarios/mission-1.pad`'s prefix into the first mission;
+gameplay begins at about poll 2050 (the HUD and the 03:00 timer appear), and
+in play polls are 1:1 with frames at ~36 a second.
+
+**What the stick does, as shipped.** The GE view matrix is useless as a camera
+observable — this game uploads it ~155,000 times a mission and it is the same
+`diag(1,-1,-1)` every time; the camera is composed on the CPU into ~240 world
+matrices a frame. So the instrument is the world-matrix log
+(`PSPRECOMP_VIEW_LOG`, `_WORLD=all`, `_POLLS`) read by
+`scripts/view-analyze.py --deltas`, which clusters every object's yaw change
+between consecutive frames: static scenery is the biggest cluster and its
+delta is the camera's. Full stick: ~4 frames of latency, then the AC's yaw
+rate ramps **linearly at 0.4204°/frame² for 5 frames to a cap of
+2.1019°/frame** (0.036685 rad — a full turn in ~4.9 s) and decays the same way
+on release; the chase camera smooths that with a ×0.83-per-frame filter, which
+is the geometric tail one sees. **Deflections 104 and above turn at the full
+rate; 100 and below do nothing at all** — the stick is two-state. (A first
+reading of "camera frozen, object count 321" as the AC having been destroyed
+was wrong: the frames — `reports/thr-contact.png` — show it alive with the
+timer running. Check frames before inferring game state from counts.)
+
+**Where that happens.** The only caller of the `sceCtrlPeekBufferPositive`
+thunk is `psp_func_00255DE4`, which hands each `SceCtrlData` to the adaptor
+`psp_func_00279648`: `0x002799B8` HOLD/HOME; `0x00279910` a circular deadzone
+of radius 30 (`u32 at 0x0042B788`), stick to signed bytes at `state+80/81`;
+`0x002797D4` builds the game's button word as `0x00279A10(PSP buttons → bits
+0–11)` OR **`0x00279A50(state, ax, ay)`, 26 instructions, the stick-to-bits
+converter: `T = u32 at 0x0042B784 = 100`; `ax > T → 0x8000` right, `ax < -T →
+0x4000` left, `ay < -T → 0x1000` forward, `ay > T → 0x2000` back** — then
+edges and per-bit hold/repeat counters. So forward/back are two-state through
+the same compare. `psp_func_0005EBF0` packs the record (buttons u16, then the
+sticks as *nibbles* — the game's own stick resolution is 16 steps of 16 from
+−120 to +120, with slots for a second stick), `psp_func_0005EACC` keeps an
+8×8-byte ring and copies the current record to `ctx` at `0x0033BC60` (found
+by `WATCHMEM` on the byte with `_FROM` and the new call-context line), the
+key-assign row for control type 0 binds actions 0–3 to exactly those four
+bits, and the movement state machine picks one of fourteen handlers by them.
+Each handler calls **`psp_func_0004F248(ac, accel, max)`, the yaw
+integrator**: rate at `ac+8312`, yaw at `ac+36`, direction byte at `ac+8351`;
+gate `(*(ac+9728))[182] == -1`; `pressed(3)` → rate += 4·accel, `pressed(2)`
+→ −= , neither → decay and snap; clamp ±max; `yaw += rate` unless
+`psp_func_000506F8()->s16[24]` says paused. It has an analog path too
+(`0x0005EF8C(ctx)` then `0x0005F008(ctx, 2)`, deadzone 60, acceleration scaled
+by travel past it, same cap) that the shipped configuration does not take.
+`scripts/fn-source.sh <addr>` prints any of these from the emitted C.
+
+Two traps on the way, both worth knowing. `0x09630F10` steps by exactly
+`0x180` a frame while turning and is a **pointer** into a 0x180-byte-row table
+— the turning animation's cursor, not the heading (`ram-diff.py` finds
+constant steps; it cannot say what they mean). And `WATCHMEM` names the last
+function *entered*, so a store made by a caller after a leaf returns is
+blamed on the leaf: `0x0005EFA0` is a 13-instruction `pressed(ctx, action)`,
+and the write was its caller's.
+
+**The replacements** (`host/replace.txt`, `host/replacements.c`; the emitter's
+`--replace` leaves the public symbol to the host and keeps the body as
+`psp_func_<addr>__orig`). With `PSPRECOMP_INPUT` unset both defer to the
+original and every number in this document stands. With
+`PSPRECOMP_INPUT=modern`: `0004F248` sets the rate to `max × (lx−128)/127`
+directly, for the player's AC only — every AC in the mission runs the same
+integrator, the three enemies once a frame, and a first version steered them
+with the stick; and `00279A50` keeps `T` for forward/back (the walk law has
+not been read) but uses 16 for left/right, just above the deadzone circle, so
+the turning state engages at any deliberate deflection. The player's
+integrator is then called exactly once a poll while engaged, and the camera's
+mid-hold rate is the stick's: **127 → 2.105°/frame, 96 → 1.588, 64 → 1.056,
+32 → 0.528, 16 and 8 → 0** against 2.1019×d/127 of 2.102, 1.589, 1.059, 0.530.
+The AC responds in the frame; what remains of the old ramp is the camera's
+own filter. Replay reproduces all of it, because the stick it reads is the
+same `lx` byte the recorder writes.
+
+Still open, in the order they matter: the second axis — right stick or mouse
+into the yaw, left stick X into strafe — which needs a look channel in
+`host/present.c` and a recorded event for it in `ctrl_replay.c`; forward/back,
+still two-state; the turn animation, which plays at one speed whatever the
+rate; and whether the camera filter should stay.
+
 ## The instruments, and what each can and cannot tell you
 
 All are off by default and cost nothing when off.
@@ -288,6 +370,11 @@ All are off by default and cost nothing when off.
 | `PSPRECOMP_TEXDUMP=<path>` | Every distinct texture the game binds, decoded through the renderer's own sampler, as `<path>-NN.ppm`. Separates "the sampler reads wrong texels" from "the texture is not what we think", which look identical on screen. |
 | `PSPRECOMP_FINDPTR=<hex>` | Every address in the module, RAM and VRAM holding that value as a word, tagged by region. For pointers that only exist once the PRX is relocated — and for tracking a value's *identity* rather than one of its addresses. |
 | `PSPRECOMP_PEEK=<hex>[,...]` | The word and the byte at each address when the run stops. Answers "what is this field", where FINDPTR answers "where is this value". |
+| `PSPRECOMP_WATCHMEM_FROM=<poll>` | Holds `PSPRECOMP_WATCHMEM`'s 32-report budget until that poll, so a word cleared at mission start and rewritten every frame does not spend it all on the clears. Each report now also lists the four functions entered before the writer — the ring, not a stack, but enough to see past a memcpy and its wrapper to the caller that decided the value. |
+| `PSPRECOMP_REACHED_DUMP=<file>` | Every label control reached, one address per line — the whole mark bitmap rather than 32 named addresses. For diffing a run that turned against one that did not. Same label-not-function caveat as `REACHED`; needs `TRACE=1`. |
+| `PSPRECOMP_VIEW_LOG=<file>` | The GE's matrices as they are uploaded, poll-stamped: tag `V` for view, `W` for the k-th world upload of each frame (`_WORLD=<k>`, default 1). `_WORLD=all` with `_POLLS=lo-hi[,lo-hi]` dumps every world upload in those polls with an `F <poll>` line per frame; `scripts/view-analyze.py --deltas` clusters per-object yaw change across frames and the largest cluster is the camera. The only camera observable this game offers — its view matrix is a constant. |
+| `PSPRECOMP_RAMSNAP=<prefix>` + `_POLLS=n[,...]` | The 32 MB of RAM and the module image (guest 0; where this game keeps its player object) at each named poll, before that poll's pad state is written. `scripts/ram-diff.py` finds the words stepping by a constant across three or more — an integrator's output — at 16-bit, 32-bit and float, without knowing the representation. Half a gigabyte for sixteen; capped there. |
+| `PSPRECOMP_INPUT=modern` / `PSPRECOMP_INPUT_LOG=<file>` | The port's control scheme, from `host/replacements.c`; unset, every replacement defers to the game's own code. The log is one line per call of the yaw integrator — poll, object, stick, gate — which is how "the game did not even ask" was told apart from "the law is wrong". |
 | `PSPRECOMP_PAD=start,cross` | Holds pad buttons for the run. There is no window and no gamepad. |
 | `PSPRECOMP_PAD_PRESS=start,15,0.5` | Presses a button at a wall-clock moment — down at `delay` seconds, up `duration` (default 0.5) later. A held button never reads as *pressed*, because a press is a transition. Headless only; in a windowed run the SDL layer owns the pad. |
 | `PSPRECOMP_FRAME=<path>` | Where to write the frame. Defaults to `frame.ppm`, and dumps the GE's render target rather than the scanned-out buffer. |
@@ -1433,6 +1520,8 @@ baseline; the question is whose 261 commands stopped being counted.
 | `scripts/09-replay.sh --decode scenarios/mission-1.pad` | **`stop` at poll 1790, 0 bad mem**, 1,793 lists, 19,007,184 commands, the mission's opening with its chatter box; ~87 s wall, 56 ns/pixel (2 Sep, night — the first run into a sortie); **renders since the `vidt` fix** (3 Sep) — mean 84 against ~100, 4,200 colours, mech, buildings, smoke, lit horizon; **continuous ground since the clip-space near clipper** (3 Sep, item 34), where it was shards — same 1,793 / 19,007,184; **light-blue sky and far field since fog** (3 Sep, item 36), end-frame mean 92 against the reference's 89 |
 | `scripts/09-replay.sh --decode scenarios/main-menu.pad` | **`stop` at poll 748, 0 bad mem**, 751 lists, 9,556,252 commands, the main menu with the AC standing behind it, GARAGE highlighted (3 Sep, recut from 810; findings item 38) -- mean 36 against the PPSSPP frame's 36 |
 | `scripts/09-replay.sh --decode scenarios/garage.pad` | **`stop` at poll 925, 0 bad mem**, 928 lists, 11,948,318 commands, the sortie launch's AC in the hangar (3 Sep, item 38) -- mean 39 against 38 |
+| `scripts/09-replay.sh --decode scenarios/look-probe.pad` | `stop` at poll 2620, 0 bad mem, 2,623 lists, 31,629,673 commands — the mission played into: a hard-left hold from poll 2100, centre, hard-right from 2360. With `PSPRECOMP_INPUT` unset this must not move, and did not when the two replacements landed (4 Sep); the same day mission-1, garage and main-menu reproduced their rows above to the command. The classic-mode check for `host/replacements.c`. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=modern --env PSPRECOMP_VIEW_LOG=reports/sweep.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2210-2215,2290-2295,2370-2375,2450-2455,2530-2535,2610-2615,2690-2695 scenarios/yaw-sweep.pad` then `scripts/view-analyze.py reports/sweep.view --deltas` | `stop` at poll 3100, 0 bad mem, 3,103 lists, 41,601,520 commands (4 Sep). The largest cluster in each window is the camera's yaw per frame at that hold: **R127 −2.105, L96 +1.588, R96 −1.590, L64 +1.056, R64 −1.058, L32 +0.528, R32 −0.528** — the stick's deflection times the 2.1019°/frame cap. The functional gate for proportional turning. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_AUDIO_DUMP=<prefix> scenarios/garage.pad` | **three channels of non-silent PCM** (3 Sep, item 49 -- M3's gate, headless half): ch1 5.5 s / peak 9,466 / ZCR 0.252, ch2 4.0 s / peak 32,768 / ZCR 0.294, ch3 15.7 s / peak 10,158 / **ZCR 0.075** -- the low crossing rate and the length make ch3 the music and the other two effects. In the same run `__sceSasCore` is called 2,712 times and `PSPRECOMP_ATRAC_LOG=1` shows 3 tracks opened, **125 `DecodeData`** and 2 `SetLoopNum`. This measures that sound is *generated*; *audible* is the windowed half, confirmed by Sif on 3 Sep (M3 struck) and re-checkable only by this dump |
 | `scripts/08-autotest-sweep.sh` | **138 MATCH** of 432, 3 NOOUTPUT (3 Sep, after blend and stencil: no row moved; after fog: `gpu/commands/fog.prx` DIFFER 528 → MATCH and nothing else moved); `utility/msgdialog/dialog.prx` is back at DIFFER 139 since the interp's teardown fix (item 35); diff per test, the total is not a goal |
 | `scripts/07-autotests.sh <dir with gpu/commands/blend.prx, blend565.prx + .expected>` | **every value matches** on both (3 Sep, item 37); the runner reports 128 / 140 differing lines, all of them the `[r]`/`[x]` checkpoint prefix, a scheduling artifact -- strip it before diffing |

@@ -63,8 +63,15 @@ cc -c -O1 -I "$ROOT/tools/psprecomp/include" \
          -I "$ROOT/tools/psprecomp/tools/allegrexrecomp" \
          -o "$GEN_OBJ/oracle_diff.o" "$ROOT/host/oracle_diff.c"
 
+# Replacements are linked here too, because the emitted objects reference their
+# symbols. Note what that means for a comparison: this harness runs
+# psp_func_<addr> against the interpreter executing the original instructions,
+# so a *replaced* function differs by construction rather than by codegen fault.
+# Exclude replaced addresses from a sweep instead of reading the differ as a
+# bug -- see host/replace.txt.
 cc -o "$BIN" "$GEN_OBJ/oracle_diff.o" \
        "$GEN_OBJ/aclr_funcs.o" "$GEN_OBJ/aclr_imports.o" \
+       "$GEN_OBJ/replacements.o" \
        "$ROOT/build/psprecomp/tools/allegrexrecomp/liballegrex_core.a" \
        "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread $HOST_LIBS
 
