@@ -205,20 +205,31 @@ enum { AC_YAW = 36, AC_RATE = 8312, AC_DIR = 8351, AC_STATE_PTR = 9728 };
  * with the player's stick. */
 enum { PLAYER_AC = 0x0042D6C0u };
 
-/* The pause gate the integrators honour. psp_func_000506F8(ac) is
+/* A hold the yaw integrator honours. psp_func_000506F8(ac) is
  * *(*(ac+9728)+276) + 5808 -- an object hanging off the AC's movement state --
- * and the s16 at +24 of that is non-zero while the game is paused. Read in C
- * rather than by calling the guest: the guest getter takes the AC in a0, and
- * a replacement that called it from a context where a0 was something else
+ * and while the s16 at +24 of that is non-zero the original integrates the
+ * rate but leaves the yaw alone. It was first read as the pause flag, and it
+ * is not: the pause menu does not set it, it stops calling the AC's update
+ * altogether (see in_play below). What does set it is not established; the
+ * replacement keeps the original's behaviour either way. Read in C rather
+ * than by calling the guest: the guest getter takes the AC in a0, and a
+ * replacement that called it from a context where a0 was something else
  * dereferenced that something. (The first in-play gate did exactly that from
  * the stick converter, whose a0 is not an AC, and it read garbage twice a
  * poll until the bad-access counter said so.) NULL where the original's
  * `bnel v0, zero` says NULL. */
-static int game_paused(uint32_t ac) {
+static int yaw_held(uint32_t ac) {
     const uint32_t state = psp_read32(ac + AC_STATE_PTR);
     const uint32_t g = psp_read32(state + 276) + 5808;
     return g && (int16_t)(psp_read32(g + 24) & 0xFFFFu) != 0;
 }
+
+/* The poll at which the player's AC last ran its per-frame update, recorded
+ * by the look integrator below, which the game calls every frame the AC is
+ * under control and not at all while the pause menu is up. */
+static uint32_t g_ac_update_poll;
+
+static int mouse_take_dx(void);        /* the banked mouse yaw; with the converter, below */
 
 void psp_func_0004F248(void) {
     const int mode = input_mode();
@@ -240,6 +251,11 @@ void psp_func_0004F248(void) {
     int mdx, mdy;
     psp_ctrl_last_stick(&ax, &ay);
     psp_ctrl_last_look(&rx, &ry, &mdx, &mdy);
+    (void)mdx;
+    /* The mouse yaw is the bank the converter fills, not this poll's delta:
+     * see mouse_hold_update. Taken before the gate so a gated frame does not
+     * hold a flick over for a later one. */
+    mdx = mode == INPUT_DUAL ? mouse_take_dx() : 0;
 
     /* One line per call, so "did the game even ask for a turn this frame" is a
      * fact and not a guess. Which of the fourteen movement handlers calls this
@@ -250,8 +266,8 @@ void psp_func_0004F248(void) {
 
     if (gated) { if (log) fprintf(log, "\n"); r_v0 = 0; return; }
 
-    /* The pause gate, as the original. */
-    const int paused = game_paused(ac);
+    /* The hold, as the original. */
+    const int held = yaw_held(ac);
 
     /* Left is negative radians here, matching the original's sign; mouse
      * travel to the right is positive yaw. The look stick gets the expo
@@ -264,7 +280,7 @@ void psp_func_0004F248(void) {
 
     f32_write(ac + AC_RATE, rate);
     if (rate != 0.0f) psp_write8(ac + AC_DIR, rate < 0.0f ? 0 : 1);
-    if (!paused) f32_write(ac + AC_YAW, f32_read(ac + AC_YAW) + rate);
+    if (!held) f32_write(ac + AC_YAW, f32_read(ac + AC_YAW) + rate);
     if (log) fprintf(log, " rate=%.6f\n", rate);
 
     r_v0 = (uint32_t)(int32_t)(rate > 0.0f ? 1 : rate < 0.0f ? -1 : 0);
@@ -323,13 +339,14 @@ static void pitch_log(uint32_t ac, const char *how, int ry, int mdy) {
 
 void psp_func_00053234(void) {
     const uint32_t ac = r_a0;
+    if (ac == PLAYER_AC) g_ac_update_poll = psp_ctrl_polls();   /* the heartbeat in_play reads */
     if (input_mode() != INPUT_DUAL || ac != PLAYER_AC) {
         psp_func_00053234__orig();
         if (ac == PLAYER_AC) pitch_log(ac, "orig", 0, 0);
         return;
     }
 
-    /* The state and pause gates, as the yaw integrator. */
+    /* The state gate, as the yaw integrator. */
     if (!in_play()) return;
 
     uint8_t rx, ry;
@@ -417,21 +434,25 @@ enum { AC_VX = 80, AC_VZ = 88, PUSH_DIR_TABLE = 0x0030AEB0u,
  * alone cannot. */
 enum { AC_X = 16, AC_Z = 24 };
 
-static void push_log(uint32_t ac, const char *how, float m, float sx, float sz, float cap) {
+static void walk_cadence_note(uint32_t ra, float m);   /* defined with the updater, below */
+
+/* `ra` is the guest return address at entry -- which handler made this
+ * push. The walk's is psp_func_00054894, see the cadence below. */
+static void push_log(uint32_t ac, uint32_t ra, const char *how, float m, float sx, float sz, float cap) {
     FILE *log = input_log();
-    if (log) fprintf(log, "%u push m=%.3f dir=%+.3f,%+.3f cap=%.4f speed=%.4f pos=%.3f,%.3f %s\n",
+    if (log) fprintf(log, "%u push m=%.3f dir=%+.3f,%+.3f cap=%.4f speed=%.4f pos=%.3f,%.3f ra=%08X %s\n",
                      psp_ctrl_polls(), m, sx, sz, cap,
                      hypotf(f32_read(ac + AC_VX), f32_read(ac + AC_VZ)),
-                     f32_read(ac + AC_X), f32_read(ac + AC_Z), how);
+                     f32_read(ac + AC_X), f32_read(ac + AC_Z), ra, how);
 }
 
 void psp_func_0004F06C(void) {
-    const uint32_t ac = r_a0, idx = r_a1;
+    const uint32_t ac = r_a0, idx = r_a1, ra = r_ra;
     const float accel = psp_cpu.f[12], cap = psp_cpu.f[13];
     const int mode = input_mode();
     if (mode == INPUT_CLASSIC || ac != PLAYER_AC || !in_play()) {
         psp_func_0004F06C__orig();
-        if (ac == PLAYER_AC) push_log(ac, "orig", 1.0f, 0.0f, 0.0f, cap);
+        if (ac == PLAYER_AC) push_log(ac, ra, "orig", 1.0f, 0.0f, 0.0f, cap);
         return;
     }
 
@@ -449,7 +470,7 @@ void psp_func_0004F06C(void) {
     if (m <= 0.0f) {
         r_a0 = ac; r_a1 = idx; psp_cpu.f[12] = accel; psp_cpu.f[13] = cap;
         psp_func_0004F06C__orig();
-        push_log(ac, "orig-centred", 1.0f, 0.0f, 0.0f, cap);
+        push_log(ac, ra, "orig-centred", 1.0f, 0.0f, 0.0f, cap);
         return;
     }
 
@@ -471,7 +492,188 @@ void psp_func_0004F06C(void) {
     /* Accelerate toward it, with the cap the stick asked for. */
     r_a0 = ac; r_a1 = PUSH_SCRATCH; psp_cpu.f[12] = cap * m;
     psp_func_0004EE9C();
-    push_log(ac, mode == INPUT_DUAL ? "dual" : "modern", m, sx, sz, cap * m);
+    walk_cadence_note(ra, m);
+    push_log(ac, ra, mode == INPUT_DUAL ? "dual" : "modern", m, sx, sz, cap * m);
+}
+
+/* ---- the walk cycle's cadence ----------------------------------------------
+ *
+ * The walk animation plays at one speed. The player's walk handler
+ * (psp_func_00065824) re-issues its play call every frame --
+ * psp_func_000460C0 -> 001DF060 -> 001DFA58 -- naming the cycle for the
+ * direction (a byte from the table at 0x0030B5DA: forward 2, then 4..16,
+ * idle 0), with loop set and a 20-tick fade; the play call writes the
+ * slot's per-frame *step* (+92) as 1, and the model updater
+ * psp_func_001DFC80 adds that step to the frame (+76) once a frame and
+ * wraps it at the frame count (+78) when the slot loops. Nothing in it
+ * knows the AC's speed: the cycle was authored for the cap, and with the
+ * push above walking at any speed a creep slides its feet.
+ *
+ * The step is an integer and the frame is sampled at whole 60 Hz ticks
+ * (the updater looks the pose up at 2*frame), so the engine offers no
+ * fractional playback. What it does offer is a step of 0 -- the frame
+ * holds -- and that is enough: hold the frame on the frames an accumulator
+ * fed with the stick's magnitude says to, and the cycle advances m frames
+ * per frame on average, one stride per stride's worth of ground. At full
+ * deflection the accumulator carries every frame and nothing changes; at
+ * half, every other frame; a creep at 0.3 advances three frames in ten.
+ * Fifteen frames a second at half speed is a visible cadence, and the
+ * feet stop sliding.
+ *
+ * Done in the updater rather than by poking the step from the push: the
+ * push runs inside the handler, the updater later and for every model, and
+ * a 0 left in a slot by a handler that then stops calling would freeze
+ * that slot for good. Here the looping slots' steps are zeroed for the one
+ * call and put back, so the game's own state is never changed. The push
+ * only records that a walk happened this frame and how hard.
+ *
+ * Which pushes are walks: the return addresses inside psp_func_00054894,
+ * the walk's push helper, which the handlers 000655D4/00065824/00065EB0/
+ * 00066100 call. Measured on the mission-1 AC's legs; another leg type
+ * may take another path, in which case the push line's ra= says so and the
+ * cadence stays the game's (the analyzer prints it either way). */
+
+/* The model (ac+128) owns an array of animation slots: count at model+116,
+ * base at model+120, 128 bytes each. */
+enum { AC_MODEL = 128, MODEL_SLOT_COUNT = 116, MODEL_SLOTS = 120, SLOT_SIZE = 128,
+       SLOT_ENABLED = 72, SLOT_ANIM = 73, SLOT_LAYERS = 74, SLOT_LOOP = 75,
+       SLOT_FRAME = 76, SLOT_FRAMES = 78, SLOT_STEP = 92, MAX_SLOTS = 32 };
+
+enum { WALK_PUSH_FIRST = 0x00054A28u, WALK_PUSH_LAST = 0x00054B48u };
+
+static struct { uint32_t poll; float m, phase; int hold; } g_walk;
+
+static void walk_cadence_note(uint32_t ra, float m) {
+    if (ra < WALK_PUSH_FIRST || ra > WALK_PUSH_LAST) return;
+    const uint32_t poll = psp_ctrl_polls();
+    if (poll == g_walk.poll) return;              /* a diagonal walk pushes twice a frame */
+    if (poll != g_walk.poll + 1) g_walk.phase = 0.0f;   /* a fresh walk starts in phase */
+    g_walk.poll = poll;
+    g_walk.m = m;
+    g_walk.phase += m;
+    if (g_walk.phase >= 1.0f) { g_walk.phase -= 1.0f; g_walk.hold = 0; }
+    else g_walk.hold = 1;
+}
+
+/* One line a frame for the player's model, every slot that plays:
+ * <poll> anim hold=<0|1> m=<0..1> <slot>:<anim>:<frame>/<frames>:<step><L if looping> ... */
+static void anim_log(uint32_t model, int hold) {
+    FILE *log = input_log();
+    if (!log) return;
+    const uint32_t n = psp_read16(model + MODEL_SLOT_COUNT), base = psp_read32(model + MODEL_SLOTS);
+    fprintf(log, "%u anim hold=%d m=%.3f", psp_ctrl_polls(), hold, hold >= 0 ? g_walk.m : 0.0f);
+    for (uint32_t i = 0; i < n && i < MAX_SLOTS; i++) {
+        const uint32_t s = base + SLOT_SIZE * i;
+        if (psp_read8(s + SLOT_ENABLED) || psp_read8(s + SLOT_ANIM) == 0xFF) continue;
+        fprintf(log, " %u:%u:%u/%u:%u%s", i, psp_read8(s + SLOT_ANIM), psp_read16(s + SLOT_FRAME),
+                psp_read16(s + SLOT_FRAMES), psp_read8(s + SLOT_STEP), psp_read8(s + SLOT_LOOP) ? "L" : "");
+    }
+    fputc('\n', log);
+}
+
+void psp_func_001DFC80(void) {
+    const uint32_t model = r_a0;
+    const int player = model && model == psp_read32(PLAYER_AC + AC_MODEL);
+    /* The walk noted this frame or the one before -- the updater's place in
+     * the frame relative to the handler is not assumed. */
+    const int walking = player && input_mode() != INPUT_CLASSIC &&
+                        psp_ctrl_polls() - g_walk.poll <= 1;
+    if (!walking || !g_walk.hold) {
+        psp_func_001DFC80__orig();
+        if (player) anim_log(model, walking ? 0 : -1);
+        return;
+    }
+
+    const uint32_t n = psp_read16(model + MODEL_SLOT_COUNT), base = psp_read32(model + MODEL_SLOTS);
+    uint8_t saved[MAX_SLOTS];
+    for (uint32_t i = 0; i < n && i < MAX_SLOTS; i++) {
+        const uint32_t s = base + SLOT_SIZE * i;
+        saved[i] = psp_read8(s + SLOT_STEP);
+        if (!psp_read8(s + SLOT_ENABLED) && psp_read8(s + SLOT_ANIM) != 0xFF &&
+            psp_read8(s + SLOT_LOOP) && (psp_read8(s + SLOT_LAYERS) & 1))
+            psp_write8(s + SLOT_STEP, 0);
+    }
+    psp_func_001DFC80__orig();
+    for (uint32_t i = 0; i < n && i < MAX_SLOTS; i++)
+        psp_write8(base + SLOT_SIZE * i + SLOT_STEP, saved[i]);
+    anim_log(model, 1);
+}
+
+/* ---- the chase camera's lag ------------------------------------------------
+ *
+ * The chase camera is a mode handler, psp_func_000757E8, run once a frame by
+ * the camera update psp_func_00074168 for the camera struct at 0x0043C080
+ * (288 bytes; the eye at +16, the look-at target at +48, the yaw at +36 and
+ * pitch at +32, which are just the atan2/asin of target minus eye). The
+ * handler computes where the camera *should* be -- the target is the AC's
+ * position lifted by the legs' height parameter and pushed 7.0 units ahead
+ * along the AC's heading; the eye 17.9 units behind it (30.0 in one mode)
+ * along the heading and the look pitch -- and then does not go there. It
+ * blends: psp_func_0007467C(ideal, current, r) for the target and
+ * psp_func_000746D4(ideal, current, rx, ry, rz) for the eye write
+ * current + (ideal - current) * (1 - r) per axis, with r read from the
+ * struct: +104 for the eye, 0.83, and +108 for the target, 0.8309 (0.9208
+ * for the eye's first frames, then psp_func_000752A0 re-sets 0.83 by a
+ * distance rule). Keeping 83% of the gap each frame is the geometric tail
+ * every yaw measurement showed -- a 0.2 rad mouse step at poll 2100 in
+ * scenarios/cam-step.pad leaves the camera's yaw converging at ratio 0.83,
+ * sixteen frames to 95%, half a second behind the AC. With the game's own
+ * 2.1 deg/frame turn cap that lag reads as weight; behind a mouse it reads
+ * as a camera on a rubber band.
+ *
+ * PSPRECOMP_CAMERA_LAG=<r> sets r for the player's camera under `modern` or
+ * `dual`: 0.83 is the game's, 0.5 halves the time to settle, 0 fixes the
+ * camera to the AC. Unset, the game's values stand; classic never reads it.
+ * The eye's vertical rate keeps the game's own modulation -- it follows
+ * less when the AC looks up -- as the ratio of what the handler passed. Two
+ * leaf replacements, acting only when the `current` argument is camera 0's
+ * eye or target; psp_func_0007467C is a general vector blend with eight
+ * callers and the rest of them see the original. */
+
+enum { CAMERA0 = 0x0043C080u, CAM_EYE = 16, CAM_TARGET = 48, CAM_PITCH = 32, CAM_YAW = 36 };
+
+/* PSPRECOMP_CAMERA_LAG, clamped to 0..0.99; negative when unset. */
+static float camera_lag(void) {
+    static float r = -2.0f;
+    if (r < -1.5f) {
+        const char *e = getenv("PSPRECOMP_CAMERA_LAG");
+        r = (e && *e) ? (float)atof(e) : -1.0f;
+        if (r >= 0.0f) {
+            if (r > 0.99f) r = 0.99f;
+            printf("      camera    lag %.2f per frame (the game keeps 0.83); "
+                   "PSPRECOMP_INPUT=classic ignores it\n", r);
+        }
+    }
+    return r;
+}
+
+static int camera_lag_wanted(uint32_t current, uint32_t which) {
+    return input_mode() != INPUT_CLASSIC && current == CAMERA0 + which && camera_lag() >= 0.0f;
+}
+
+void psp_func_0007467C(void) {
+    if (camera_lag_wanted(r_a1, CAM_TARGET)) psp_cpu.f[12] = camera_lag();
+    psp_func_0007467C__orig();
+}
+
+void psp_func_000746D4(void) {
+    const int ours = camera_lag_wanted(r_a1, CAM_EYE);
+    const float game = psp_cpu.f[12];
+    if (ours) {
+        const float ky = game > 0.0f ? psp_cpu.f[13] / game : 1.0f;
+        psp_cpu.f[12] = camera_lag();
+        psp_cpu.f[13] = camera_lag() * ky;
+        psp_cpu.f[14] = camera_lag();
+    }
+    /* One line a frame for the player's camera, in every mode: the rate the
+     * eye was blended with and the camera's angles from the previous frame,
+     * beside the AC's, so the lag is a number and not an impression. */
+    FILE *log = input_log();
+    if (log && r_a1 == CAMERA0 + CAM_EYE)
+        fprintf(log, "%u cam r=%.4f yaw=%.6f pitch=%.6f ac_yaw=%.6f %s\n", psp_ctrl_polls(),
+                psp_cpu.f[12], f32_read(CAMERA0 + CAM_YAW), f32_read(CAMERA0 + CAM_PITCH),
+                f32_read(PLAYER_AC + AC_YAW), ours ? "ours" : "game");
+    psp_func_000746D4__orig();
 }
 
 /* ---- the stick, as buttons ----------------------------------------------------
@@ -513,8 +715,17 @@ enum { MODERN_TURN_THRESHOLD = 16, MODERN_WALK_THRESHOLD = 40,
 /* Mouse travel arrives at the mouse's rate and this runs at the guest's; a
  * bit that dropped the poll after a motion event would flicker the state
  * machine. Keep the direction for a few polls. Per poll, not per call: the
- * adaptor calls this once for each of two virtual pads. */
-static struct { uint32_t poll; int x_left; int sx; } g_mouse_hold;
+ * adaptor calls this once for each of two virtual pads.
+ *
+ * The travel itself is banked here too, and the yaw integrator draws on the
+ * bank rather than on the poll's own delta. The integrator runs only inside
+ * a movement state, and the state the turn bits ask for engages a few
+ * frames after they rise -- so the first polls of every flick from a
+ * standstill went nowhere (scenarios/cam-step.pad's single poll of 200
+ * counts turned the AC by nothing at all). Banked, they are applied on the
+ * integrator's first frame instead: a catch-up rather than a loss. Pitch
+ * needs none of this; its integrator runs every frame in play. */
+static struct { uint32_t poll; int x_left; int sx; int dx; } g_mouse_hold;
 
 static void mouse_hold_update(int mdx) {
     const uint32_t poll = psp_ctrl_polls();
@@ -522,21 +733,34 @@ static void mouse_hold_update(int mdx) {
     g_mouse_hold.poll = poll;
     if (g_mouse_hold.x_left > 0) g_mouse_hold.x_left--;
     if (mdx) { g_mouse_hold.x_left = MOUSE_HOLD_POLLS; g_mouse_hold.sx = mdx > 0 ? 1 : -1; }
+    g_mouse_hold.dx += mdx;
+}
+
+/* The banked mouse yaw, emptied. */
+static int mouse_take_dx(void) {
+    const int dx = g_mouse_hold.dx;
+    g_mouse_hold.dx = 0;
+    return dx;
 }
 
 /* Is the player being played? The converter runs everywhere the pad is read
- * -- menus, the garage, the intro -- and the first windowed try of `dual`
- * showed why that matters: mouse jitter read as circle, which cancels menus,
- * and an off-axis push read as L/R, which changes tabs. The game's own
- * answer is the one its yaw integrator uses: the player's movement-state
- * object at ac+9728, which is NULL in the garage and set in a mission, with
- * its byte at +182 equal to -1 while the AC is under control; and the pause
- * flag the integrator also honours. Outside that, every mode is the shipped
+ * -- menus, the garage, the intro, the pause menu -- and the first windowed
+ * try of `dual` showed why that matters: mouse jitter read as circle, which
+ * cancels menus, and an off-axis push read as L/R, which changes tabs. Two
+ * things say yes. The game's own state: the player's movement-state object
+ * at ac+9728, NULL in the garage and set in a mission, with its byte at +182
+ * equal to -1 while the AC is under control. And a heartbeat: the AC's
+ * per-frame update ran within the last two polls -- the look integrator
+ * above records the poll -- because the pause menu leaves every AC flag as
+ * it was and simply stops running the AC (scenarios/pause-look.pad: 190
+ * polls without a single integrator call, the state byte -1 throughout).
+ * Two polls rather than one so the order of the pad read and the update
+ * within a frame does not matter. Outside that, every mode is the shipped
  * converter, bit for bit. */
 static int in_play(void) {
     const uint32_t state = psp_read32(PLAYER_AC + AC_STATE_PTR);
     if (!state || (int8_t)psp_read8(state + 182) != -1) return 0;
-    return !game_paused(PLAYER_AC);
+    return psp_ctrl_polls() - g_ac_update_poll <= 2;
 }
 
 void psp_func_00279A50(void) {
@@ -545,8 +769,20 @@ void psp_func_00279A50(void) {
 
     const int ax = (int8_t)(psp_cpu.r[5] & 0xFF);       /* a1 */
     const int ay = (int8_t)(psp_cpu.r[6] & 0xFF);       /* a2 */
-    if (!in_play()) {
-        /* The originals read a1/a2 themselves; hand them back untouched. */
+    const int play = in_play();
+    /* Once per transition: "<poll> play=<0|1>", so a log shows where the pause
+     * menu (or the results screen, or the garage) took the stick back. */
+    static int last_play = -1;
+    if (play != last_play) {
+        FILE *log = input_log();
+        if (log) fprintf(log, "%u play=%d\n", psp_ctrl_polls(), play);
+        last_play = play;
+    }
+    if (!play) {
+        /* The originals read a1/a2 themselves; hand them back untouched. A
+         * drag across the pause menu is not owed to the AC on resume. */
+        g_mouse_hold.dx = 0;
+        g_mouse_hold.x_left = 0;
         psp_cpu.r[5] = (uint32_t)(uint8_t)ax;
         psp_cpu.r[6] = (uint32_t)(uint8_t)ay;
         psp_func_00279A50__orig();

@@ -122,8 +122,24 @@ static _Atomic uint32_t g_pad_buttons;
 static _Atomic uint8_t  g_pad_ax = 128, g_pad_ay = 128;
 
 /* SDL key -> PSP button. Headless mode holds buttons for a whole run; here a
- * button is held exactly as long as its key is. */
-static const struct { SDL_Keycode key; uint32_t bit; } KEYS[] = {
+ * button is held exactly as long as its key is.
+ *
+ * Two layouts, PSPRECOMP_KEYS=classic (the default) or wasd. The classic one
+ * is the PSP's face laid on the keyboard -- arrows for the d-pad, z/x/a/s for
+ * cross/circle/square/triangle, q/e for the shoulders, Return and Backspace
+ * for start and select -- and has no stick at all, so it moves nothing
+ * without a pad. `wasd` is for a mouse player: W/A/S/D *are* the left stick
+ * (digital, so a diagonal is a full push at 45 degrees; under
+ * PSPRECOMP_INPUT=dual that is the walk and the strafe), Space is cross
+ * (boost, and confirm in menus), the mouse buttons are the fire buttons --
+ * left is square, the right arm's weapon on the game's default assign; right
+ * is d-pad up and middle d-pad down, the d-pad actions -- and the letters
+ * the stick took are moved: square to c, triangle to v. Everything else is
+ * the classic layout. Which button does what in the game is the game's
+ * key-assign, not this table's. */
+typedef struct { SDL_Keycode key; uint32_t bit; } key_bind;
+
+static const key_bind KEYS_CLASSIC[] = {
     { SDLK_RIGHT,      0x000020 }, { SDLK_LEFT,      0x000080 },
     { SDLK_DOWN,       0x000040 }, { SDLK_UP,        0x000010 },
     { SDLK_RETURN,     0x000008 }, { SDLK_BACKSPACE, 0x000001 },
@@ -132,12 +148,55 @@ static const struct { SDL_Keycode key; uint32_t bit; } KEYS[] = {
     { SDLK_q,          0x000100 }, { SDLK_e,         0x000200 },
 };
 
+static const key_bind KEYS_WASD[] = {
+    { SDLK_RIGHT,      0x000020 }, { SDLK_LEFT,      0x000080 },
+    { SDLK_DOWN,       0x000040 }, { SDLK_UP,        0x000010 },
+    { SDLK_RETURN,     0x000008 }, { SDLK_BACKSPACE, 0x000001 },
+    { SDLK_z,          0x004000 }, { SDLK_SPACE,     0x004000 },
+    { SDLK_x,          0x002000 },
+    { SDLK_c,          0x008000 }, { SDLK_v,         0x001000 },
+    { SDLK_q,          0x000100 }, { SDLK_e,         0x000200 },
+};
+
+/* Mouse button -> PSP button, `wasd` only: SDL_BUTTON_LEFT/MIDDLE/RIGHT are
+ * 1/2/3. */
+static const uint32_t MOUSE_WASD[4] = { 0, 0x008000, 0x000040, 0x000010 };
+
+static int g_keys_wasd;                     /* PSPRECOMP_KEYS=wasd */
+
+static void set_bit(uint32_t bit, int down) {
+    const uint32_t b = atomic_load(&g_pad_buttons);
+    atomic_store(&g_pad_buttons, down ? (b | bit) : (b & ~bit));
+}
+
+/* The stick from the keyboard: which of W/A/S/D are down, as bits, and the
+ * bytes they make. All up is centre, which also lets go of whatever a pad's
+ * stick was saying -- the two are not meant to be used at once. */
+static void set_key_stick(SDL_Keycode k, int down) {
+    static unsigned held;                   /* 1 W, 2 S, 4 A, 8 D */
+    unsigned bit = 0;
+    switch (k) {
+    case SDLK_w: bit = 1; break;
+    case SDLK_s: bit = 2; break;
+    case SDLK_a: bit = 4; break;
+    case SDLK_d: bit = 8; break;
+    default: return;
+    }
+    held = down ? (held | bit) : (held & ~bit);
+    const int x = ((held & 8) ? 1 : 0) - ((held & 4) ? 1 : 0);
+    const int y = ((held & 2) ? 1 : 0) - ((held & 1) ? 1 : 0);
+    atomic_store(&g_pad_ax, (uint8_t)(128 + 127 * x));
+    atomic_store(&g_pad_ay, (uint8_t)(128 + 127 * y));
+}
+
 static void set_key(SDL_Keycode k, int down) {
-    for (size_t i = 0; i < sizeof KEYS / sizeof *KEYS; i++) {
-        if (KEYS[i].key != k) continue;
-        const uint32_t b = atomic_load(&g_pad_buttons);
-        atomic_store(&g_pad_buttons, down ? (b | KEYS[i].bit)
-                                          : (b & ~KEYS[i].bit));
+    const key_bind *keys = g_keys_wasd ? KEYS_WASD : KEYS_CLASSIC;
+    const size_t n = g_keys_wasd ? sizeof KEYS_WASD / sizeof *KEYS_WASD
+                                 : sizeof KEYS_CLASSIC / sizeof *KEYS_CLASSIC;
+    if (g_keys_wasd) set_key_stick(k, down);
+    for (size_t i = 0; i < n; i++) {
+        if (keys[i].key != k) continue;
+        set_bit(keys[i].bit, down);
         return;
     }
 }
@@ -540,9 +599,20 @@ static void *sdl_thread(void *arg) {
     if (g_audio_dev) SDL_PauseAudioDevice(g_audio_dev, 0);
     else fprintf(stderr, "present: no audio device: %s\n", SDL_GetError());
 
-    fprintf(stderr, "present: keys arrows dpad | z cross, x circle, "
-                    "a square, s triangle | q/e shoulders | enter start | "
-                    "backspace select | close window to stop\n");
+    {
+        const char *k = getenv("PSPRECOMP_KEYS");
+        g_keys_wasd = k && !strcmp(k, "wasd");
+    }
+    if (g_keys_wasd)
+        fprintf(stderr, "present: keys wasd stick | space/z cross, x circle, "
+                        "c square, v triangle | q/e shoulders | enter start | "
+                        "backspace select | mouse: left square, right dpad up, "
+                        "middle dpad down | close window to stop\n");
+    else
+        fprintf(stderr, "present: keys arrows dpad | z cross, x circle, "
+                        "a square, s triangle | q/e shoulders | enter start | "
+                        "backspace select | PSPRECOMP_KEYS=wasd for a mouse layout | "
+                        "close window to stop\n");
     /* Mouse-look, only when asked for. Captured from the start so a run
      * launched for it is playable at once; Escape lets go, a click retakes.
      * After the GL handoff above on purpose -- that block owns the context
@@ -654,7 +724,13 @@ static void *sdl_thread(void *arg) {
                     psp_ctrl_add_mouse(e.motion.xrel, e.motion.yrel);
                 break;
             case SDL_MOUSEBUTTONDOWN:
-                mouse_grab(1);
+            case SDL_MOUSEBUTTONUP:
+                /* The click that captures the pointer is not also a shot. */
+                if (!g_mouse_grabbed) { if (e.type == SDL_MOUSEBUTTONDOWN) mouse_grab(1); break; }
+                if (g_keys_wasd && e.button.button < 4 && MOUSE_WASD[e.button.button]) {
+                    set_bit(MOUSE_WASD[e.button.button], e.type == SDL_MOUSEBUTTONDOWN);
+                    publish_pad();
+                }
                 break;
             case SDL_WINDOWEVENT:
                 if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) mouse_grab(0);

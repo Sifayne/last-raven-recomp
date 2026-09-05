@@ -4,12 +4,19 @@
 host/replacements.c writes, once per frame the push primitive ran for the
 player's AC:
 
-    <poll> push m=<0..1> dir=<x>,<z> cap=<units/frame> speed=<units/frame> <orig|orig-centred|dual|modern>
+    <poll> push m=<0..1> dir=<x>,<z> cap=<units/frame> speed=<units/frame> pos=<x>,<z> ra=<caller> <orig|orig-centred|dual|modern>
+
+and, once a frame from the model's animation updater, the slots that play:
+
+    <poll> anim hold=<-1|0|1> m=<0..1> <slot>:<anim>:<frame>/<frames>:<step>[L] ...
 
 This folds consecutive frames with the same stick (m, dir) into one row and
 reports the speed the AC reached by the end of it and how many frames it
 took to get within a percent of the cap -- the walk's ramp -- so the law
-reads as a table: deflection in, speed out.
+reads as a table: deflection in, speed out. The cadence column is the walk
+cycle's frames advanced per game frame over the row, read from the first
+looping slot: 1.000 is the game's own, and with the cadence replacement it
+should read as m.
 
     scripts/walk-analyze.py reports/walk-sweep.log [--from 2100] [--to 2700]
 """
@@ -19,7 +26,34 @@ import math
 import re
 
 LINE = re.compile(r"^(\d+) push m=(\S+) dir=(\S+),(\S+) cap=(\S+) speed=(\S+)"
-                  r"(?: pos=(\S+),(\S+))? (\S+)$")
+                  r"(?: pos=(\S+),(\S+))?(?: ra=(\S+))? (\S+)$")
+ANIM = re.compile(r"^(\d+) anim hold=(-?\d) m=(\S+)((?: \d+:\d+:\d+/\d+:\d+L?)*)$")
+SLOT = re.compile(r"(\d+):(\d+):(\d+)/(\d+):(\d+)(L?)")
+
+
+def cadence(anim, lo, hi):
+    """Frames the first looping slot advanced per game frame over polls lo..hi,
+    for the anim it played most -- or None when the range has no looping slot."""
+    prev = None
+    advanced = {}
+    pairs = {}
+    for poll in range(lo, hi + 1):
+        slots = anim.get(poll)
+        if slots is None:
+            continue
+        loop = next((t for t in slots if t[5]), None)
+        if loop is None:
+            prev = None
+            continue
+        a, frame, frames = int(loop[1]), int(loop[2]), int(loop[3])
+        if prev is not None and prev[0] == a and frames:
+            advanced[a] = advanced.get(a, 0) + (frame - prev[1]) % frames
+            pairs[a] = pairs.get(a, 0) + 1
+        prev = (a, frame)
+    if not pairs:
+        return None
+    played = max(pairs, key=pairs.get)
+    return played, advanced[played] / pairs[played]
 
 
 def main():
@@ -30,7 +64,12 @@ def main():
     args = ap.parse_args()
 
     rows = []
+    anim = {}
     for line in open(args.log):
+        a = ANIM.match(line)
+        if a:
+            anim[int(a.group(1))] = SLOT.findall(a.group(4))
+            continue
         m = LINE.match(line)
         if not m:
             continue
@@ -39,7 +78,7 @@ def main():
             continue
         pos = (float(m.group(7)), float(m.group(8))) if m.group(7) else None
         rows.append((poll, float(m.group(2)), float(m.group(3)), float(m.group(4)),
-                     float(m.group(5)), float(m.group(6)), m.group(9), pos))
+                     float(m.group(5)), float(m.group(6)), m.group(10), pos))
     if not rows:
         print("no push lines in that range")
         return
@@ -58,7 +97,8 @@ def main():
                          "speeds": [speed], "pos_start": pos, "pos_end": pos})
 
     print(f"{'polls':>13}  {'n':>3}  {'m':>5}  {'dir (deg from fwd)':>18}  "
-          f"{'cap':>7}  {'speed end':>9}  {'to 99%':>6}  {'moved (deg, /frame)':>20}  how")
+          f"{'cap':>7}  {'speed end':>9}  {'to 99%':>6}  {'moved (deg, /frame)':>20}  "
+          f"{'anim':>4} {'cadence':>7}  how")
     for s in segs:
         mag, dx, dz, how = s["key"]
         n = len(s["speeds"])
@@ -74,10 +114,12 @@ def main():
             mz = s["pos_end"][1] - s["pos_start"][1]
             if mx or mz:
                 moved = f"{math.degrees(math.atan2(-mx, -mz)):+7.1f} {math.hypot(mx, mz) / (n - 1):.4f}"
+        cad = cadence(anim, s["start"], s["end"]) if anim else None
+        cad_s = f"{cad[0]:>4} {cad[1]:>7.3f}" if cad else f"{'--':>4} {'--':>7}"
         print(f"{s['start']:>6}-{s['end']:<6} {n:>3}  {mag:>5.3f}  "
               f"{(f'{ang:+7.1f}' if ang == ang else '   --  '):>18}  "
               f"{s['cap']:>7.4f}  {s['speeds'][-1]:>9.4f}  "
-              f"{(str(reached) if reached else '--'):>6}  {moved:>20}  {how}"
+              f"{(str(reached) if reached else '--'):>6}  {moved:>20}  {cad_s}  {how}"
               f"{'  BLOCKED' if blocked else ''}")
 
 

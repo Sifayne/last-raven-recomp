@@ -74,15 +74,45 @@
 00053234   # look (pitch) integrator -- see host/replacements.c
 
 # The push: psp_func_0004F06C(ac, dir, accel, cap), the primitive every
-# moving state uses -- walk (psp_func_000440B4), jump, boost. `dir` indexes an
-# eight-entry table of unit vectors at 0x0030AEB0 (x right, z back); the
-# vector is scaled by `accel`, rotated by the AC's yaw through the VFPU
-# helpers psp_func_002B007C/00255BBC into the scratch at 0x0030AF00, and
+# moving state uses -- walk, jump, boost. `dir` indexes an eight-entry table
+# of unit vectors at 0x0030AEB0 (x LEFT, z back); the vector is scaled by
+# `accel`, rotated by the AC's yaw through the VFPU helpers
+# psp_func_002B007C/00255BBC into the scratch at 0x0030AF00, and
 # psp_func_0004EE9C adds four times it to the velocity at ac+80/88 and clamps
-# the speed to `cap`. The walk handler passes accel = ac+1392 and cap =
-# 2 * ac+1400 -- the legs' own numbers -- which is why the walk was two-state:
-# the stick chose one of eight directions and the cap was always the full
-# one. host/replacements.c gives the player the stick's true direction and a
-# cap scaled by its magnitude, and leaves the game's accel, clamp and
-# overspeed decay alone. No interior thunks.
+# the speed to `cap`. The player's walk reaches it through
+# psp_func_00054894 (from the handlers 000655D4/00065824/00065EB0/00066100),
+# which passes the legs' own accel and cap, halved for the start, scaled for
+# a back walk -- which is why the walk was two-state: the stick chose one of
+# eight directions and the cap was always the full one. host/replacements.c
+# gives the player the stick's true direction and a cap scaled by its
+# magnitude, and leaves the game's accel, clamp and overspeed decay alone. No
+# interior thunks.
 0004F06C   # the push (walk/strafe/boost direction and speed) -- see host/replacements.c
+
+# The model's animation updater: psp_func_001DFC80(model, layers), once a
+# frame per model from psp_func_001DF1D0/001DF208 (and registered for
+# indirect calls). Each of the model's slots (count at model+116, base at
+# model+120, 128 bytes) holds an anim index (+73), a frame (+76) and frame
+# count (+78), a loop byte (+75) and a per-frame step (+92); this adds the
+# step to the frame, wraps or holds at the count, and samples the pose at
+# 2*frame in 60 Hz ticks. The walk cycle's step is always 1 -- the play call
+# (psp_func_001DFA58) writes it every frame -- so the cycle plays at one
+# speed however fast the AC walks. host/replacements.c holds the looping
+# slots' frames on the frames an accumulator fed by the stick says to, for
+# the one call, and restores the game's bytes after. Interior thunks: 46,
+# all ordinary branch targets (the function is a loop over slots with
+# branch-likely pairs).
+001DFC80   # model animation updater (walk cadence) -- see host/replacements.c
+
+# The chase camera's two blends: psp_func_0007467C(ideal, current, r), a
+# general vector lerp -- current + (ideal - current) * (1 - r) -- with eight
+# callers, and psp_func_000746D4(ideal, current, rx, ry, rz), its per-axis
+# twin, called only by the chase-camera handler psp_func_000757E8 for the
+# eye. The handler reads r from the camera struct (0x0043C080: +104 for the
+# eye = 0.83, +108 for the target = 0.8309) and the 17%-a-frame approach is
+# the camera lag every yaw measurement showed. host/replacements.c
+# substitutes PSPRECOMP_CAMERA_LAG for r when the `current` argument is
+# camera 0's eye or target and the mode is not classic; every other call
+# is the original. No interior thunks in either.
+0007467C   # vector blend -- the chase camera's target lag -- see host/replacements.c
+000746D4   # per-axis vector blend -- the chase camera's eye lag -- see host/replacements.c

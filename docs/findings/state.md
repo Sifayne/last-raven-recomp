@@ -274,7 +274,7 @@ own. Before patch 0021 it was printed for force-stops too, because
 `psp_sched_stop_all` marks every thread dead and the drain then counts zero —
 indistinguishable from success. See *Six ways to measure nothing*.
 
-### Controls — measured, read, and four functions replaced (4–5 Sep)
+### Controls — measured, read, and seven functions replaced (4–5 Sep)
 
 The scheme as shipped: left stick Y is forward/back, left stick X is **turn**,
 L/R strafe, triangle/circle look up/down. The complaint was that turning and
@@ -552,16 +552,118 @@ classic ramp; at −64, 0.015031 rad/frame (was 0.027213); yaw at 64,
 0.585°/frame (was 1.051); full deflection unchanged on both; the mouse
 unchanged at ±0.050000 and 1.719°/frame.**
 
-Still open, in the order they matter: the animations, which play the
-sector's walk and the turn at one speed whatever the rate, so a creep
-slides its feet (`psp_func_00045E50(ac, anim, a2, a3)` plays them, and its
-last two arguments are the place to look); whether the camera filter should
-stay; a pause menu opened mid-mission, which the pause flag should cover
-and a windowed test should confirm; and a keyboard layout for mouse players
-— `a` and `s` are face buttons in `KEYS[]` today, so WASD is a rebinding
-question, not an addition. `build/host-trace` predates all four
-replacements: rebuild with `TRACE=1 scripts/04-emit-build.sh` before the
-next `WATCHMEM`. The afternoon's build and measurements were made in a
+**The walk's cadence (5 Sep, evening).** The creep slid its feet because
+the walk cycle plays at one speed. Read from the listing: the player's walk
+handler is `psp_func_00065824` (the fourteen-handler list of the morning
+was the *direct* callers of the push; the player's walk reaches it through
+`psp_func_00054894`, which halves the cap for the start and scales it for a
+back walk — the push line now carries `ra=` so the caller is a fact), and
+every frame it names the cycle for the direction — a byte from the table at
+`0x0030B5DA`: forward 2, then 4, 6 … 16 round the compass, 0 idle; the
+eight-frame start is anim 1 — through `psp_func_000460C0 → 001DF060 →
+001DFA58`, with loop set and a 20-tick cross-fade. That play call fills the
+legs model's 24 animation slots (`model = *(ac+128)`, count at +116, base
+at +120, 128 bytes each: anim +73, frame +76, frame count +78, loop +75,
+fade +80/+84/+88, and the per-frame **step at +92, written as 1 every
+frame**), and the updater `psp_func_001DFC80` adds the step to the frame
+once a frame, wrapping at the count, and samples the pose at 2·frame in
+60 Hz ticks. Integer step, integer frame: the engine has no fractional
+playback. It does have a step of 0. So the fifth replacement is the
+updater: the push notes each walk frame's stick magnitude, an accumulator
+carries it, and on the frames it says to the looping layer-1 slots' steps
+are zeroed for that one call and put back — the frame holds, and the cycle
+advances m frames per frame on average. At full deflection nothing changes.
+Measured with the new `anim` log lines and `walk-analyze.py`'s cadence
+column (frames advanced per game frame over a row, from the first looping
+slot): **classic 1.000 everywhere; dual forward 127 → 1.000 on anim 2,
+right on 10, back on 12, the 30° push on 4; 96 → 0.706 for m = 0.680, 64 →
+0.353 for 0.351, 45 → 0.118 for 0.155 — the accumulator over seventeen
+frame pairs, so 12/17, 6/17, 2/17.** Fifteen frames a second at half speed
+is a visible cadence; the feet stop sliding. Boost and the turn are not
+touched: the hold is keyed on the return address being inside the walk's
+push helper, and the turn cycle on humanoid legs does not loop anyway
+(psp_func_00043F34 passes loop only for leg type 2).
+
+**The pause gate was not one (5 Sep, evening).** `scenarios/pause-look.pad`
+— Start mid-mission, then the right stick, a mouse drag and the left stick
+in the menu, then Start again — showed the game paused for 190 polls (the
+integrators were not called once) while the converter's `in_play()` stayed
+true throughout: the s16 the yaw integrator honours at
+`(*(*(ac+9728)+276)+5808)+24` is not a pause flag (what it is stays
+unknown; the replacement keeps the original's behaviour for it). The pause
+menu sets nothing on the AC — it simply stops running it. So the gate is
+now a heartbeat: the look integrator records the poll every time it runs
+for the player, and `in_play()` needs that to be within two polls (two, so
+the order of the pad read and the AC update within a frame does not
+matter). The converter logs `play=0/1` on each transition: **play=1 at
+1291, the mission's first AC frame; play=0 at 2162, two polls after Start;
+play=1 at 2351, one poll after the resume** — with nothing turning between.
+
+**A flick's first frames were lost (5 Sep, evening).** The first cut of
+`cam-step.pad` — one poll of 200 counts — turned the AC by nothing. The yaw
+integrator runs only inside a movement state, the state the turn bits ask
+for engages three polls after they rise, and the poll's mouse delta is
+delivered once. So the converter, which runs every poll, now banks mouse
+yaw and the integrator draws on the bank: **the integrator's first frame
+after a flick applies the banked counts (4 for the first four polls of a
+count each), and a 200-count poll inside the state lands at that poll,
+rate 0.200000.** A drag across the pause menu is dropped, not banked.
+
+**The camera filter, found (5 Sep, evening).** RAM snapshots a poll apart
+after the yaw step, read by `scripts/ram-diff.py --geometric` (new: float
+words whose successive changes shrink by a constant ratio), put the
+camera's state at `0x0043C080`: the eye at +16, the look-at target at +48,
+yaw at +36 converging on the AC's yaw − π with ratio 0.830, and copies of
+its matrix in six places. `WATCHMEM` on the yaw named the camera update
+`psp_func_00074168` (288 bytes per camera, a mode byte at +0 dispatching a
+handler table at `0x0030C1D0`; mode 0 is the chase, `psp_func_000757E8`).
+The yaw is only atan2(target − eye). The lag is in the handler's last
+step: it computes where the camera should be — target = AC position,
+lifted by the legs' height parameter, 7.0 units ahead; eye 17.9 behind it
+(30.0 in one mode) along heading and look pitch — and then blends,
+`current + (ideal − current)·(1 − r)`, through `psp_func_0007467C` for the
+target and `psp_func_000746D4` for the eye, **r = 0.83 for the eye (cam+104)
+and 0.8309 for the target (cam+108)**, 0.9208 for the eye's first frames,
+re-set to 0.83 by a distance rule in `psp_func_000752A0`. Seventeen percent
+of the gap a frame: sixteen frames to 95%, half a second behind the AC.
+Whether it should stay is Sif's to feel: the sixth and seventh replacements
+are those two blends, substituting `PSPRECOMP_CAMERA_LAG=<r>` for the
+player's camera under `modern`/`dual` (0.83 the game's; 0 fixes the camera
+to the AC; the eye's vertical rate keeps the game's look-up modulation as a
+ratio), with a `cam` log line a frame. Measured on the 0.2 rad step
+at poll 2100, from the `cam` lines (the camera's yaw against the AC's − π):
+**the game's 0.83 leaves a gap of 0.1698 after one frame, 0.1410, 0.1170 …
+0.0059 at frame 19, every ratio 0.830; at 0.5 the gap is 0.1005, 0.0501,
+0.0250 … under 0.001 by frame 8; at 0 the camera is on the AC's heading the
+next frame**. During the count-a-poll drag before the step the game's
+camera trailed by a steady 0.005 rad — the rate times r/(1−r).
+
+**A keyboard for the mouse (5 Sep, evening).** `PSPRECOMP_KEYS=wasd` in
+`host/present.c`: W/A/S/D *are* the left stick (digital, a diagonal a full
+push at 45°; under `dual` the walk and the strafe), Space is cross (boost;
+confirm in menus), the mouse buttons are the fire buttons — left square,
+the right arm's weapon on the game's default assign; right d-pad up and
+middle d-pad down — and the letters the stick took move: square to `c`,
+triangle to `v`; the rest is the classic layout, which stays the default.
+The click that captures the pointer does not fire. Read from the snapshot,
+the game's default key-assign (`cfg + 33·row + 80 + 2·action`, on the
+game's remapped bits): **actions 0–3 the stick's four bits; 5 cross; 6
+square; 8/9 L/R; 10/11 triangle/circle; 4, 7, 13, 14 the d-pad** — which
+button *does* what is the game's table, not the keyboard's. Untested in a
+window by anyone yet; the layout is a proposal.
+
+Still open: the turn animation's cadence (the humanoid turn anim plays once
+and holds, so there is nothing to modulate; the quad/tank loop is untried);
+other leg types' walk handlers, which may not go through
+`psp_func_00054894` (the `ra=` on the push line will say, and the cadence
+then stays the game's); the wasd layout in a window; and whether 0.83
+stays. The evening's build and measurements were made in the same detached
+worktree with the fork at `e2c40b4`, because the other agent's VFPU edits
+are still uncommitted there; the main-tree caveat below stands.
+`build/host-trace` in that worktree is current (all seven replacements);
+the main tree's is not.
+
+The afternoon's build and measurements were made in a
 detached worktree with the fork at its committed pointer, because the other
 agent was mid-edit in the fork's VFPU runtime; the numbers are against
 `e2c40b4`. The main tree, rebuilt with those uncommitted edits in it so the
@@ -587,8 +689,10 @@ All are off by default and cost nothing when off.
 | `PSPRECOMP_WATCHMEM_FROM=<poll>` | Holds `PSPRECOMP_WATCHMEM`'s 32-report budget until that poll, so a word cleared at mission start and rewritten every frame does not spend it all on the clears. Each report now also lists the four functions entered before the writer — the ring, not a stack, but enough to see past a memcpy and its wrapper to the caller that decided the value. |
 | `PSPRECOMP_REACHED_DUMP=<file>` | Every label control reached, one address per line — the whole mark bitmap rather than 32 named addresses. For diffing a run that turned against one that did not. Same label-not-function caveat as `REACHED`; needs `TRACE=1`. |
 | `PSPRECOMP_VIEW_LOG=<file>` | The GE's matrices as they are uploaded, poll-stamped: tag `V` for view, `W` for the k-th world upload of each frame (`_WORLD=<k>`, default 1). `_WORLD=all` with `_POLLS=lo-hi[,lo-hi]` dumps every world upload in those polls with an `F <poll>` line per frame; `scripts/view-analyze.py --deltas` clusters per-object yaw change across frames and the largest cluster is the camera; it also prints the camera's own motion per frame, `W₂·W₁⁻¹` over that cluster with a true inverse (the matrices carry object scale), so a walk reads as z and a strafe as x beside the turn. The only camera observable this game offers — its view matrix is a constant. |
-| `PSPRECOMP_RAMSNAP=<prefix>` + `_POLLS=n[,...]` | The 32 MB of RAM and the module image (guest 0; where this game keeps its player object) at each named poll, before that poll's pad state is written. `scripts/ram-diff.py` finds the words stepping by a constant across three or more — an integrator's output — at 16-bit, 32-bit and float, without knowing the representation. Half a gigabyte for sixteen; capped there. |
-| `PSPRECOMP_INPUT=modern\|dual` / `PSPRECOMP_INPUT_LOG=<file>` | The port's control schemes, from `host/replacements.c`; unset, every replacement defers to the game's own code. `modern` honours the left stick's magnitude for turning and walking; `dual` looks with the right stick and the mouse — yaw and pitch both proportional — and walks with the left in the direction it points, at a speed set by its deflection. The log is one line per call of each replaced function, in every mode (the deferring paths read the result back after the original ran): the yaw lines carry poll, object, sticks, gate and the rate, which is how "the game did not even ask" was told apart from "the law is wrong"; the pitch lines carry angle, rate, stick and mouse (`scripts/pitch-analyze.py` folds them into the law they show); the push lines carry the stick's magnitude and direction, the cap asked for, the speed reached and the position (`scripts/walk-analyze.py` folds them, prints the direction actually moved, and flags a hold a wall stopped). |
+| `PSPRECOMP_RAMSNAP=<prefix>` + `_POLLS=n[,...]` | The 32 MB of RAM and the module image (guest 0; where this game keeps its player object) at each named poll, before that poll's pad state is written. `scripts/ram-diff.py` finds the words stepping by a constant across three or more — an integrator's output — at 16-bit, 32-bit and float, without knowing the representation; `--geometric LO-HI` the float words whose successive changes shrink by a constant ratio — a filter converging after its input stopped, which is how the camera's state was found. Half a gigabyte for sixteen; capped there. |
+| `PSPRECOMP_INPUT=modern\|dual` / `PSPRECOMP_INPUT_LOG=<file>` | The port's control schemes, from `host/replacements.c`; unset, every replacement defers to the game's own code. `modern` honours the left stick's magnitude for turning and walking; `dual` looks with the right stick and the mouse — yaw and pitch both proportional — and walks with the left in the direction it points, at a speed set by its deflection. The log is one line per call of each replaced function, in every mode (the deferring paths read the result back after the original ran): the yaw lines carry poll, object, sticks, gate and the rate, which is how "the game did not even ask" was told apart from "the law is wrong"; the pitch lines carry angle, rate, stick and mouse (`scripts/pitch-analyze.py` folds them into the law they show); the push lines carry the stick's magnitude and direction, the cap asked for, the speed reached, the position and the caller's return address (`scripts/walk-analyze.py` folds them, prints the direction actually moved, and flags a hold a wall stopped); the `anim` lines, one a frame from the model updater, every slot's anim, frame, step and loop (the analyzer's cadence column); `play=0/1` on each transition of the converter's in-play gate; and the `cam` lines, one a frame, the rate the chase camera's eye was blended with and its yaw and pitch beside the AC's. |
+| `PSPRECOMP_CAMERA_LAG=<r>` | The chase camera's blend rate for the player's camera under `modern`/`dual`, 0..0.99: the fraction of the gap to its ideal position kept each frame. The game's is 0.83 (0.8309 for the look-at target); 0 fixes the camera to the AC. Unset, the game's values; classic ignores it. |
+| `PSPRECOMP_KEYS=wasd` | `host/present.c`'s second keyboard layout, for a mouse player: W/A/S/D are the left stick, Space cross, the mouse buttons square / d-pad up / d-pad down, square and triangle on `c` and `v`; the rest as the classic layout, which is the default. |
 | `PSPRECOMP_MOUSE=1` / `PSPRECOMP_MOUSE_SENS=<k>` | Windowed only: capture the pointer for mouse-look (Escape releases, a click retakes, losing focus releases). Travel reaches the game through the sceCtrl lanes, so a recording holds it and a replay reproduces it; `k` scales the 0.001 rad per count default. Means nothing outside `PSPRECOMP_INPUT=dual`. |
 | `PSPRECOMP_PAD=start,cross` | Holds pad buttons for the run. There is no window and no gamepad. |
 | `PSPRECOMP_PAD_PRESS=start,15,0.5` | Presses a button at a wall-clock moment — down at `delay` seconds, up `duration` (default 0.5) later. A held button never reads as *pressed*, because a press is a transition. Headless only; in a windowed run the SDL layer owns the pad. |
@@ -1737,14 +1841,16 @@ baseline; the question is whose 261 commands stopped being counted.
 | `scripts/09-replay.sh --decode scenarios/garage.pad` | **`stop` at poll 925, 0 bad mem**, 928 lists, 11,948,318 commands, the sortie launch's AC in the hangar (3 Sep, item 38) -- mean 39 against 38 |
 | `scripts/09-replay.sh --decode scenarios/look-probe.pad` | `stop` at poll 2620, 0 bad mem, 2,623 lists, 31,629,673 commands — the mission played into: a hard-left hold from poll 2100, centre, hard-right from 2360. With `PSPRECOMP_INPUT` unset this must not move, and did not when the two replacements landed (4 Sep); the same day mission-1, garage and main-menu reproduced their rows above to the command. The classic-mode check for `host/replacements.c`. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=modern --env PSPRECOMP_VIEW_LOG=reports/sweep.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2210-2215,2290-2295,2370-2375,2450-2455,2530-2535,2610-2615,2690-2695 scenarios/yaw-sweep.pad` then `scripts/view-analyze.py reports/sweep.view --deltas` | `stop` at poll 3100, 0 bad mem, 3,103 lists, 41,601,520 commands (4 Sep). The largest cluster in each window is the camera's yaw per frame at that hold: **R127 −2.105, L96 +1.588, R96 −1.590, L64 +1.056, R64 −1.058, L32 +0.528, R32 −0.528** — the stick's deflection times the 2.1019°/frame cap. The functional gate for proportional turning. |
-| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/look.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2440-2445,2500-2505,2570-2575 scenarios/look-sweep.pad` then `scripts/view-analyze.py reports/look.view --deltas` | `stop` at poll 2640, 0 bad mem, 2,643 lists, 33,857,103 commands, and the view log identical across two runs (4 Sep). Per window: **right stick 127 → −2.099°/frame, left 127 → +2.100, right 64 → −1.051, left 64 → +1.053, a mouse drag of −30 then +30 counts a poll → +1.683 / −1.684, the left stick at 32 → −0.002** — the second stick and the mouse turn, the first stick strafes. The functional gate for the look channel, and proof it replays. Unchanged at 2,643 / 33,857,103 with the pitch integrator replaced (5 Sep): the command count does not see the camera's pitch, so this row is not the pitch gate — the next one is. **33,988,063** with the expo curve on the look stick and the analog walk (5 Sep afternoon; its left-stick hold now strafes the game's left, which is why the count moved again); from the yaw log's new `rate` field: **right stick 127 → +2.102°/frame, −127 → −2.102, 64 → +0.585 (was 1.051), the mouse at 30 counts a poll → 1.719 unchanged, the left stick at 96 → 0.000** — a strafe, not a turn. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/look.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2440-2445,2500-2505,2570-2575 scenarios/look-sweep.pad` then `scripts/view-analyze.py reports/look.view --deltas` | `stop` at poll 2640, 0 bad mem, 2,643 lists, 33,857,103 commands, and the view log identical across two runs (4 Sep). Per window: **right stick 127 → −2.099°/frame, left 127 → +2.100, right 64 → −1.051, left 64 → +1.053, a mouse drag of −30 then +30 counts a poll → +1.683 / −1.684, the left stick at 32 → −0.002** — the second stick and the mouse turn, the first stick strafes. The functional gate for the look channel, and proof it replays. Unchanged at 2,643 / 33,857,103 with the pitch integrator replaced (5 Sep): the command count does not see the camera's pitch, so this row is not the pitch gate — the next one is. **33,988,063** with the expo curve on the look stick and the analog walk (5 Sep afternoon; its left-stick hold now strafes the game's left, which is why the count moved again); from the yaw log's new `rate` field: **right stick 127 → +2.102°/frame, −127 → −2.102, 64 → +0.585 (was 1.051), the mouse at 30 counts a poll → 1.719 unchanged, the left stick at 96 → 0.000** — a strafe, not a turn. **33,954,463** with the mouse bank and the walk cadence (5 Sep evening): the drag's first three polls, once lost while the turn state engaged, now land on the integrator's first frame, and the 96 hold walks at cadence 0.68. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_INPUT_LOG=reports/pitch.log scenarios/pitch-sweep.pad` then `scripts/pitch-analyze.py reports/pitch.log --from 2095` | `stop` at poll 2600, **0 bad mem**, 2,603 lists, **30,759,154** commands (5 Sep afternoon, eased and curved; 30,540,409 that morning with the linear, instant law, whose figures were −127 → +0.054000 from the first frame and −64 → +0.027213). The pitch law under `dual`: **right stick −127 ramps +0.005440, +0.010880 … +0.048960 over ten frames, then +0.054000 a frame — the classic ramp, from the game's own accel — to the clamp at +67.500°; +127 the mirror; −64 → +0.015031 rad/frame, the expo curve's 0.278 of the cap; a 50-count-per-poll mouse drag away then toward → +0.050000 / −0.050000, raw**; then triangle held from poll 2402 reproduces the classic ramp below to six decimals through the deferral, circle the mirror, and both together snap the angle to 0.000 with the lockout. The functional gate for proportional pitch. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT_LOG=reports/pitch-classic.log scenarios/pitch-sweep.pad` then `scripts/pitch-analyze.py reports/pitch-classic.log --from 2395` | `stop` at poll 2600, 0 bad mem, 2,603 lists, 32,344,849 commands (5 Sep). The game's own look law, with the stick and mouse rows inert: **triangle from poll 2402 ramps +0.005440, +0.010880 … +0.048960 over ten frames, then +0.054000 a frame to the clamp at +67.500° (poll 2428); release is a dead stop; circle mirrors it to −67.500°; triangle+circle at 2562 recentres to 0.000** and holds through the lockout. The classic-mode check for the third replacement. |
-| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_INPUT_LOG=reports/walk.log scenarios/walk-sweep.pad` then `scripts/walk-analyze.py reports/walk.log --from 2095` | `stop` at poll 2450, **0 bad mem**, 2,453 lists, **31,010,288** commands (5 Sep; 31,074,861 for an hour with the strafe sign inverted, which the first mission caught). The walk law under `dual`, from the push's log: **forward at 127 → 1.2868 units/frame, the legs' own cap, reached at frame 9 after the game's seven half-cap frames; 96 → 0.8756; 64 → 0.4511; 45 → 0.1990; straight right → 1.2868; back → 0.5814, the game's back cap**; and the position's direction of motion, right positive, is the AC's 70° heading plus the stick's angle in every hold — **forward +70.0°, right +160.0°, 30° left +39.8°, back −110.0°** — with no hold flagged `BLOCKED`. The functional gate for the analog walk. |
-| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=modern --env PSPRECOMP_INPUT_LOG=reports/walk-m.log scenarios/walk-sweep.pad` then `scripts/walk-analyze.py reports/walk-m.log --from 2095` | `stop` at poll 2450, 0 bad mem, 2,453 lists, 30,874,768 commands (5 Sep). Same forward speeds as `dual` (1.2868, 0.8756, 0.4511, 0.1990), the straight-right hold a 60° turn to the right and not a walk (no push lines), and the 30° push — X left of centre — a turn back to the left *and* a walk at 0.825 of the cap by Y alone, the direction of motion swinging from −127° to −108° over the hold. |
-| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT_LOG=reports/walk-c.log scenarios/walk-sweep.pad` then `scripts/walk-analyze.py reports/walk-c.log --from 2095` | `stop` at poll 2450, 0 bad mem, 2,453 lists, 30,237,942 commands (5 Sep). The game's own walk with the same file: **127 → 1.2868 at frame 9 after seven frames at 0.6434; 96, 64 and 45 → nothing (under the 100 threshold); the 30° push a straight walk at the full 1.2868; straight right a 59° turn; back 0.5814**. The classic-mode check for the fourth replacement. |
-| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/wt.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2450-2455,2530-2535 scenarios/walk-turn.pad` then `scripts/view-analyze.py reports/wt.view --deltas` | `stop` at poll 2600, 0 bad mem, 2,603 lists, **32,910,390** commands (5 Sep afternoon, the analog walk: from the push log, forward at 1.2868 while the right stick turns the heading from +70° through +103° to +137° over the two turning holds, the forward-left diagonal at 0.974 of the cap at exactly −45° until it meets terrain late in the hold (`BLOCKED`), back at 0.5814; 32,921,535 with the eight-sector map on the two-state walk, whose figures follow; 32,902,603 under the first `dual` map, whose diagonal hold only strafed). Per window, yaw and the camera's own motion (x sideways, z forward): **forward alone 0°, z −1.23; forward + right stick −2.06°, z −1.17; forward + left +2.06°, z −1.17; back 0°, z +0.56**; the right-stick-alone window then reads −1.79° with the AC still drifting back at z +1.09 — the game slows its turn while moving, and under the first map, with the AC at rest, the same window read −2.10° and x +0.64 (the chase camera orbiting). The proof that the game walks and turns at once when both are asked for. |
-| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/sect.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2450-2455,2530-2535,2610-2615 scenarios/sectors.pad` then `scripts/view-analyze.py reports/sect.view --deltas` | `stop` at poll 2680, 0 bad mem, 2,683 lists, **34,538,208** commands (5 Sep afternoon, the analog walk; 34,580,662 on 4 Sep under the two-state walk, when the same seven pushes moved the camera at the game's full cap in the table's eight directions: forward 0, −1.23; the 30° push −0.88, −0.87 — a diagonal, since the sector map could only ask for one of eight). With `PSPRECOMP_INPUT_LOG` and `scripts/walk-analyze.py`, the push's own log: **the AC moves at 0°, +30°, +45°, −45°, +135° and +90° from its heading, exactly the stick's angles, at 1.194 units/frame = 0.928 of the 1.2868 cap for these 120-unit pushes (0.5407 = 0.93 of the back cap on the back diagonal), and the half-deflection hold at 0.398 = 0.309 of it** — each reached, then three holds (the −45° diagonal, the straight strafe, the half-deflection forward) run into terrain and are flagged `BLOCKED`, because the corrected paths cross ground the eight-direction paths never did. Still a gate for direction and speed; `walk-sweep.pad` is the one laid out to stay clear. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_INPUT_LOG=reports/walk.log scenarios/walk-sweep.pad` then `scripts/walk-analyze.py reports/walk.log --from 2095` | `stop` at poll 2450, **0 bad mem**, 2,453 lists, **31,004,157** commands (5 Sep evening, with the walk cadence; 31,010,288 that afternoon with the cycle at one speed; 31,074,861 for an hour with the strafe sign inverted, which the first mission caught). The walk law under `dual`, from the push's log: **forward at 127 → 1.2868 units/frame, the legs' own cap, reached at frame 9 after the game's seven half-cap frames; 96 → 0.8756; 64 → 0.4511; 45 → 0.1990; straight right → 1.2868; back → 0.5814, the game's back cap**; and the position's direction of motion, right positive, is the AC's 70° heading plus the stick's angle in every hold — **forward +70.0°, right +160.0°, 30° left +39.8°, back −110.0°** — with no hold flagged `BLOCKED`; and the cadence column: **anim 2 at 1.000 for the full push, 10 straight right, 12 back, 4 for the 30° push; 0.706 at m = 0.680, 0.353 at 0.351, 0.118 at 0.155** — the cycle's frames advanced per game frame. The functional gate for the analog walk and its cadence. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=modern --env PSPRECOMP_INPUT_LOG=reports/walk-m.log scenarios/walk-sweep.pad` then `scripts/walk-analyze.py reports/walk-m.log --from 2095` | `stop` at poll 2450, 0 bad mem, 2,453 lists, 30,869,175 commands (5 Sep evening; 30,874,768 before the cadence). Same forward speeds as `dual` (1.2868, 0.8756, 0.4511, 0.1990) and the same cadences, the straight-right hold a 60° turn to the right and not a walk (no push lines), and the 30° push — X left of centre — a turn back to the left *and* a walk at 0.825 of the cap by Y alone, the direction of motion swinging from −127° to −108° over the hold. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT_LOG=reports/walk-c.log scenarios/walk-sweep.pad` then `scripts/walk-analyze.py reports/walk-c.log --from 2095` | `stop` at poll 2450, 0 bad mem, 2,453 lists, 30,237,942 commands (5 Sep). The game's own walk with the same file: **127 → 1.2868 at frame 9 after seven frames at 0.6434; 96, 64 and 45 → nothing (under the 100 threshold); the 30° push a straight walk at the full 1.2868; straight right a 59° turn; back 0.5814; cadence 1.000 on every cycle**. The classic-mode check for the fourth and fifth replacements. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/wt.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2450-2455,2530-2535 scenarios/walk-turn.pad` then `scripts/view-analyze.py reports/wt.view --deltas` | `stop` at poll 2600, 0 bad mem, 2,603 lists, **32,910,374** commands (5 Sep evening, with the cadence — the 0.974 diagonal holds one frame in thirty-eight; 32,910,390 that afternoon, the analog walk: from the push log, forward at 1.2868 while the right stick turns the heading from +70° through +103° to +137° over the two turning holds, the forward-left diagonal at 0.974 of the cap at exactly −45° until it meets terrain late in the hold (`BLOCKED`), back at 0.5814; 32,921,535 with the eight-sector map on the two-state walk, whose figures follow; 32,902,603 under the first `dual` map, whose diagonal hold only strafed). Per window, yaw and the camera's own motion (x sideways, z forward): **forward alone 0°, z −1.23; forward + right stick −2.06°, z −1.17; forward + left +2.06°, z −1.17; back 0°, z +0.56**; the right-stick-alone window then reads −1.79° with the AC still drifting back at z +1.09 — the game slows its turn while moving, and under the first map, with the AC at rest, the same window read −2.10° and x +0.64 (the chase camera orbiting). The proof that the game walks and turns at once when both are asked for. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/sect.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2450-2455,2530-2535,2610-2615 scenarios/sectors.pad` then `scripts/view-analyze.py reports/sect.view --deltas` | `stop` at poll 2680, 0 bad mem, 2,683 lists, **34,525,042** commands (5 Sep evening, with the walk cadence; 34,538,208 that afternoon, the analog walk at one cadence; 34,580,662 on 4 Sep under the two-state walk, when the same seven pushes moved the camera at the game's full cap in the table's eight directions: forward 0, −1.23; the 30° push −0.88, −0.87 — a diagonal, since the sector map could only ask for one of eight). With `PSPRECOMP_INPUT_LOG` and `scripts/walk-analyze.py`, the push's own log: **the AC moves at 0°, +30°, +45°, −45°, +135° and +90° from its heading, exactly the stick's angles, at 1.194 units/frame = 0.928 of the 1.2868 cap for these 120-unit pushes (0.5407 = 0.93 of the back cap on the back diagonal), and the half-deflection hold at 0.398 = 0.309 of it** — each reached, then three holds (the −45° diagonal, the straight strafe, the half-deflection forward) run into terrain and are flagged `BLOCKED`, because the corrected paths cross ground the eight-direction paths never did. Still a gate for direction and speed; `walk-sweep.pad` is the one laid out to stay clear. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_INPUT_LOG=reports/pause.log scenarios/pause-look.pad` then `grep play= reports/pause.log` | `stop` at poll 2450, 0 bad mem, 2,453 lists, **28,991,086** commands (5 Sep evening). Start at 2160 pauses the game for 190 polls — not one integrator call between 2160 and 2349 — and Start at 2340 resumes it; the converter's gate follows: **play=1 at 1291, play=0 at 2162, play=1 at 2351**, so the right stick, the mouse drag and the left stick held in the menu reach the game as the shipped converter's bits, and nothing turns. The gate for the look channel outside play. (The same count before the gate was fixed: the menu did not react to the bits either way, which is why a windowed check alone would have passed it.) |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_INPUT_LOG=reports/cam.log scenarios/cam-step.pad` then `grep ' cam ' reports/cam.log` | `stop` at poll 2160, 0 bad mem, 2,163 lists, **24,607,974** commands (5 Sep evening). A count a poll from 2090 engages the turn state at 2093 with the four banked counts applied at once; 200 counts at 2100 turn the AC 0.200000 rad in that frame; the chase camera then closes the gap by **ratio 0.830 a frame — 0.1698, 0.1410, 0.1170 … 0.0059 at frame 19**. With `--env PSPRECOMP_CAMERA_LAG=0.5`: 24,610,104 commands and ratio 0.500, under 0.001 rad by frame 8; with `=0`: 24,610,177 and the camera on the AC's heading the next frame. The gate for the camera filter and for the mouse bank. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_AUDIO_DUMP=<prefix> scenarios/garage.pad` | **three channels of non-silent PCM** (3 Sep, item 49 -- M3's gate, headless half): ch1 5.5 s / peak 9,466 / ZCR 0.252, ch2 4.0 s / peak 32,768 / ZCR 0.294, ch3 15.7 s / peak 10,158 / **ZCR 0.075** -- the low crossing rate and the length make ch3 the music and the other two effects. In the same run `__sceSasCore` is called 2,712 times and `PSPRECOMP_ATRAC_LOG=1` shows 3 tracks opened, **125 `DecodeData`** and 2 `SetLoopNum`. This measures that sound is *generated*; *audible* is the windowed half, confirmed by Sif on 3 Sep (M3 struck) and re-checkable only by this dump |
 | `scripts/08-autotest-sweep.sh` | **138 MATCH** of 432, 3 NOOUTPUT (3 Sep, after blend and stencil: no row moved; after fog: `gpu/commands/fog.prx` DIFFER 528 → MATCH and nothing else moved); `utility/msgdialog/dialog.prx` is back at DIFFER 139 since the interp's teardown fix (item 35); diff per test, the total is not a goal |
 | `scripts/07-autotests.sh <dir with gpu/commands/blend.prx, blend565.prx + .expected>` | **every value matches** on both (3 Sep, item 37); the runner reports 128 / 140 differing lines, all of them the `[r]`/`[x]` checkpoint prefix, a scheduling artifact -- strip it before diffing |

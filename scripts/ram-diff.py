@@ -86,9 +86,41 @@ def scan_float(snaps, args):
         yield RAM_BASE + i * 4, d, vals
 
 
+def scan_geometric(snaps, args):
+    """Yield (addr, ratio, values) for float words whose successive changes
+    shrink by a constant factor -- a first-order filter converging on a target
+    that has stopped moving. The camera's smoothing is one; so are fades and
+    decays, which is what the address and the values are printed for."""
+    n = len(snaps[0]) // 4
+    views = [memoryview(s).cast("f") for s in snaps]
+    lo, hi = args.range
+    first = (lo - RAM_BASE) // 4
+    last = min(n, (hi - RAM_BASE) // 4)
+    rlo, rhi = args.geometric
+    for i in range(first, last):
+        vals = [v[i] for v in views]
+        if any(x != x or abs(x) > 1e30 for x in vals):
+            continue
+        deltas = [vals[k + 1] - vals[k] for k in range(len(vals) - 1)]
+        if any(abs(d) < 1e-6 for d in deltas):
+            continue
+        ratios = [deltas[k + 1] / deltas[k] for k in range(len(deltas) - 1)]
+        if any(r < rlo or r > rhi for r in ratios):
+            continue
+        mean = sum(ratios) / len(ratios)
+        if any(abs(r - mean) > 0.02 * mean for r in ratios):
+            continue
+        yield RAM_BASE + i * 4, mean, vals
+
+
 def parse_range(s):
     lo, hi = s.split("-", 1)
     return int(lo, 0), int(hi, 0)
+
+
+def parse_ratio(s):
+    lo, hi = s.split("-", 1)
+    return float(lo), float(hi)
 
 
 def main():
@@ -106,6 +138,10 @@ def main():
     ap.add_argument("--range", type=parse_range, default=None,
                     metavar="LO-HI", help="guest address range to scan")
     ap.add_argument("--no-float", action="store_true")
+    ap.add_argument("--geometric", type=parse_ratio, default=None, metavar="LO-HI",
+                    help="also list float words whose successive changes shrink by a "
+                         "constant ratio in this range (e.g. 0.5-0.98): a filter "
+                         "converging after its input stopped")
     ap.add_argument("--top", type=int, default=60, help="lines per width (default 60)")
     args = ap.parse_args()
 
@@ -144,6 +180,15 @@ def main():
             print(f"  {addr:08X}  step {d:+.6g}  {shown}")
         if len(hits) > args.top:
             print(f"  ... {len(hits) - args.top} more")
+
+    if args.geometric is not None:
+        hits = list(scan_geometric(snaps, args))
+        print(f"\nfloat words converging geometrically (ratio {args.geometric[0]}-{args.geometric[1]}): {len(hits)}")
+        for addr, r, vals in hits[:args.top]:
+            shown = " ".join(f"{v:.6g}" for v in vals)
+            print(f"  {addr:08X}  ratio {r:.3f}  {shown}")
+        if len(hits) > args.top:
+            print(f"  ... {len(hits) - args.top} more; narrow with --range")
     return 0
 
 
