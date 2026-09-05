@@ -165,8 +165,20 @@ static void set_button(uint8_t b, int down) {
     }
 }
 
+/* The second stick and the mouse: the look channel. The PSP has neither, and
+ * the game as shipped reads neither -- they travel the sceCtrl lanes beside
+ * the pad, where the recorder sees them, and only host/replacements.c reads
+ * them. Mouse travel is summed here per motion event and taken by the poll,
+ * so nothing is lost between a 1 kHz mouse and a 36 Hz game. */
+static _Atomic uint8_t  g_pad_rx = 128, g_pad_ry = 128;
+static int              g_mouse_want;       /* PSPRECOMP_MOUSE=1 */
+static int              g_mouse_grabbed;
+
 static void set_axis(uint8_t axis, int16_t value) {
-    if (axis != SDL_CONTROLLER_AXIS_LEFTX && axis != SDL_CONTROLLER_AXIS_LEFTY)
+    /* Sticks only: the triggers rest at -32768, not 0, and would read as a
+     * stick held hard one way. */
+    if (axis != SDL_CONTROLLER_AXIS_LEFTX  && axis != SDL_CONTROLLER_AXIS_LEFTY &&
+        axis != SDL_CONTROLLER_AXIS_RIGHTX && axis != SDL_CONTROLLER_AXIS_RIGHTY)
         return;
     /* 8192 of deadzone, then the full 0..255 range across the remaining
      * ~24k of travel, centred on 128 like the real stick. */
@@ -174,8 +186,24 @@ static void set_axis(uint8_t axis, int16_t value) {
     int v = 128;
     if (value > dead)  v = 128 + (value - dead) * 127 / (32767 - dead);
     if (value < -dead) v = 128 + (value + dead) * 127 / (32768 - dead);
-    if (axis == SDL_CONTROLLER_AXIS_LEFTX) atomic_store(&g_pad_ax, (uint8_t)v);
-    else                                   atomic_store(&g_pad_ay, (uint8_t)v);
+    switch (axis) {
+    case SDL_CONTROLLER_AXIS_LEFTX:  atomic_store(&g_pad_ax, (uint8_t)v); break;
+    case SDL_CONTROLLER_AXIS_LEFTY:  atomic_store(&g_pad_ay, (uint8_t)v); break;
+    case SDL_CONTROLLER_AXIS_RIGHTX: atomic_store(&g_pad_rx, (uint8_t)v); break;
+    default:                         atomic_store(&g_pad_ry, (uint8_t)v); break;
+    }
+}
+
+/* Capture the pointer for mouse-look, or let it go. Only ever when asked for
+ * with PSPRECOMP_MOUSE=1; and even then focus loss and Escape release it,
+ * because a window that traps the pointer and cannot be left is the one
+ * thing worse than no mouse-look at all. A click takes it back. */
+static void mouse_grab(int on) {
+    if (!g_mouse_want || on == g_mouse_grabbed) return;
+    SDL_SetRelativeMouseMode(on ? SDL_TRUE : SDL_FALSE);
+    g_mouse_grabbed = on;
+    fprintf(stderr, on ? "present: mouse captured -- Escape releases it\n"
+                       : "present: mouse released -- click the window to capture it\n");
 }
 
 /* Publish the whole pad state after any change, so a guest poll between two
@@ -183,6 +211,7 @@ static void set_axis(uint8_t axis, int16_t value) {
 static void publish_pad(void) {
     psp_ctrl_set(atomic_load(&g_pad_buttons),
                  atomic_load(&g_pad_ax), atomic_load(&g_pad_ay));
+    psp_ctrl_set_look(atomic_load(&g_pad_rx), atomic_load(&g_pad_ry));
 }
 
 /* ---- audio ---------------------------------------------------------------- */
@@ -514,6 +543,16 @@ static void *sdl_thread(void *arg) {
     fprintf(stderr, "present: keys arrows dpad | z cross, x circle, "
                     "a square, s triangle | q/e shoulders | enter start | "
                     "backspace select | close window to stop\n");
+    /* Mouse-look, only when asked for. Captured from the start so a run
+     * launched for it is playable at once; Escape lets go, a click retakes.
+     * After the GL handoff above on purpose -- that block owns the context
+     * juggling and does not need company. */
+    {
+        const char *m = getenv("PSPRECOMP_MOUSE");
+        g_mouse_want = m && *m && strcmp(m, "0") != 0;
+        if (g_mouse_want) mouse_grab(1);
+    }
+
     start_publish(1);
 
     for (;;) {
@@ -608,8 +647,24 @@ static void *sdl_thread(void *arg) {
                 set_axis(e.caxis.axis, e.caxis.value);
                 publish_pad();
                 break;
+            case SDL_MOUSEMOTION:
+                /* Relative motion only while captured: a pointer crossing an
+                 * uncaptured window is not a look. */
+                if (g_mouse_grabbed)
+                    psp_ctrl_add_mouse(e.motion.xrel, e.motion.yrel);
+                break;
+            case SDL_MOUSEBUTTONDOWN:
+                mouse_grab(1);
+                break;
+            case SDL_WINDOWEVENT:
+                if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) mouse_grab(0);
+                break;
             case SDL_KEYDOWN:
             case SDL_KEYUP:
+                if (e.key.keysym.sym == SDLK_ESCAPE) {
+                    if (e.type == SDL_KEYDOWN) mouse_grab(0);
+                    break;
+                }
                 set_key(e.key.keysym.sym, e.key.state == SDL_PRESSED);
                 publish_pad();
                 break;

@@ -52,8 +52,9 @@ Line-based. `#` starts a comment. Blank lines are ignored.
 | `down <btn>[,<btn>…]` | press and keep held |
 | `up <btn>[,…]` | release |
 | `tap <btn>[,…] [polls]` | `down`, hold, `up`; holds `minhold` polls by default |
-| `state <btns> <x> <y>` | assign the whole lane at once — what the recorder writes |
-| `analog <x> <y>` / `analog center` | 0–255 each; takes the stick from live input |
+| `state <btns> <x> <y> [<rx> <ry> [<dx> <dy>]]` | assign the whole lane at once — what the recorder writes. The trailing fields are the look channel: the second stick, then a mouse delta; the recorder writes them while the channel is non-neutral and once more when it returns to neutral, and a line without them leaves the channel as it was |
+| `analog <x> <y> [<rx> <ry>]` / `analog center` | 0–255 each; takes the stick from live input. With four values, the second stick too — the look channel, which the PSP never had and only `host/replacements.c` reads; `center` centres whatever the script holds |
+| `mouse <dx> <dy>` | one poll's worth of mouse travel, in counts, delivered at that poll and never again; a drag is a run of these, one per poll, which is what the recorder writes for one |
 | `neutral` | release everything and hand the stick back |
 | `wait <n>` / `wait <n>s` | move the cursor, change nothing |
 | `mark "<text>"` | narrate to stderr, with the poll and guest time |
