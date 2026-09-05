@@ -59,3 +59,16 @@
 # keys on these bits, which is why the yaw integrator above is never even
 # called below the threshold. Interior thunks: 5, all ordinary branch targets.
 00279A50   # stick -> virtual buttons -- see host/replacements.c
+
+# The look (pitch) integrator: psp_func_00053234(ac), once per frame from
+# psp_func_0004CF74 for the AC under control, after the auto-face pass
+# (psp_func_00053048). Its state is a struct at ac+8160 -- lockout counter at
+# +4, pitch angle at +16 (ac+8176, radians, up positive), pitch rate at +32 --
+# and its constants six floats at 0x0030ADC0: accel 0.00136, max rate 0.027,
+# clamp +/-1.1781 (67.5 deg). The shipped path is digital: triangle
+# (action 10) ramps the rate by 4*accel per frame to 2*max = 0.054 rad/frame,
+# 3.09 deg/frame against yaw's 2.10, and release stops it dead. That is why
+# mouse look-up/down felt both faster than left/right and uncontrollable: any
+# travel was a full-rate press. host/replacements.c makes it proportional
+# under `dual`. Interior thunks: 20, all ordinary branch targets.
+00053234   # look (pitch) integrator -- see host/replacements.c

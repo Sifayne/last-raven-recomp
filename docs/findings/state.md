@@ -274,7 +274,7 @@ own. Before patch 0021 it was printed for force-stops too, because
 `psp_sched_stop_all` marks every thread dead and the drain then counts zero —
 indistinguishable from success. See *Six ways to measure nothing*.
 
-### Controls — measured, read, and the first two functions replaced (4 Sep)
+### Controls — measured, read, and the first three functions replaced (4–5 Sep)
 
 The scheme as shipped: left stick Y is forward/back, left stick X is **turn**,
 L/R strafe, triangle/circle look up/down. The complaint was that turning and
@@ -362,9 +362,10 @@ so nothing is lost between a 1 kHz mouse and a 36 Hz game — merged in
 integrator's rate is the cap scaled by the right stick's X plus mouse travel
 as a displacement (`0.001 rad` per count, `PSPRECOMP_MOUSE_SENS` scales it),
 and the converter re-sources the bits: turn from the right stick or recent
-mouse X, look up/down from the right stick's Y or mouse Y as the game's own
-triangle/circle bits, strafe from the left stick's X as its L/R bits,
-forward/back from the left stick's Y unchanged. `scenarios/look-sweep.pad`
+mouse X, strafe from the left stick's X as its L/R bits, forward/back from
+the left stick's Y unchanged (look up/down was the right stick's Y or mouse
+Y as the game's own triangle/circle bits for a day; it is the pitch
+integrator's own input now, below). `scenarios/look-sweep.pad`
 measures it headless — **right stick 127 → 2.099°/frame, 64 → 1.051, a
 30-count-per-poll mouse drag → 1.683°/poll each way, and the left stick at 32
 → 0.002: a strafe, not a turn** — and classic and modern reproduce their
@@ -414,13 +415,75 @@ call the original converter with its arguments restored. Measured: in
 command (928 / 11,948,318; 751 / 9,556,252; 433 / 1,613,365), and the
 sectors run in play is unchanged to the decimal.
 
+**Pitch, and the gate that read garbage (5 Sep).** The windowed report on
+mouse look was that up/down ran far faster than left/right and had no
+proportion to the hand: "tiny movements move the camera all the way up or
+down, just slowly". Both follow from pitch still being a button. The
+function was found statically this time, no watch needed: `pressed(pad,
+action)` is `psp_func_0005EFA0` — the pad's button word against the
+key-assign mask for one action, `*(cfg + 33·row + 80 + 2·action)` — and a
+scan of the emitted C for its call sites by action index puts actions 10
+and 11 (triangle, circle) in four functions, one of which asks them twice
+and integrates: **`psp_func_00053234(ac)`, the look integrator**, once a
+frame from `psp_func_0004CF74` for the AC under control, right after the
+auto-face pass `psp_func_00053048`. Its state is a struct at `ac+8160`:
+lockout counter at +4, **pitch angle at +16 (`ac+8176`, radians, up
+positive)**, pitch rate at +32. Its constants are six floats at
+`0x0030ADC0`: 27.0 (the lockout after a recentre), **accel 0.00136**, 0.009
+(a decel the code computes and then overwrites with zero), **max rate
+0.027**, and the clamp **±1.1781 rad = ±67.5°**. The digital path uses three
+tiny helpers — `000F4084`/`000F40B0` approach a limit and return 1 on
+reaching it, `000F40DC` integrates with a clamp and returns ±1 at it — and
+reads: triangle held, the rate approaches 2·max by 2·accel *twice a frame*;
+circle the mirror; neither, the rate is zero; both together recentre and
+start the lockout; then angle += rate, clamped. Measured from the new
+`PSPRECOMP_INPUT_LOG` lines (`scripts/pitch-analyze.py`), classic: **a
+10-frame ramp at 0.00544 rad/frame² to 0.054 rad/frame = 3.09°/frame**,
+against yaw's 2.10; a dead stop on release; the clamp at 67.500°; and
+triangle+circle snapping the angle to 0.000 with a 13-frame lockout. That
+3.09 against 2.10 is the "faster", and a button that any mouse travel
+pressed for four polls is the "no control".
+
+The third replacement, `dual` only: the right stick's Y is a rate in the
+game's own cap, mouse Y a displacement at the same 0.001 rad per count as
+yaw, into the same three words with the same clamp; the physical triangle
+and circle, the recentre and the lockout defer to the original, and since
+both laws act on the same words they compose. `scenarios/pitch-sweep.pad`
+measures it: **stick −127 → +0.054000 rad/frame from the first frame,
++127 → −0.054000, −64 → +0.027213 (64/127 of the cap), a 50-count-per-poll
+drag → ±0.050000**, all clamped at ±67.500°, and the triangle/circle holds
+in the same run reproduce the classic ramp to six decimals through the
+deferral. Frames at the stick-up and stick-down holds show the sky and the
+ground with the AC seen from below and above; classic at the same polls is
+level. The converter no longer synthesises 0x40/0x10 from the look channel,
+and the mouse-Y hold-off is gone with it.
+
+The gate bug this exposed: since the in-play gate landed the evening
+before (`32a7bc4`), every `dual` and `modern` run had been carrying **two
+bad 32-bit reads per in-play poll**, invisible because that evening's
+re-check compared lists and commands and not the bad-access count, which
+the menu rows (where the gate returns before the getter) kept at zero
+anyway. `in_play()` called
+the guest's pause getter `psp_func_000506F8` — which is `*(*(a0+9728)+276) +
+5808`, *taking the AC in a0* — from the stick converter, whose a0 is not an
+AC; the integrators had passed the test only because a0 happened to hold
+the AC there. The getter is now read in C as `game_paused(ac)` for all
+three, and every dual and modern row in the table below reads 0 bad mem
+again, with the same lists and commands as before: the garbage read had
+returned "not paused", which is what the gate wanted anyway. Two lessons
+for `host/replacements.c`: a replacement that calls into the guest owns
+that call's arguments, and **a dual run's bad-access count is part of its
+row**.
+
 Still open, in the order they matter: forward/back and strafe, still
 two-state (the walk law is unread); the turn animation, which plays at one
-speed whatever the rate; whether the camera filter should stay; pitch, still
-the game's own digital action; a pause menu opened mid-mission, which the
-pause flag should cover and a windowed test should confirm; and a keyboard
-layout for mouse players — `a` and `s` are face buttons in `KEYS[]` today,
-so WASD is a rebinding question, not an addition.
+speed whatever the rate; whether the camera filter should stay, and whether
+pitch wants one (it has none; the stick's full rate arrives in one frame);
+a pause menu opened mid-mission, which the pause flag should cover and a
+windowed test should confirm; and a keyboard layout for mouse players — `a`
+and `s` are face buttons in `KEYS[]` today, so WASD is a rebinding question,
+not an addition. `build/host-trace` predates all three replacements: rebuild
+with `TRACE=1 scripts/04-emit-build.sh` before the next `WATCHMEM`.
 
 ## The instruments, and what each can and cannot tell you
 
@@ -440,7 +503,7 @@ All are off by default and cost nothing when off.
 | `PSPRECOMP_REACHED_DUMP=<file>` | Every label control reached, one address per line — the whole mark bitmap rather than 32 named addresses. For diffing a run that turned against one that did not. Same label-not-function caveat as `REACHED`; needs `TRACE=1`. |
 | `PSPRECOMP_VIEW_LOG=<file>` | The GE's matrices as they are uploaded, poll-stamped: tag `V` for view, `W` for the k-th world upload of each frame (`_WORLD=<k>`, default 1). `_WORLD=all` with `_POLLS=lo-hi[,lo-hi]` dumps every world upload in those polls with an `F <poll>` line per frame; `scripts/view-analyze.py --deltas` clusters per-object yaw change across frames and the largest cluster is the camera; it also prints the camera's own motion per frame, `W₂·W₁⁻¹` over that cluster with a true inverse (the matrices carry object scale), so a walk reads as z and a strafe as x beside the turn. The only camera observable this game offers — its view matrix is a constant. |
 | `PSPRECOMP_RAMSNAP=<prefix>` + `_POLLS=n[,...]` | The 32 MB of RAM and the module image (guest 0; where this game keeps its player object) at each named poll, before that poll's pad state is written. `scripts/ram-diff.py` finds the words stepping by a constant across three or more — an integrator's output — at 16-bit, 32-bit and float, without knowing the representation. Half a gigabyte for sixteen; capped there. |
-| `PSPRECOMP_INPUT=modern\|dual` / `PSPRECOMP_INPUT_LOG=<file>` | The port's control schemes, from `host/replacements.c`; unset, every replacement defers to the game's own code. `modern` honours the left stick's magnitude; `dual` looks with the right stick and the mouse and moves with the left. The log is one line per call of the yaw integrator — poll, object, sticks, gate — which is how "the game did not even ask" was told apart from "the law is wrong". |
+| `PSPRECOMP_INPUT=modern\|dual` / `PSPRECOMP_INPUT_LOG=<file>` | The port's control schemes, from `host/replacements.c`; unset, every replacement defers to the game's own code. `modern` honours the left stick's magnitude; `dual` looks with the right stick and the mouse — yaw and pitch both proportional — and moves with the left. The log is one line per call of each replaced integrator, in every mode (the deferring paths read the result back after the original ran): the yaw lines carry poll, object, sticks and gate, which is how "the game did not even ask" was told apart from "the law is wrong"; the pitch lines carry angle, rate, stick and mouse, and `scripts/pitch-analyze.py` folds them into the law they show. |
 | `PSPRECOMP_MOUSE=1` / `PSPRECOMP_MOUSE_SENS=<k>` | Windowed only: capture the pointer for mouse-look (Escape releases, a click retakes, losing focus releases). Travel reaches the game through the sceCtrl lanes, so a recording holds it and a replay reproduces it; `k` scales the 0.001 rad per count default. Means nothing outside `PSPRECOMP_INPUT=dual`. |
 | `PSPRECOMP_PAD=start,cross` | Holds pad buttons for the run. There is no window and no gamepad. |
 | `PSPRECOMP_PAD_PRESS=start,15,0.5` | Presses a button at a wall-clock moment — down at `delay` seconds, up `duration` (default 0.5) later. A held button never reads as *pressed*, because a press is a transition. Headless only; in a windowed run the SDL layer owns the pad. |
@@ -1589,7 +1652,9 @@ baseline; the question is whose 261 commands stopped being counted.
 | `scripts/09-replay.sh --decode scenarios/garage.pad` | **`stop` at poll 925, 0 bad mem**, 928 lists, 11,948,318 commands, the sortie launch's AC in the hangar (3 Sep, item 38) -- mean 39 against 38 |
 | `scripts/09-replay.sh --decode scenarios/look-probe.pad` | `stop` at poll 2620, 0 bad mem, 2,623 lists, 31,629,673 commands — the mission played into: a hard-left hold from poll 2100, centre, hard-right from 2360. With `PSPRECOMP_INPUT` unset this must not move, and did not when the two replacements landed (4 Sep); the same day mission-1, garage and main-menu reproduced their rows above to the command. The classic-mode check for `host/replacements.c`. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=modern --env PSPRECOMP_VIEW_LOG=reports/sweep.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2210-2215,2290-2295,2370-2375,2450-2455,2530-2535,2610-2615,2690-2695 scenarios/yaw-sweep.pad` then `scripts/view-analyze.py reports/sweep.view --deltas` | `stop` at poll 3100, 0 bad mem, 3,103 lists, 41,601,520 commands (4 Sep). The largest cluster in each window is the camera's yaw per frame at that hold: **R127 −2.105, L96 +1.588, R96 −1.590, L64 +1.056, R64 −1.058, L32 +0.528, R32 −0.528** — the stick's deflection times the 2.1019°/frame cap. The functional gate for proportional turning. |
-| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/look.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2440-2445,2500-2505,2570-2575 scenarios/look-sweep.pad` then `scripts/view-analyze.py reports/look.view --deltas` | `stop` at poll 2640, 0 bad mem, 2,643 lists, 33,857,103 commands, and the view log identical across two runs (4 Sep). Per window: **right stick 127 → −2.099°/frame, left 127 → +2.100, right 64 → −1.051, left 64 → +1.053, a mouse drag of −30 then +30 counts a poll → +1.683 / −1.684, the left stick at 32 → −0.002** — the second stick and the mouse turn, the first stick strafes. The functional gate for the look channel, and proof it replays. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/look.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2440-2445,2500-2505,2570-2575 scenarios/look-sweep.pad` then `scripts/view-analyze.py reports/look.view --deltas` | `stop` at poll 2640, 0 bad mem, 2,643 lists, 33,857,103 commands, and the view log identical across two runs (4 Sep). Per window: **right stick 127 → −2.099°/frame, left 127 → +2.100, right 64 → −1.051, left 64 → +1.053, a mouse drag of −30 then +30 counts a poll → +1.683 / −1.684, the left stick at 32 → −0.002** — the second stick and the mouse turn, the first stick strafes. The functional gate for the look channel, and proof it replays. Unchanged at 2,643 / 33,857,103 with the pitch integrator replaced (5 Sep): the command count does not see the camera's pitch, so this row is not the pitch gate — the next one is. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_INPUT_LOG=reports/pitch.log scenarios/pitch-sweep.pad` then `scripts/pitch-analyze.py reports/pitch.log --from 2095` | `stop` at poll 2600, **0 bad mem**, 2,603 lists, 30,540,409 commands (5 Sep). The pitch law under `dual`: **right stick −127 → +0.054000 rad/frame from the first frame, +127 → −0.054000, −64 → +0.027213; a 50-count-per-poll mouse drag away then toward → +0.050000 / −0.050000; clamped at ±67.500°**; then triangle held from poll 2402 reproduces the classic ramp below to six decimals through the deferral, circle the mirror, and both together snap the angle to 0.000 with the lockout. The functional gate for proportional pitch. |
+| `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT_LOG=reports/pitch-classic.log scenarios/pitch-sweep.pad` then `scripts/pitch-analyze.py reports/pitch-classic.log --from 2395` | `stop` at poll 2600, 0 bad mem, 2,603 lists, 32,344,849 commands (5 Sep). The game's own look law, with the stick and mouse rows inert: **triangle from poll 2402 ramps +0.005440, +0.010880 … +0.048960 over ten frames, then +0.054000 a frame to the clamp at +67.500° (poll 2428); release is a dead stop; circle mirrors it to −67.500°; triangle+circle at 2562 recentres to 0.000** and holds through the lockout. The classic-mode check for the third replacement. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/wt.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2450-2455,2530-2535 scenarios/walk-turn.pad` then `scripts/view-analyze.py reports/wt.view --deltas` | `stop` at poll 2600, 0 bad mem, 2,603 lists, 32,921,535 commands (5 Sep, with the eight-sector map; 32,902,603 under the first `dual` map, whose diagonal hold only strafed). Per window, yaw and the camera's own motion (x sideways, z forward): **forward alone 0°, z −1.23; forward + right stick −2.06°, z −1.17; forward + left +2.06°, z −1.17; back 0°, z +0.56**; the right-stick-alone window then reads −1.79° with the AC still drifting back at z +1.09 — the game slows its turn while moving, and under the first map, with the AC at rest, the same window read −2.10° and x +0.64 (the chase camera orbiting). The proof that the game walks and turns at once when both are asked for. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_INPUT=dual --env PSPRECOMP_VIEW_LOG=reports/sect.view --env PSPRECOMP_VIEW_LOG_WORLD=all --env PSPRECOMP_VIEW_LOG_POLLS=2130-2135,2210-2215,2290-2295,2370-2375,2450-2455,2530-2535,2610-2615 scenarios/sectors.pad` then `scripts/view-analyze.py reports/sect.view --deltas` | `stop` at poll 2680, 0 bad mem, 2,683 lists, 34,580,662 commands (4 Sep). The left stick at 120 of travel in seven directions, camera motion per frame (x sideways, z forward): **straight forward 0, −1.23; forward 30° off −0.88, −0.87; the forward diagonals −0.88, −0.87 and +0.86, −0.78; back-right −0.40, +0.40; straight strafe −1.08, −0.30 with the game's own lock-on yaw of −0.39°; a half-deflection forward 0, −1.24**. The gate for the eight-sector map: a push in any direction moves in that direction. |
 | `scripts/09-replay.sh --decode --env PSPRECOMP_AUDIO_DUMP=<prefix> scenarios/garage.pad` | **three channels of non-silent PCM** (3 Sep, item 49 -- M3's gate, headless half): ch1 5.5 s / peak 9,466 / ZCR 0.252, ch2 4.0 s / peak 32,768 / ZCR 0.294, ch3 15.7 s / peak 10,158 / **ZCR 0.075** -- the low crossing rate and the length make ch3 the music and the other two effects. In the same run `__sceSasCore` is called 2,712 times and `PSPRECOMP_ATRAC_LOG=1` shows 3 tracks opened, **125 `DecodeData`** and 2 `SetLoopNum`. This measures that sound is *generated*; *audible* is the windowed half, confirmed by Sif on 3 Sep (M3 struck) and re-checkable only by this dump |

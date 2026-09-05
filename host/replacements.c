@@ -45,10 +45,15 @@
  *           the cap scaled by how far the stick is pushed, and the turning
  *           state engages at any deliberate deflection instead of at 100/127.
  *   dual    the second stick looks and the first moves: right X is yaw, right
- *           Y look up/down, left X strafe, left Y forward/back as before; mouse
- *           motion, when the host provides it, is yaw and pitch as well
+ *           Y pitch, both proportional; left X strafe, left Y forward/back as
+ *           before; mouse motion, when the host provides it, is yaw and pitch
+ *           as a displacement at the same radians per count on both axes
  *           (PSPRECOMP_MOUSE_SENS scales it, default 1.0 = 0.001 rad per
  *           count).
+ *
+ * PSPRECOMP_INPUT_LOG=<file> writes one line per call of each replaced
+ * integrator, in every mode -- the deferring ones read the result back after
+ * the original ran -- so a law can be measured to the frame without a window.
  */
 
 #include <stdint.h>
@@ -92,6 +97,18 @@ static float mouse_sens(void) {
         k = 0.001f * (m > 0.0f ? m : 1.0f);
     }
     return k;
+}
+
+/* PSPRECOMP_INPUT_LOG=<file>, shared by every replacement here; NULL when
+ * unset. Opened once, on the first call. */
+static FILE *input_log(void) {
+    static FILE *log; static int init;
+    if (!init) {
+        init = 1;
+        const char *p = getenv("PSPRECOMP_INPUT_LOG");
+        if (p && *p) log = fopen(p, "w");
+    }
+    return log;
 }
 
 static float f32_read(uint32_t addr) {
@@ -155,6 +172,21 @@ enum { AC_YAW = 36, AC_RATE = 8312, AC_DIR = 8351, AC_STATE_PTR = 9728 };
  * with the player's stick. */
 enum { PLAYER_AC = 0x0042D6C0u };
 
+/* The pause gate the integrators honour. psp_func_000506F8(ac) is
+ * *(*(ac+9728)+276) + 5808 -- an object hanging off the AC's movement state --
+ * and the s16 at +24 of that is non-zero while the game is paused. Read in C
+ * rather than by calling the guest: the guest getter takes the AC in a0, and
+ * a replacement that called it from a context where a0 was something else
+ * dereferenced that something. (The first in-play gate did exactly that from
+ * the stick converter, whose a0 is not an AC, and it read garbage twice a
+ * poll until the bad-access counter said so.) NULL where the original's
+ * `bnel v0, zero` says NULL. */
+static int game_paused(uint32_t ac) {
+    const uint32_t state = psp_read32(ac + AC_STATE_PTR);
+    const uint32_t g = psp_read32(state + 276) + 5808;
+    return g && (int16_t)(psp_read32(g + 24) & 0xFFFFu) != 0;
+}
+
 void psp_func_0004F248(void) {
     const int mode = input_mode();
     if (mode == INPUT_CLASSIC || r_a0 != PLAYER_AC) {
@@ -176,25 +208,17 @@ void psp_func_0004F248(void) {
     psp_ctrl_last_stick(&ax, &ay);
     psp_ctrl_last_look(&rx, &ry, &mdx, &mdy);
 
-    /* PSPRECOMP_INPUT_LOG=<file>: one line per call, so "did the game even ask
-     * for a turn this frame" is a fact and not a guess. Which of the fourteen
-     * movement handlers calls this is the game's decision, made upstream from
-     * the thresholded bits. */
-    static FILE *log; static int log_init;
-    if (!log_init) {
-        log_init = 1;
-        const char *p = getenv("PSPRECOMP_INPUT_LOG");
-        if (p && *p) log = fopen(p, "w");
-    }
+    /* One line per call, so "did the game even ask for a turn this frame" is a
+     * fact and not a guess. Which of the fourteen movement handlers calls this
+     * is the game's decision, made upstream from the thresholded bits. */
+    FILE *log = input_log();
     if (log) fprintf(log, "%u ac=%08X ax=%u rx=%u mdx=%d gate=%d max=%.5f\n",
                      psp_ctrl_polls(), ac, ax, rx, mdx, gated, max);
 
     if (gated) { r_v0 = 0; return; }
 
-    /* The pause gate, as the original: a global object, s16 at +24. */
-    psp_func_000506F8();
-    const uint32_t g = r_v0;
-    const int paused = g && (int16_t)(psp_read32(g + 24) & 0xFFFFu) != 0;
+    /* The pause gate, as the original. */
+    const int paused = game_paused(ac);
 
     /* Left is negative radians here, matching the original's sign; mouse
      * travel to the right is positive yaw. */
@@ -206,6 +230,98 @@ void psp_func_0004F248(void) {
     if (!paused) f32_write(ac + AC_YAW, f32_read(ac + AC_YAW) + rate);
 
     r_v0 = (uint32_t)(int32_t)(rate > 0.0f ? 1 : rate < 0.0f ? -1 : 0);
+}
+
+/* ---- the look (pitch) integrator ---------------------------------------------
+ *
+ * psp_func_00053234(a0 = the AC), once per frame from psp_func_0004CF74 for the
+ * AC under control, straight after the auto-face pass psp_func_00053048. Its
+ * state is a small struct at ac+8160: a lockout counter at +4, the pitch angle
+ * at +16 (radians, up positive), the pitch rate at +32. Its constants are six
+ * floats at 0x0030ADC0 -- [0] 27.0, the lockout after a recentre; [1] 0.00136
+ * accel; [2] 0.009, a decel the code computes and then overwrites with zero;
+ * [3] 0.027 max rate; [4] -1.1781 and [5] +1.1781, the clamp: 67.5 degrees
+ * either way. The shipped path, read from the listing:
+ *
+ *   - gate: the byte at (*(ac+9728))+182 must be -1, as the yaw integrator;
+ *   - triangle and circle together recentre -- angle and rate to zero -- and
+ *     start the lockout; while the counter is positive it counts down and
+ *     nothing else happens;
+ *   - triangle held (action 10): the rate approaches +2*max by +2*accel,
+ *     twice a frame: 0.00544 rad/frame^2 to 0.054 rad/frame, 3.09 deg/frame
+ *     against yaw's 2.10. Circle (action 11) is the mirror;
+ *   - neither held: the rate is zero. The release stops dead;
+ *   - angle += rate, clamped; at a limit the rate is zeroed.
+ *
+ * That is the whole of why mouse look felt wrong: pitch was a button, so any
+ * travel at all was a full-rate press, faster than the yaw beside it and
+ * with no relation to how far the hand moved. Under `dual` the right stick's
+ * Y is a rate in the game's own cap and mouse Y a displacement at the same
+ * radians per count as yaw, into the same three words, with the same clamp.
+ * The buttons and the lockout stay the game's: when either is in play this
+ * defers, and since both laws act on the same state they compose. */
+
+enum { AC_LOOK_COUNTER = 8164, AC_PITCH = 8176, AC_PITCH_RATE = 8192,
+       AC_PAD_PTR = 9732, LOOK_PARAMS = 0x0030ADC0u };
+
+static int in_play(void);              /* defined with the converter, below */
+
+/* psp_func_0005EFA0(pad, action): the pad's button word against the
+ * key-assign mask for one action, where pad = *(*(ac+9732)+4). The registers
+ * it clobbers are caller-saved, and a replacement is the callee. */
+static int pressed(uint32_t ac, uint32_t action) {
+    r_a0 = psp_read32(psp_read32(ac + AC_PAD_PTR) + 4);
+    r_a1 = action;
+    psp_func_0005EFA0();
+    return r_v0 != 0;
+}
+
+static void pitch_log(uint32_t ac, const char *how, int ry, int mdy) {
+    FILE *log = input_log();
+    if (log) fprintf(log, "%u pitch=%.6f rate=%.6f ry=%d mdy=%d %s\n",
+                     psp_ctrl_polls(), f32_read(ac + AC_PITCH),
+                     f32_read(ac + AC_PITCH_RATE), ry, mdy, how);
+}
+
+void psp_func_00053234(void) {
+    const uint32_t ac = r_a0;
+    if (input_mode() != INPUT_DUAL || ac != PLAYER_AC) {
+        psp_func_00053234__orig();
+        if (ac == PLAYER_AC) pitch_log(ac, "orig", 0, 0);
+        return;
+    }
+
+    /* The state and pause gates, as the yaw integrator. */
+    if (!in_play()) return;
+
+    uint8_t rx, ry;
+    int mdx, mdy;
+    psp_ctrl_last_look(&rx, &ry, &mdx, &mdy);
+
+    /* The game's own digital look, its recentre and its lockout. */
+    if ((int32_t)psp_read32(ac + AC_LOOK_COUNTER) > 0 ||
+        pressed(ac, 10) || pressed(ac, 11)) {
+        r_a0 = ac;
+        psp_func_00053234__orig();
+        pitch_log(ac, "orig-button", (int)ry - 128, mdy);
+        return;
+    }
+
+    const float max = 2.0f * f32_read(LOOK_PARAMS + 12);
+    const float lo  = f32_read(LOOK_PARAMS + 16);
+    const float hi  = f32_read(LOOK_PARAMS + 20);
+
+    /* Stick up is a smaller byte; mouse away from the player is negative dy;
+     * both look up, which is positive here. */
+    float rate = -max * stick_axis(ry);
+    rate -= mouse_sens() * (float)mdy;
+
+    float angle = f32_read(ac + AC_PITCH) + rate;
+    if (angle > hi) { angle = hi; rate = 0.0f; }
+    if (angle < lo) { angle = lo; rate = 0.0f; }
+    f32_write(ac + AC_PITCH, angle);
+    f32_write(ac + AC_PITCH_RATE, rate);
+    pitch_log(ac, "dual", (int)ry - 128, mdy);
 }
 
 /* ---- the stick, as buttons ----------------------------------------------------
@@ -231,31 +347,30 @@ void psp_func_0004F248(void) {
  *
  * `dual` re-sources the bits: turning from the right stick's X (or from mouse
  * travel, held for a few polls after the last motion so the state does not
- * flicker at the mouse's rate), look up/down from the right stick's Y (or
- * mouse Y) as the triangle/circle bits the game's own look code answers to,
- * strafe from the left stick's X as the L/R bits, forward/back from the left
- * stick's Y unchanged. The game's strafe and look are still its own, still
- * two-state; what changed is which hand asks for them.
+ * flicker at the mouse's rate), strafe from the left stick's X as the L/R
+ * bits, forward/back from the left stick's Y. Look up/down is not asked for
+ * here at all: the pitch integrator above reads the right stick and the mouse
+ * itself, and the triangle/circle bits are left to the physical buttons. The
+ * game's strafe is still its own, still two-state; what changed is which hand
+ * asks for it.
  *
  * Precedence is the original's: right before left, forward before back. */
 
 enum { STICK_THRESHOLD = 0x0042B784u, MODERN_TURN_THRESHOLD = 16,
-       DUAL_LOOK_THRESHOLD = 48, MOUSE_HOLD_POLLS = 4 };
+       MOUSE_HOLD_POLLS = 4 };
 
 /* Mouse travel arrives at the mouse's rate and this runs at the guest's; a
  * bit that dropped the poll after a motion event would flicker the state
  * machine. Keep the direction for a few polls. Per poll, not per call: the
  * adaptor calls this once for each of two virtual pads. */
-static struct { uint32_t poll; int x_left, y_left; int sx, sy; } g_mouse_hold;
+static struct { uint32_t poll; int x_left; int sx; } g_mouse_hold;
 
-static void mouse_hold_update(int mdx, int mdy) {
+static void mouse_hold_update(int mdx) {
     const uint32_t poll = psp_ctrl_polls();
     if (poll == g_mouse_hold.poll) return;
     g_mouse_hold.poll = poll;
     if (g_mouse_hold.x_left > 0) g_mouse_hold.x_left--;
-    if (g_mouse_hold.y_left > 0) g_mouse_hold.y_left--;
     if (mdx) { g_mouse_hold.x_left = MOUSE_HOLD_POLLS; g_mouse_hold.sx = mdx > 0 ? 1 : -1; }
-    if (mdy) { g_mouse_hold.y_left = MOUSE_HOLD_POLLS; g_mouse_hold.sy = mdy > 0 ? 1 : -1; }
 }
 
 /* Is the player being played? The converter runs everywhere the pad is read
@@ -266,15 +381,11 @@ static void mouse_hold_update(int mdx, int mdy) {
  * object at ac+9728, which is NULL in the garage and set in a mission, with
  * its byte at +182 equal to -1 while the AC is under control; and the pause
  * flag the integrator also honours. Outside that, every mode is the shipped
- * converter, bit for bit. The registers this reads are caller-saved and the
- * stick bytes were taken before the call, so calling into the guest here is
- * what the original function could have done itself. */
+ * converter, bit for bit. */
 static int in_play(void) {
     const uint32_t state = psp_read32(PLAYER_AC + AC_STATE_PTR);
     if (!state || (int8_t)psp_read8(state + 182) != -1) return 0;
-    psp_func_000506F8();
-    const uint32_t g = r_v0;
-    return !(g && (int16_t)(psp_read32(g + 24) & 0xFFFFu) != 0);
+    return !game_paused(PLAYER_AC);
 }
 
 void psp_func_00279A50(void) {
@@ -306,8 +417,9 @@ void psp_func_00279A50(void) {
     uint8_t rxb, ryb;
     int mdx, mdy;
     psp_ctrl_last_look(&rxb, &ryb, &mdx, &mdy);
-    mouse_hold_update(mdx, mdy);
-    const int rx = (int)rxb - 128, ry = (int)ryb - 128;
+    mouse_hold_update(mdx);
+    const int rx = (int)rxb - 128;
+    (void)ryb; (void)mdy;                  /* the pitch integrator's, above */
 
     /* Turn: right stick X, else recent mouse X. */
     if      (rx >  tx) bits = 0x8000u;
@@ -340,11 +452,5 @@ void psp_func_00279A50(void) {
         }
     }
     (void)ty;
-    /* Look up/down: right stick Y, else recent mouse Y, as triangle/circle.
-     * Stick up and mouse away from the player both look up. */
-    if      (ry < -DUAL_LOOK_THRESHOLD) bits |= 0x40u;
-    else if (ry >  DUAL_LOOK_THRESHOLD) bits |= 0x10u;
-    else if (g_mouse_hold.y_left > 0)   bits |= g_mouse_hold.sy < 0 ? 0x40u : 0x10u;
-
     r_v0 = bits;
 }
