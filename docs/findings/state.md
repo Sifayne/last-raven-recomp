@@ -645,7 +645,7 @@ confirm in menus), the mouse buttons are the fire buttons — left square,
 the right arm's weapon on the game's default assign; right d-pad up and
 middle d-pad down — and the letters the stick took move: square to `c`,
 triangle to `v`; the rest is the classic layout, which stays the default.
-The click that captures the pointer does not fire. Read from the snapshot,
+The click that captures the pointer does not fire. First windowed try: A and D walked, W and S did nothing — an Xbox 360 pad left plugged in streams its resting stick as centre values (500 events in 2.5 s on left Y alone, 300 on X, measured from `/dev/input/js1`), and each one overwrote the keyboard's byte between key events; the keyboard's stick is now its own pair of bytes, merged with the pad's per axis at publish time, the keyboard winning wherever a key is held, and the host names any controller it opens. Read from the snapshot,
 the game's default key-assign (`cfg + 33·row + 80 + 2·action`, on the
 game's remapped bits): **actions 0–3 the stick's four bits; 5 cross; 6
 square; 8/9 L/R; 10/11 triangle/circle; 4, 7, 13, 14 the d-pad** — which

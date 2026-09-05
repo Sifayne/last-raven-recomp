@@ -170,8 +170,14 @@ static void set_bit(uint32_t bit, int down) {
 }
 
 /* The stick from the keyboard: which of W/A/S/D are down, as bits, and the
- * bytes they make. All up is centre, which also lets go of whatever a pad's
- * stick was saying -- the two are not meant to be used at once. */
+ * bytes they make. Kept apart from the pad's stick and merged per axis at
+ * publish time, the keyboard winning on any axis it holds off centre: a
+ * pad left plugged in reports its resting stick as a stream of centre
+ * values whenever it drifts, and one that drifts on Y alone made W and S
+ * dead while A and D walked (5 Sep) -- the pad's centre kept overwriting
+ * the keyboard's byte between key events. */
+static _Atomic uint8_t g_key_ax = 128, g_key_ay = 128;
+
 static void set_key_stick(SDL_Keycode k, int down) {
     static unsigned held;                   /* 1 W, 2 S, 4 A, 8 D */
     unsigned bit = 0;
@@ -185,8 +191,8 @@ static void set_key_stick(SDL_Keycode k, int down) {
     held = down ? (held | bit) : (held & ~bit);
     const int x = ((held & 8) ? 1 : 0) - ((held & 4) ? 1 : 0);
     const int y = ((held & 2) ? 1 : 0) - ((held & 1) ? 1 : 0);
-    atomic_store(&g_pad_ax, (uint8_t)(128 + 127 * x));
-    atomic_store(&g_pad_ay, (uint8_t)(128 + 127 * y));
+    atomic_store(&g_key_ax, (uint8_t)(128 + 127 * x));
+    atomic_store(&g_key_ay, (uint8_t)(128 + 127 * y));
 }
 
 static void set_key(SDL_Keycode k, int down) {
@@ -268,8 +274,10 @@ static void mouse_grab(int on) {
 /* Publish the whole pad state after any change, so a guest poll between two
  * events of one press never sees the press half-applied. Cheap. */
 static void publish_pad(void) {
+    const uint8_t kax = atomic_load(&g_key_ax), kay = atomic_load(&g_key_ay);
     psp_ctrl_set(atomic_load(&g_pad_buttons),
-                 atomic_load(&g_pad_ax), atomic_load(&g_pad_ay));
+                 kax != 128 ? kax : atomic_load(&g_pad_ax),
+                 kay != 128 ? kay : atomic_load(&g_pad_ay));
     psp_ctrl_set_look(atomic_load(&g_pad_rx), atomic_load(&g_pad_ry));
 }
 
@@ -699,9 +707,16 @@ static void *sdl_thread(void *arg) {
                 atomic_store(&g_quit, 1);
                 psp_sched_stop_all("window closed");
                 return NULL;
-            case SDL_CONTROLLERDEVICEADDED:
-                SDL_GameControllerOpen(e.cdevice.which);
+            case SDL_CONTROLLERDEVICEADDED: {
+                /* Named, because a pad nobody remembers plugging in still
+                 * has a stick, and its drift has been mistaken for a dead
+                 * keyboard. */
+                SDL_GameController *c = SDL_GameControllerOpen(e.cdevice.which);
+                fprintf(stderr, "present: controller \"%s\" opened -- its stick and the "
+                                "keyboard's merge per axis, the keyboard winning where held\n",
+                        c ? SDL_GameControllerName(c) : "?");
                 break;
+            }
             case SDL_CONTROLLERDEVICEREMOVED: {
                 SDL_GameController *c = SDL_GameControllerFromInstanceID(
                     e.cdevice.which);
