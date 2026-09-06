@@ -64,10 +64,11 @@ ISO="${2:-$(ls "$ROOT"/game/*.iso 2>/dev/null | head -1 || true)}"
 [ -f "$ELF" ] || die "no module at $ELF"
 
 OUT="$ROOT/build/host"
-[ -n "$TRACE_ON" ] && OUT="$ROOT/build/host-trace"
+[ "${OPT:-0}" != "0" ] && OUT="$OUT-opt"        # OPT=1: the -O2 generated code
+[ -n "$TRACE_ON" ] && OUT="$OUT-trace"
 
 info "building"
-BOOT_NO_RUN=1 TRACE="${TRACE_ON:-0}" "$ROOT/scripts/06-boot.sh" >/dev/null
+BOOT_NO_RUN=1 OPT="${OPT:-0}" TRACE="${TRACE_ON:-0}" "$ROOT/scripts/06-boot.sh" >/dev/null
 
 export PSPRECOMP_REPLAY="$SCENARIO"
 [ -n "$WINDOW" ] && export PSPRECOMP_WINDOW=1
