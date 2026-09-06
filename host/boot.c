@@ -816,9 +816,22 @@ int main(int argc, char **argv) {
      * the wrong backend. That is the shape of failure this project keeps
      * finding: a call that quietly answers something other than what was
      * asked. */
-    const char *render = getenv("PSPRECOMP_RENDER");
-    if (render && !*render) render = NULL;   /* set-but-empty means unset,
-                                              * as PSPRECOMP_AUDIO_DUMP has it */
+    const char *render_env = getenv("PSPRECOMP_RENDER");
+    if (render_env && !*render_env) render_env = NULL; /* set-but-empty means
+                                                         * unset */
+    const char *aspect = getenv("PSPRECOMP_ASPECT");
+    if (aspect && !*aspect) aspect = NULL;
+    if (aspect && strcmp(aspect, "native") != 0 &&
+                  strcmp(aspect, "window") != 0) {
+        fprintf(stderr, "unknown aspect mode \"%s\"; expected native or window\n",
+                aspect);
+        return 2;
+    }
+    const int adaptive_aspect = aspect && strcmp(aspect, "window") == 0;
+    /* The aspect path needs the GL backend's split between projected scene and
+     * screen-space HUD geometry. Make the one feature switch sufficient when
+     * no backend was named, while still respecting an explicit selection. */
+    const char *render = render_env ? render_env : adaptive_aspect ? "gl" : NULL;
 
     /* Backends the runtime cannot carry are registered before anything can
      * select one. "gl" is absent from the list on a host built without SDL2,
@@ -844,7 +857,8 @@ int main(int argc, char **argv) {
         return 1;
     }
     printf("      render    %s%s\n", psp_render_current()->name,
-           render ? " (PSPRECOMP_RENDER)" : " (default)");
+           render_env ? " (PSPRECOMP_RENDER)" :
+           adaptive_aspect ? " (PSPRECOMP_ASPECT)" : " (default)");
 
     /* A GL backend needs somewhere to put a context, so it brings the window
      * with it whether or not PSPRECOMP_WINDOW was asked for -- and if there is
@@ -856,6 +870,12 @@ int main(int argc, char **argv) {
      * different frame counts. That is the display-list capture prerequisite's
      * job and is why it exists. */
     const int want_gl = strcmp(psp_render_current()->name, "gl") == 0;
+    if (adaptive_aspect && !want_gl) {
+        fprintf(stderr, "PSPRECOMP_ASPECT=window requires the gl renderer; "
+                        "remove PSPRECOMP_RENDER=%s or select gl\n",
+                psp_render_current()->name);
+        return 2;
+    }
 
     int windowed = 0;
     if (getenv("PSPRECOMP_WINDOW") || want_gl) {
@@ -863,6 +883,9 @@ int main(int argc, char **argv) {
         if (present_start() == 0) {
             windowed = 1;
             printf("      window    on (SDL2: video, pad, audio; implies real-time pacing)\n");
+            if (adaptive_aspect)
+                printf("      aspect    window -- horizontal view follows the drawable; "
+                       "HUD stays in the native safe area\n");
         } else if (want_gl) {
             fprintf(stderr, "render: the gl backend needs a window and there "
                             "is none -- refusing rather than drawing nowhere\n");

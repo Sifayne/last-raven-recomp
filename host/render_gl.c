@@ -222,6 +222,7 @@ typedef struct {
 static struct {
     int      w, h;
     int      ready, failed;
+    int      adaptive_aspect;
     unsigned long thread;
 
     GLuint   prog, vao, vbo;
@@ -275,6 +276,7 @@ static struct {
     size_t   batch_n;
 
     uint64_t draws, verts, unsupported_prims, readbacks, batch_overflows;
+    uint64_t aspect_ui_draws, aspect_fullscreen_draws;
     uint64_t readback_ns;
     uint64_t presents, frames, frame_first_ns, frame_last_ns, frame_prev_ns;
     uint64_t frame_max_ns;
@@ -886,6 +888,7 @@ static int claim(void) {
 static int gl_init(int w, int h) {
     /* No GL here on purpose: this runs on boot.c's thread, not the GE's. */
     g.w = w; g.h = h;
+    g.adaptive_aspect = present_adaptive_aspect();
     return 0;
 }
 
@@ -1290,9 +1293,8 @@ static int triangle_lod16(const psp_vertex *a, const psp_vertex *b,
     return psp_render_lod16(&g.tex, rx > ry ? rx : ry);
 }
 
-static void push_triangle(const psp_vertex *a, const psp_vertex *b,
-                          const psp_vertex *c) {
-    const int lod16 = triangle_lod16(a, b, c);
+static void push_triangle_lod(const psp_vertex *a, const psp_vertex *b,
+                              const psp_vertex *c, int lod16) {
     reserve_vertices(3);
     push(a, lod16); push(b, lod16); push(c, lod16);
 }
@@ -1306,7 +1308,7 @@ static void push_triangle(const psp_vertex *a, const psp_vertex *b,
  * With exactly one screen axis reversed, the PSP transposes the mapping: u
  * follows y and v follows x. This is the same rule measured and implemented
  * by sw_sprite(), rather than a GL-specific approximation. */
-static void push_sprite(const psp_vertex *v) {
+static void push_sprite(const psp_vertex *v, const psp_vertex *lod_v) {
     psp_vertex a = v[1], b = v[1], c = v[1], d = v[1];
     a.x = v[0].x; a.y = v[0].y;
     b.x = v[1].x; b.y = v[0].y;
@@ -1329,12 +1331,17 @@ static void push_sprite(const psp_vertex *v) {
         d.u = v[0].u; d.v = v[1].v;
     }
     int lod16 = 0;
-    const int dx = v[1].x - v[0].x, dy = v[1].y - v[0].y;
+    /* Aspect-safe UI is narrower only inside the guest render target; the
+     * final window stretch restores its native size. Choose mip/filter state
+     * from the unadjusted geometry or small glyphs falsely look minified and
+     * blend with a lower mip before being enlarged again. */
+    const int dx = lod_v[1].x - lod_v[0].x;
+    const int dy = lod_v[1].y - lod_v[0].y;
     const int uden = transposed ? dy : dx;
     const int vden = transposed ? dx : dy;
     if (g.tex_enable && uden && vden) {
-        const float du = (v[1].u - v[0].u) / (float)uden;
-        const float dv = (v[1].v - v[0].v) / (float)vden;
+        const float du = (lod_v[1].u - lod_v[0].u) / (float)uden;
+        const float dv = (lod_v[1].v - lod_v[0].v) / (float)vden;
         const float rx = fabsf(du) * 16.0f, ry = fabsf(dv) * 16.0f;
         lod16 = psp_render_lod16(&g.tex, rx > ry ? rx : ry);
     }
@@ -1359,6 +1366,68 @@ static void push_point_sample(const psp_vertex *v, void *opaque) {
     push(&a, lod16); push(&c, lod16); push(&d, lod16);
 }
 
+/* The game still draws into a 480x272 surface. With that surface stretched to
+ * a differently shaped window, already-projected HUD vertices would stretch
+ * too. Squeeze them into the largest native-aspect safe area *before* the
+ * final blit; its non-uniform scale then restores their proportions and keeps
+ * them centred. Projected 3D needs no adjustment because the camera replacement
+ * has already changed its horizontal FOV.
+ *
+ * Full-frame screen-space draws are clears, fades, movies and compositing
+ * passes rather than HUD. They must continue covering the entire surface or
+ * the widened edges retain stale pixels, so a draw spanning both dimensions is
+ * deliberately left alone. */
+enum { ASPECT_VERT_MAX = 256 };
+static const psp_vertex *aspect_safe_area(const psp_vertex *v, int count,
+                                          psp_vertex adjusted[ASPECT_VERT_MAX]) {
+    if (!g.adaptive_aspect || count <= 0 || count > ASPECT_VERT_MAX)
+        return v;
+    /* The 256-wide scratch target is sampled back into the main scene. It is
+     * not presentation-space UI, even when a pass happens to use THROUGH
+     * vertices, so only adapt draws aimed at the display-sized targets. */
+    if (g.target_stride && g.target_stride < (uint32_t)g.w)
+        return v;
+    for (int i = 0; i < count; i++)
+        if (!v[i].screen_space) return v;
+
+    int min_x = v[0].x, max_x = v[0].x;
+    int min_y = v[0].y, max_y = v[0].y;
+    for (int i = 1; i < count; i++) {
+        if (v[i].x < min_x) min_x = v[i].x;
+        if (v[i].x > max_x) max_x = v[i].x;
+        if (v[i].y < min_y) min_y = v[i].y;
+        if (v[i].y > max_y) max_y = v[i].y;
+    }
+    if (min_x <= 0 && max_x >= g.w * PSP_SUBPX &&
+        min_y <= 0 && max_y >= g.h * PSP_SUBPX) {
+        g.aspect_fullscreen_draws++;
+        return v;
+    }
+
+    int draw_w = 0, draw_h = 0;
+    present_gl_drawable_size(&draw_w, &draw_h);
+    if (draw_w <= 0 || draw_h <= 0 || g.w <= 0 || g.h <= 0) return v;
+    const float output_x = (float)draw_w / (float)g.w;
+    const float output_y = (float)draw_h / (float)g.h;
+    const float uniform = output_x < output_y ? output_x : output_y;
+    const float pre_x = uniform / output_x;
+    const float pre_y = uniform / output_y;
+    if (fabsf(pre_x - 1.0f) < 1e-6f && fabsf(pre_y - 1.0f) < 1e-6f)
+        return v;
+
+    const float centre_x = (float)(g.w * PSP_SUBPX) * 0.5f;
+    const float centre_y = (float)(g.h * PSP_SUBPX) * 0.5f;
+    for (int i = 0; i < count; i++) {
+        adjusted[i] = v[i];
+        adjusted[i].x = (int)lroundf(centre_x +
+                                     ((float)v[i].x - centre_x) * pre_x);
+        adjusted[i].y = (int)lroundf(centre_y +
+                                     ((float)v[i].y - centre_y) * pre_y);
+    }
+    g.aspect_ui_draws++;
+    return adjusted;
+}
+
 static void gl_draw(int prim, const psp_vertex *v, int count) {
     if (claim() != 0) return;
     g.draws++;
@@ -1369,6 +1438,14 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
         else g.unsupported_stencil_draws++;
     }
     if (prim <= PSP_PRIM_LINE_STRIP && rt_prepare(g.cur_rt) != 0) return;
+
+    const psp_vertex *native_v = v;
+    psp_vertex adjusted[ASPECT_VERT_MAX];
+    v = aspect_safe_area(v, count, adjusted);
+    /* Geometry is squeezed only to cancel the final non-uniform window blit.
+     * Texture LOD must still describe its native PSP footprint; otherwise the
+     * temporary squeeze selects lower mips and permanently damages fine text. */
+    const psp_vertex *lod_v = v == native_v ? v : native_v;
 
     switch (prim) {
     case PSP_PRIM_POINTS: {
@@ -1384,29 +1461,38 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
         const int x1 = g.sc_valid && g.sc_x1 < r->w - 1 ? g.sc_x1 : r->w - 1;
         const int y1 = g.sc_valid && g.sc_y1 < r->h - 1 ? g.sc_y1 : r->h - 1;
         for (int i = 0; i + 1 < count; i += prim == PSP_PRIM_LINES ? 2 : 1) {
-            int lod16 = psp_render_line_lod16(&g.tex, &v[i], &v[i + 1]);
+            int lod16 = psp_render_line_lod16(&g.tex, &lod_v[i], &lod_v[i + 1]);
             psp_render_walk_line(&v[i], &v[i + 1], x0, y0, x1, y1, push_point_sample, &lod16);
         }
         break;
     }
     case 3:                                        /* triangles */
-        for (int i = 0; i + 2 < count; i += 3)
-            push_triangle(&v[i], &v[i + 1], &v[i + 2]);
+        for (int i = 0; i + 2 < count; i += 3) {
+            const int lod16 = triangle_lod16(&lod_v[i], &lod_v[i + 1],
+                                             &lod_v[i + 2]);
+            push_triangle_lod(&v[i], &v[i + 1], &v[i + 2], lod16);
+        }
         break;
     case 4:                                        /* triangle strip */
         for (int i = 0; i + 2 < count; i++) {
+            const int lod16 = triangle_lod16(&lod_v[i], &lod_v[i + 1],
+                                             &lod_v[i + 2]);
             /* Winding alternates along a strip; preserve it so a later
              * increment can turn face culling on without the strip flipping. */
-            if (i & 1) push_triangle(&v[i + 1], &v[i], &v[i + 2]);
-            else       push_triangle(&v[i], &v[i + 1], &v[i + 2]);
+            if (i & 1) push_triangle_lod(&v[i + 1], &v[i], &v[i + 2], lod16);
+            else       push_triangle_lod(&v[i], &v[i + 1], &v[i + 2], lod16);
         }
         break;
     case 5:                                        /* triangle fan */
-        for (int i = 1; i + 1 < count; i++)
-            push_triangle(&v[0], &v[i], &v[i + 1]);
+        for (int i = 1; i + 1 < count; i++) {
+            const int lod16 = triangle_lod16(&lod_v[0], &lod_v[i],
+                                             &lod_v[i + 1]);
+            push_triangle_lod(&v[0], &v[i], &v[i + 1], lod16);
+        }
         break;
     case 6:                                        /* sprites, in pairs */
-        for (int i = 0; i + 1 < count; i += 2) push_sprite(&v[i]);
+        for (int i = 0; i + 1 < count; i += 2)
+            push_sprite(&v[i], &lod_v[i]);
         break;
     default:
         g.unsupported_prims++;
@@ -1751,11 +1837,13 @@ static void gl_present(void) {
     present_gl_drawable_size(&draw_w, &draw_h);
     if (draw_w <= 0) draw_w = g.w * 2;
     if (draw_h <= 0) draw_h = g.h * 2;
-    int out_w = draw_w;
-    int out_h = (int)((long long)draw_w * g.h / g.w);
-    if (out_h > draw_h) {
-        out_h = draw_h;
-        out_w = (int)((long long)draw_h * g.w / g.h);
+    int out_w = draw_w, out_h = draw_h;
+    if (!g.adaptive_aspect) {
+        out_h = (int)((long long)draw_w * g.h / g.w);
+        if (out_h > draw_h) {
+            out_h = draw_h;
+            out_w = (int)((long long)draw_h * g.w / g.h);
+        }
     }
     const int out_x = (draw_w - out_w) / 2;
     const int out_y = (draw_h - out_h) / 2;
@@ -1903,6 +1991,11 @@ void render_gl_report(FILE *out) {
     if (g.batch_overflows)
         fprintf(out, ", %llu batch flush(es) from overflow",
                 (unsigned long long)g.batch_overflows);
+    if (g.adaptive_aspect)
+        fprintf(out, "\n          aspect: %llu HUD/safe-area draw(s), "
+                     "%llu full-frame draw(s)",
+                (unsigned long long)g.aspect_ui_draws,
+                (unsigned long long)g.aspect_fullscreen_draws);
     if (g.unsupported_prims)
         fprintf(out, ", %llu point/line draw(s) skipped",
                 (unsigned long long)g.unsupported_prims);

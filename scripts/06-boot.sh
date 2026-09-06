@@ -67,7 +67,7 @@ cc -O2 -std=gnu11 $SDL_DEF \
 if [ "$ROOT/host/replace.txt" -nt "$GEN/aclr_funcs.h" ]; then
     die "host/replace.txt is newer than the emitted C -- run scripts/04-emit-build.sh first"
 fi
-cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" -I "$GEN" \
+cc -O2 -std=gnu11 $SDL_DEF -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" -I "$GEN" \
    -c "$ROOT/host/replacements.c" -o "$OUT/replacements.o"
 
 for src in loader container decode; do

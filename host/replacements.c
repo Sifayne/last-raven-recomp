@@ -70,6 +70,7 @@
 #include "psprecomp/hle.h"
 #include "aclr_funcs.h"        /* psp_func_*, the __orig originals, r_* aliases */
 #include "controls.h"
+#include "present.h"
 
 /* ---- configuration ------------------------------------------------------ */
 
@@ -142,6 +143,70 @@ static void f32_write(uint32_t addr, float v) {
     union { uint32_t u; float f; } c;
     c.f = v;
     psp_write32(addr, c.u);
+}
+
+/* ---- adaptive aspect ----------------------------------------------------
+ *
+ * psp_func_000889B4(camera) is the game's central camera rebuild. It reads
+ * the active render descriptor's integer width and height, stores width/480,
+ * height/272 and width/height at camera+716/+720/+724, then rebuilds the
+ * projection and its culling planes. Six direct callers cover the gameplay,
+ * menu and model-preview cameras, and there are no entries into its interior.
+ *
+ * The guest framebuffer cannot become window-sized: movies, 2D drawing, CPU
+ * reads and alpha-backed stencil all depend on its 480x272 layout. In adaptive
+ * mode we therefore lend the original routine a *virtual* width for exactly
+ * the duration of the call and restore the descriptor before returning. The
+ * height stays 272, preserving vertical FOV; a wider drawable expands the
+ * horizontal view and a narrower one contracts it. */
+enum {
+    RENDER_SYSTEM = 0x0043D8D0u,
+    RENDER_ACTIVE = 260,
+    RENDER_WIDTH = 12,
+    RENDER_HEIGHT = 16,
+};
+
+void psp_func_000889B4(void) {
+    if (!present_adaptive_aspect()) {
+        psp_func_000889B4__orig();
+        return;
+    }
+
+    int draw_w = 0, draw_h = 0;
+    present_gl_drawable_size(&draw_w, &draw_h);
+    const uint32_t render = psp_read32(RENDER_SYSTEM + RENDER_ACTIVE);
+    const uint32_t width_addr = render + RENDER_WIDTH;
+    const uint32_t height_addr = render + RENDER_HEIGHT;
+    const uint32_t old_w = render ? psp_read32(width_addr) : 0;
+    const uint32_t old_h = render ? psp_read32(height_addr) : 0;
+    if (draw_w <= 0 || draw_h <= 0 || old_w == 0 || old_h == 0) {
+        psp_func_000889B4__orig();
+        return;
+    }
+
+    /* Round to the nearest virtual PSP pixel. At the native 480:272 ratio
+     * this is exactly 480, so enabling the option without resizing remains
+     * bit-for-bit on the original path. */
+    uint64_t virtual_w = ((uint64_t)old_h * (uint64_t)draw_w +
+                          (uint64_t)draw_h / 2u) / (uint64_t)draw_h;
+    if (virtual_w < 1u) virtual_w = 1u;
+    if (virtual_w > UINT32_MAX) virtual_w = UINT32_MAX;
+    if ((uint32_t)virtual_w == old_w) {
+        psp_func_000889B4__orig();
+        return;
+    }
+
+    psp_write32(width_addr, (uint32_t)virtual_w);
+    psp_func_000889B4__orig();
+    psp_write32(width_addr, old_w);
+
+    static int last_draw_w, last_draw_h;
+    if (draw_w != last_draw_w || draw_h != last_draw_h) {
+        printf("      aspect    drawable %dx%d, virtual camera %ux%u\n",
+               draw_w, draw_h, (unsigned)virtual_w, (unsigned)old_h);
+        last_draw_w = draw_w;
+        last_draw_h = draw_h;
+    }
 }
 
 typedef struct {

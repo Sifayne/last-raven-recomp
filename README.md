@@ -77,6 +77,17 @@ For the current dual-stick controls in a window:
 PSPRECOMP_WINDOW=1 PSPRECOMP_INPUT=dual scripts/06-boot.sh
 ```
 
+To let the 3D view follow the window's aspect ratio, with the HUD kept in a
+centred 480x272 safe area, enable the adaptive GL path and resize the window:
+
+```bash
+PSPRECOMP_ASPECT=window PSPRECOMP_INPUT=dual scripts/06-boot.sh
+```
+
+`PSPRECOMP_ASPECT=window` selects the GL renderer when no renderer is named.
+The game still renders into its native PSP framebuffer; higher internal
+resolution is a separate renderer feature.
+
 The modern pad layout is LT boost, RT right arm, LB left arm/event, RB change
 weapon, L3 extension, R3 OB/EO, A inside, B view reset, and Y as the purge
 modifier; X is deliberately unassigned. Start, Back and the d-pad retain their

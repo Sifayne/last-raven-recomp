@@ -626,6 +626,11 @@ void present_gl_drawable_size(int *w, int *h) {
     if (h) *h = atomic_load(&g_gl_draw_h);
 }
 
+int present_adaptive_aspect(void) {
+    const char *mode = getenv("PSPRECOMP_ASPECT");
+    return mode && strcmp(mode, "window") == 0;
+}
+
 void *present_gl_proc(const char *name) { return SDL_GL_GetProcAddress(name); }
 
 /* ---- the SDL thread -------------------------------------------------------- */
