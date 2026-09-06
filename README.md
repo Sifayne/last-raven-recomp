@@ -88,8 +88,21 @@ PSPRECOMP_ASPECT=window PSPRECOMP_INPUT=dual scripts/06-boot.sh
 
 `PSPRECOMP_ASPECT=window` selects the GL renderer when no renderer is named.
 The game still renders into its native PSP framebuffer; the GL target behind it
-grows sideways to the window's shape, and higher internal resolution is a
-separate renderer feature.
+grows sideways to the window's shape. To also rasterize at the window's physical
+pixel resolution, including high-DPI scaling:
+
+```bash
+PSPRECOMP_RESOLUTION=window PSPRECOMP_ASPECT=window PSPRECOMP_INPUT=dual scripts/06-boot.sh
+```
+
+Resolution and aspect are independent: leave aspect unset for a sharp,
+letterboxed PSP-shaped image. `PSPRECOMP_RESOLUTION=window` selects GL when no
+renderer is named; `psp` (or unset) keeps the reference resolution. Resizing
+preserves the GPU framebuffer history. Guest memory, original texture/movie
+assets and game speed retain their PSP layout and behavior. The small bitmap
+body font uses nearest sampling when enlarged, preserving its stroke weight.
+See
+[resolution validation and limits](docs/RENDER-CHECKS.md#window-resolution-rendering).
 
 The modern pad layout is LT boost, RT right arm, LB left arm/event, RB change
 weapon, L3 extension, R3 OB/EO, A inside, B view reset, and Y as the purge

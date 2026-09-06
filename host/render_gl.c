@@ -15,15 +15,17 @@
  * one ever appears this refuses loudly rather than issuing calls against a
  * context that is not current.
  *
- * The backend translates points, lines, triangles, strips, fans and sprites at native PSP
- * resolution, including texture decode/cache, perspective UVs, the full mip
- * chain and the measured PSP LOD/filter rules, depth, scissor, blending, alpha
+ * The backend translates points, lines, triangles, strips, fans and sprites at
+ * PSP resolution or the window's physical resolution, including texture
+ * decode/cache, perspective UVs, the full mip chain and measured PSP LOD/filter
+ * rules, depth, scissor, blending, alpha
  * test, RGBA8888 alpha-backed stencil and fog. The software path remains the
  * differential oracle. Reduced-bit-depth stencil and blend operations without
  * a fixed GL equivalent stay explicitly counted rather than approximated.
  */
 
 #include "present.h"
+#include "render_gl.h"
 #include "psprecomp/render.h"
 #include "psprecomp/mem.h"
 #include "psprecomp/os.h"
@@ -32,6 +34,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+int render_gl_resolution_mode(void) {
+    const char *s = getenv("PSPRECOMP_RESOLUTION");
+    if (!s || !*s || !strcmp(s, "psp")) return 0;
+    if (!strcmp(s, "window")) return 1;
+    fprintf(stderr, "unknown resolution mode \"%s\"; expected psp or window\n", s);
+    return -1;
+}
 
 #ifdef HAVE_SDL2
 
@@ -64,6 +74,9 @@ typedef void (APIENTRY *PFN_glTexParameteri)(GLenum, GLenum, GLint);
 typedef void (APIENTRY *PFN_glDeleteTextures)(GLsizei, const GLuint *);
 typedef void (APIENTRY *PFN_glDeleteFramebuffers)(GLsizei, const GLuint *);
 typedef void (APIENTRY *PFN_glDeleteRenderbuffers)(GLsizei, const GLuint *);
+typedef void (APIENTRY *PFN_glGetIntegerv)(GLenum, GLint *);
+typedef void (APIENTRY *PFN_glTexSubImage2D)(GLenum, GLint, GLint, GLint,
+                                          GLsizei, GLsizei, GLenum, GLenum, const void *);
 typedef GLenum (APIENTRY *PFN_glGetError)(void);
 typedef void (APIENTRY *PFN_glEnable)(GLenum);
 typedef void (APIENTRY *PFN_glDisable)(GLenum);
@@ -93,6 +106,8 @@ typedef void (APIENTRY *PFN_glCopyTexSubImage2D)(GLenum, GLint, GLint, GLint,
     X(PFN_glDeleteTextures,             glDeleteTextures) \
     X(PFN_glDeleteFramebuffers,         glDeleteFramebuffers) \
     X(PFN_glDeleteRenderbuffers,        glDeleteRenderbuffers) \
+    X(PFN_glGetIntegerv,                glGetIntegerv) \
+    X(PFN_glTexSubImage2D,              glTexSubImage2D) \
     X(PFN_glGetError,                   glGetError) \
     X(PFN_glEnable,                     glEnable) \
     X(PFN_glDisable,                    glDisable) \
@@ -202,10 +217,14 @@ typedef struct {
     int      used, dirty, configured;
     uint32_t addr, stride;
     int      fmt, w, h;
-    /* Adaptive aspect: the width the guest believes (w before the attachment
-     * grew), whether this is a widened display target, and the virtual PSP
-     * width it was allocated for. guest_w == w on every other target. */
-    int      guest_w, wide, wide_w;
+    /* Guest memory and coordinates retain their PSP extent. w/h describe GPU
+     * storage, including padding. Scene and HUD share sy; aspect changes only
+     * the scene's horizontal scale and the HUD's horizontal placement. */
+    int      guest_w, guest_h, wide, wide_w, display;
+    int      visible_w, visible_h;
+    double   sx, sy, ui_scale;
+    uint8_t *cpu_dirty;
+    int      cpu_pending;
     GLuint   fbo, colour, depth;
     int      stencil_valid, alpha_dirty;
 } rendertarget;
@@ -234,17 +253,24 @@ typedef struct {
 static struct {
     int      w, h;
     int      ready, failed;
-    int      adaptive_aspect;
+    int      adaptive_aspect, resolution;
+    int      pixel_w, pixel_h, max_size;
+    uint64_t resizes, cpu_uploads, rt_views;
+    int      exporting;
     unsigned long thread;
 
     GLuint   prog, vao, vbo;
     GLuint   stencil_prog, stencil_copy;
     GLint    s_mode, s_bit, s_value;
     int      stencil_copy_w, stencil_copy_h;
-    GLint    u_viewport, u_atest, u_aref, u_amask, u_preblend_src;
+    GLint    u_viewport, u_placement, u_ybias, u_atest, u_aref, u_amask, u_preblend_src;
     GLint    u_texenable, u_texfunc, u_tcc, u_double, u_env, u_tex;
     GLint    u_minfilter, u_magfilter, u_wraps, u_wrapt, u_miptop;
     GLint    u_fogenable, u_fogcolour;
+    GLint    u_texscale;
+    float    tex_sx, tex_sy;
+    GLuint   view_fbo, view_tex, copy_fbo;
+    int      view_w, view_h;
 
     uint32_t target_addr, target_stride;
     int      target_fmt;
@@ -278,7 +304,8 @@ static struct {
      * width, latched once per frame; g.w means the identity. batch_class is
      * the placement of the geometry now in the batch. The staging target
      * downsamples a wide attachment to guest width for the readback. */
-    int      wide_w, batch_class;
+    int      wide_w, batch_class, batch_glyph;
+    uint64_t glyph_draws;
     GLuint   stage_fbo, stage_tex;
     int      stage_w, stage_h;
     uint64_t class_scene, class_hud, hud_flushes, wide_allocs, wide_retired;
@@ -320,6 +347,7 @@ static void flush(void);
 static int  claim(void);
 static void readback_rt(int i);
 static void stencil_to_alpha(rendertarget *r);
+static void rt_import(rendertarget *r);
 
 static unsigned long this_thread(void) {
     return (unsigned long)pthread_self();
@@ -397,6 +425,7 @@ static const char *VS_SRC =
     "layout(location=5) in float a_tex_q;\n"
     "layout(location=6) in float a_lod16;\n"
     "uniform vec2 u_viewport;\n"
+    "uniform vec3 u_placement; uniform float u_ybias;\n"
     "out vec4 v_col;\n"
     /* gl_Position deliberately remains post-divide screen space with w=1 so
      * GL cannot alter the PSP coverage or depth already resolved by the GE.
@@ -406,12 +435,13 @@ static const char *VS_SRC =
     "out float v_fog;\n"
     "flat out int v_lod16;\n"
     "void main() {\n"
-    "    vec2 ndc = vec2( (a_pos.x / u_viewport.x) * 2.0 - 1.0,\n"
+    "    vec2 p = a_pos.xy * u_placement.xy + vec2(u_placement.z, 0);\n"
+    "    vec2 ndc = vec2( (p.x / u_viewport.x) * 2.0 - 1.0,\n"
     /* The PSP owns a pixel on its top edge; GL's lower-left half-open rule
      * owns the opposite horizontal edge after the Y flip. Move geometry by
      * one GL subpixel, sixteen times smaller than the PSP's 1/16-pixel vertex
      * grid, so exact horizontal ties land on the PSP-owned side. */
-    "                     1.0 - ((a_pos.y - 1.0 / 256.0) / u_viewport.y) * 2.0 );\n"
+    "                     1.0 - ((p.y - u_ybias) / u_viewport.y) * 2.0 );\n"
     /* Window depth arrives on the PSP's 0..65535 scale, already divided by
      * w by the interpreter. GL wants clip space, and with w = 1 the
      * perspective divide is the identity, so mapping to -1..1 here puts it
@@ -448,6 +478,7 @@ static const char *FS_SRC =
     "uniform int u_double;\n"
     "uniform vec3 u_env;\n"
     "uniform sampler2D u_tex;\n"
+    "uniform vec2 u_texscale;\n"
     "uniform int u_minfilter;\n"
     "uniform int u_magfilter;\n"
     "uniform int u_wraps;\n"
@@ -490,6 +521,7 @@ static const char *FS_SRC =
     "    return (t00 * w00 + t10 * w10 + t01 * w01 + t11 * w11) / 256;\n"
     "}\n"
     "vec4 sample_psp(vec2 uv) {\n"
+    "    uv *= u_texscale;\n"
     "    int lod = v_lod16;\n"
     "    bool linear = (((lod > 0 ? u_minfilter : u_magfilter) & 1) != 0);\n"
     "    if (u_minfilter < 4 || u_miptop <= 0)\n"
@@ -721,6 +753,8 @@ static int build_program(void) {
     p_glDeleteShader(vs);
     p_glDeleteShader(fs);
     g.u_viewport = p_glGetUniformLocation(g.prog, "u_viewport");
+    g.u_placement = p_glGetUniformLocation(g.prog, "u_placement");
+    g.u_ybias = p_glGetUniformLocation(g.prog, "u_ybias");
     g.u_atest    = p_glGetUniformLocation(g.prog, "u_atest");
     g.u_aref     = p_glGetUniformLocation(g.prog, "u_aref");
     g.u_amask    = p_glGetUniformLocation(g.prog, "u_amask");
@@ -731,6 +765,7 @@ static int build_program(void) {
     g.u_double    = p_glGetUniformLocation(g.prog, "u_double");
     g.u_env       = p_glGetUniformLocation(g.prog, "u_env");
     g.u_tex       = p_glGetUniformLocation(g.prog, "u_tex");
+    g.u_texscale  = p_glGetUniformLocation(g.prog, "u_texscale");
     g.u_minfilter = p_glGetUniformLocation(g.prog, "u_minfilter");
     g.u_magfilter = p_glGetUniformLocation(g.prog, "u_magfilter");
     g.u_wraps     = p_glGetUniformLocation(g.prog, "u_wraps");
@@ -746,6 +781,7 @@ static int build_program(void) {
  * several half-assembled combinations while a surface is being selected.  If
  * we allocated here, the first transient format would become permanent. */
 static int rt_for(uint32_t addr) {
+    addr &= PSP_ADDR_MASK;
     for (int i = 0; i < g.n_rts; i++)
         if (g.rts[i].addr == addr) return i;
     if (g.n_rts >= RT_MAX) { g.rt_overflow++; return g.cur_rt; }
@@ -776,112 +812,329 @@ static int rt_for(uint32_t addr) {
  * Both are viewports, not vertex transforms: the shader still maps guest x over
  * the guest width, so nothing is requantised. With wide_w == 480 every mapping
  * is the identity and the run is bit-identical to native. */
-static double rt_scale(const rendertarget *r) {
-    return r->wide ? (double)r->wide_w / (double)g.w : 1.0;
-}
-static int rt_off(const rendertarget *r) {
-    return r->wide ? (r->wide_w - g.w) / 2 : 0;
+static double rt_off(const rendertarget *r) {
+    if (!r->wide) return 0;
+    return g.resolution ? (r->visible_w - g.w * r->ui_scale) * 0.5
+                        : (r->wide_w - g.w) / 2;
 }
 static int rt_scene_w(const rendertarget *r) {
-    return r->wide ? (int)lround((double)r->guest_w * rt_scale(r)) : r->w;
+    return (int)lround(r->guest_w * r->sx);
 }
 
-/* Allocate a target from the complete state that exists at its first draw.
- *
- * A framebuffer register carries a row stride but no height.  The active
- * scissor supplies the drawn extent: this game's display pair is 512x272
- * (480 visible pixels plus padding), while its AC scratch surface is 256x128.
- * Keeping the padding in the attachment makes pixel x land at byte x in every
- * row, which is essential when the bytes are later reinterpreted as a texture.
- */
-static int rt_prepare(int i) {
-    rendertarget *r = &g.rts[i];
-    const int stride = g.target_stride ? (int)g.target_stride : g.w;
-    int w = stride;
-    int h = g.sc_valid ? g.sc_y1 + 1 : g.h;
-    if (g.sc_valid && g.sc_x1 + 1 > w) w = g.sc_x1 + 1;
-    if (w < 1) w = g.w;
-    if (h < 1) h = g.h;
-
-    if (r->configured) {
-        if (r->stride != (uint32_t)stride || r->fmt != g.target_fmt ||
-            r->w < w || r->h < h) {
-            static int said;
-            if (!said++)
-                fprintf(stderr, "gl: target %08X changed after its first draw "
-                                "(%ux%d fmt %d -> %dx%d fmt %d); keeping the "
-                                "original storage\n",
-                        r->addr, r->stride, r->h, r->fmt, w, h, g.target_fmt);
+/* One coherent drawable snapshot drives allocation for the next frame. */
+static void resolution_size(void) {
+    int w, h;
+    present_gl_drawable_size(&w, &h);
+    if (w <= 0 || h <= 0) return;
+    g.wide_w = g.w;
+    if (g.adaptive_aspect) {
+        long long wide = ((long long)g.h * w + h / 2) / h;
+        g.wide_w = (int)(wide < g.w ? g.w : wide > 8192 ? 8192 : wide);
+    }
+    g.pixel_w = g.wide_w; g.pixel_h = g.h;
+    if (!g.resolution) return;
+    if (g.adaptive_aspect && (long long)w * g.h >= (long long)h * g.w) {
+        g.pixel_w = w; g.pixel_h = h;
+    } else {
+        g.pixel_w = w;
+        g.pixel_h = (int)((long long)w * g.h / g.w);
+        if (g.pixel_h > h) {
+            g.pixel_h = h;
+            g.pixel_w = (int)((long long)h * g.w / g.h);
         }
-        return 0;
     }
+    if (g.pixel_w < 1) g.pixel_w = 1;
+    if (g.pixel_h < 1) g.pixel_h = 1;
+}
 
-    r->stride = (uint32_t)stride;
-    r->fmt = g.target_fmt;
-    r->guest_w = w;
-    r->wide = 0;
-    r->wide_w = g.w;
-    /* A display-sized target grows to the virtual width in adaptive mode. The
-     * scratch surface (a stride below the display's) stays 1x: it is read back
-     * byte for byte and reinterpreted through a palette. */
-    if (g.adaptive_aspect && g.wide_w > g.w && stride >= g.w) {
-        const double s = (double)g.wide_w / (double)g.w;
-        int aw = (int)ceil((double)w * s);
-        if ((g.wide_w - g.w) / 2 + w > aw) aw = (g.wide_w - g.w) / 2 + w;
-        w = aw;
-        r->wide = 1;
-        r->wide_w = g.wide_w;
-        g.wide_allocs++;
+static int pixel_edge(double x) { return (int)ceil(x - 0.5); }
+
+static void rt_layout(rendertarget *r) {
+    r->display = r->stride >= (uint32_t)g.w && r->guest_h >= g.h;
+    r->wide = r->display && g.adaptive_aspect && g.wide_w > g.w;
+    r->wide_w = r->wide ? g.wide_w : g.w;
+    r->visible_w = r->wide_w;
+    r->visible_h = g.h;
+    if (g.resolution && r->display) {
+        r->visible_w = g.pixel_w;
+        r->visible_h = g.pixel_h;
     }
-    r->w = w;
-    r->h = h;
+    r->sx = r->display ? (double)r->visible_w / g.w : 1.0;
+    r->sy = r->display ? (double)r->visible_h / g.h : 1.0;
+    r->ui_scale = r->sy;
+    double cap =
+        fmin((double)g.max_size / (r->guest_w * r->sx), (double)g.max_size / (r->guest_h * r->sy));
+    if (cap < 1.0) {
+        r->visible_w = (int)fmax(1, floor(r->visible_w * cap));
+        r->visible_h = (int)fmax(1, floor(r->visible_h * cap));
+        r->sx = (double)r->visible_w / g.w;
+        r->sy = (double)r->visible_h / g.h;
+        r->ui_scale *= cap;
+        fprintf(stderr, "gl: resolution capped to %dx%d by GL limit %d\n", r->visible_w,
+                r->visible_h, g.max_size);
+    }
+    r->w = (int)ceil(r->guest_w * r->sx);
+    r->h = (int)ceil(r->guest_h * r->sy);
+}
 
+static void rt_release(rendertarget *r) {
+    if (r->fbo) p_glDeleteFramebuffers(1, &r->fbo);
+    if (r->colour) p_glDeleteTextures(1, &r->colour);
+    if (r->depth) p_glDeleteRenderbuffers(1, &r->depth);
+    free(r->cpu_dirty);
+    r->fbo = r->colour = r->depth = 0;
+    r->cpu_dirty = NULL;
+    r->configured = 0;
+}
+
+static uint32_t decode_pixel(uint32_t v, int fmt) {
+    if (fmt == 3) return v;
+    unsigned red, green, blue, alpha;
+    if (fmt == 2) {
+        red = (v & 15) * 17;
+        green = ((v >> 4) & 15) * 17;
+        blue = ((v >> 8) & 15) * 17;
+        alpha = ((v >> 12) & 15) * 17;
+    } else {
+        red = v & 31;
+        red = (red << 3) | (red >> 2);
+        if (fmt == 0) {
+            green = (v >> 5) & 63;
+            green = (green << 2) | (green >> 4);
+            blue = (v >> 11) & 31;
+            alpha = 255;
+        } else {
+            green = (v >> 5) & 31;
+            green = (green << 3) | (green >> 2);
+            blue = (v >> 10) & 31;
+            alpha = (v & 0x8000) ? 255 : 0;
+        }
+        blue = (blue << 3) | (blue >> 2);
+    }
+    return red | (green << 8) | (blue << 16) | (alpha << 24);
+}
+
+static uint32_t pack_pixel(uint32_t rgba, int fmt) {
+    if (fmt == 3) return rgba;
+    unsigned r = rgba & 255, g = (rgba >> 8) & 255, b = (rgba >> 16) & 255, a = rgba >> 24;
+    if (fmt == 0) return (r >> 3) | ((g >> 2) << 5) | ((b >> 3) << 11);
+    if (fmt == 1) return (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10) | ((a >> 7) << 15);
+    return (r >> 4) | ((g >> 4) << 4) | ((b >> 4) << 8) | ((a >> 4) << 12);
+}
+
+static uint32_t guest_pixel(const rendertarget *r, int x, int y) {
+    if (x >= (int)r->stride) return 0;
+    const int bpp = r->fmt == 3 ? 4 : 2;
+    const void *p = psp_mem_ptr(r->addr + (uint32_t)(y * r->stride + x) * bpp, bpp);
+    uint32_t v = 0;
+    if (p) memcpy(&v, p, bpp);
+    return decode_pixel(v, r->fmt);
+}
+
+/* Track precise touched pixels, including a CPU store of the same byte value.
+ * Generation/byte comparisons alone miss such a store over newer GPU pixels. */
+static void rt_guest_write(uint32_t addr, uint32_t size) {
+    for (int i = 0; i < g.n_rts; i++) {
+        rendertarget *r = &g.rts[i];
+        if (!r->configured || !r->cpu_dirty || g.exporting == i + 1) continue;
+        const unsigned bpp = r->fmt == 3 ? 4 : 2;
+        const uint64_t end = (uint64_t)r->addr + (uint64_t)r->stride * r->guest_h * bpp;
+        if ((uint64_t)addr + size <= r->addr || addr >= end) continue;
+        const uint64_t first = addr > r->addr ? addr - r->addr : 0;
+        const uint64_t last =
+            (uint64_t)addr + size < end ? (uint64_t)addr + size - r->addr : end - r->addr;
+        for (uint64_t p = first / bpp; p < (last + bpp - 1) / bpp; p++) {
+            unsigned mask = 0;
+            for (unsigned b = 0; b < bpp; b++)
+                if (p * bpp + b >= first && p * bpp + b < last) mask |= 1u << b;
+            r->cpu_dirty[p] |= mask;
+        }
+        r->cpu_pending = 1;
+    }
+}
+
+static int rt_allocate(rendertarget *r, int inherit) {
     p_glGenFramebuffers(1, &r->fbo);
     p_glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
     p_glGenTextures(1, &r->colour);
     p_glBindTexture(GL_TEXTURE_2D, r->colour);
-    /* A newly allocated GL target must inherit the guest's alpha/stencil,
-     * including when the first draw only clears depth. Preserve RGB too. */
-    uint8_t *initial = NULL;
-    if (r->fmt == 3) {
+    uint32_t *initial = NULL;
+    if (inherit && (r->fmt == 3 || g.resolution)) {
         initial = calloc((size_t)r->w * r->h, 4);
-        if (!initial) return -1;
-        const int guest_cols = r->guest_w < (int)r->stride ? r->guest_w : (int)r->stride;
-        const size_t row_bytes = (size_t)guest_cols * 4;
-        const double s = rt_scale(r);
-        for (int y = 0; y < r->h; y++) {
-            const uint8_t *row = psp_mem_ptr(r->addr + (uint32_t)y * r->stride * 4u, row_bytes);
-            if (!row) continue;
-            uint8_t *dst = initial + (size_t)(r->h - 1 - y) * r->w * 4;
-            if (!r->wide) { memcpy(dst, row, row_bytes); continue; }
-            /* Nearest, column by column: the alpha byte is the stencil, and
-             * a filtered stretch would invent stencil values. */
-            for (int x = 0; x < r->w; x++) {
-                int sx = (int)((double)x / s);
-                if (sx >= guest_cols) sx = guest_cols - 1;
-                memcpy(dst + (size_t)x * 4, row + (size_t)sx * 4, 4);
-            }
+        if (!initial) {
+            rt_release(r);
+            return -1;
         }
+        for (int y = 0; y < r->h; y++)
+            for (int x = 0; x < r->w; x++) {
+                int gx = (int)((x + 0.5) / r->sx), gy = (int)((y + 0.5) / r->sy);
+                if (gx >= r->guest_w) gx = r->guest_w - 1;
+                if (gy >= r->guest_h) gy = r->guest_h - 1;
+                initial[(size_t)(r->h - 1 - y) * r->w + x] = guest_pixel(r, gx, gy);
+            }
     }
-    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, r->w, r->h, 0,
-                   GL_RGBA, GL_UNSIGNED_BYTE, initial);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, r->w, r->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, initial);
     free(initial);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                             GL_TEXTURE_2D, r->colour, 0);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->colour, 0);
     p_glGenRenderbuffers(1, &r->depth);
     p_glBindRenderbuffer(GL_RENDERBUFFER, r->depth);
     p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, r->w, r->h);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-                                GL_RENDERBUFFER, r->depth);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+                                r->depth);
     if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        fprintf(stderr, "gl: framebuffer for target %08X is incomplete\n", r->addr);
-        g.failed = 1;
+        fprintf(stderr, "gl: target %08X allocation %dx%d failed\n", r->addr, r->w, r->h);
+        rt_release(r);
         return -1;
     }
+    if (g.resolution) {
+        r->cpu_dirty = calloc((size_t)r->stride * r->guest_h, 1);
+        if (!r->cpu_dirty) {
+            rt_release(r);
+            return -1;
+        }
+    }
     r->configured = 1;
+    if (r->wide) g.wide_allocs++;
     return 0;
+}
+
+/* Guest reconfiguration reinterprets bytes; resizing preserves GPU history. */
+static int rt_prepare(int i) {
+    rendertarget *r = &g.rts[i];
+    const int stride = g.target_stride ? (int)g.target_stride : g.w;
+    int w = stride, h = g.sc_valid ? g.sc_y1 + 1 : g.h;
+    if (g.sc_valid && g.sc_x1 + 1 > w) w = g.sc_x1 + 1;
+    if (w < 1) w = g.w;
+    if (h < 1) h = g.h;
+    if (r->configured) {
+        if (r->stride == (uint32_t)stride && r->fmt == g.target_fmt && r->guest_w >= w &&
+            r->guest_h >= h)
+            return 0;
+        if (r->dirty || r->cpu_pending) readback_rt(i);
+        if (r->stride == (uint32_t)stride && r->fmt == g.target_fmt) {
+            if (w < r->guest_w) w = r->guest_w;
+            if (h < r->guest_h) h = r->guest_h;
+        }
+        rt_release(r);
+    }
+    r->stride = stride;
+    r->fmt = g.target_fmt;
+    r->guest_w = w;
+    r->guest_h = h;
+    r->dirty = r->alpha_dirty = r->stencil_valid = r->cpu_pending = 0;
+    rt_layout(r);
+    return rt_allocate(r, 1);
+}
+
+static void rt_import(rendertarget *r) {
+    if (!r->cpu_pending || !r->configured) return;
+    stencil_to_alpha(r);
+    uint32_t *row = malloc((size_t)r->w * 4), *values = malloc((size_t)r->stride * 4);
+    if (!row || !values) {
+        free(row);
+        free(values);
+        g.failed = 1;
+        return;
+    }
+    p_glBindTexture(GL_TEXTURE_2D, r->colour);
+    for (int y = 0; y < r->guest_h; y++) {
+        int gy0 = pixel_edge(y * r->sy), gy1 = pixel_edge((y + 1) * r->sy);
+        for (int x = 0; x < (int)r->stride;) {
+            if (!r->cpu_dirty[(size_t)y * r->stride + x]) {
+                x++;
+                continue;
+            }
+            const int start = x;
+            while (x < (int)r->stride && r->cpu_dirty[(size_t)y * r->stride + x]) x++;
+            int left = pixel_edge(start * r->sx), right = pixel_edge(x * r->sx);
+            if (right > r->w) right = r->w;
+            if (gy1 > r->h) gy1 = r->h;
+            if (right <= left || gy1 <= gy0) continue;
+            const int bpp = r->fmt == 3 ? 4 : 2;
+            const unsigned full = (1u << bpp) - 1;
+            int partial = 0;
+            for (int gx = start; gx < x; gx++) {
+                values[gx] = guest_pixel(r, gx, y);
+                if (r->cpu_dirty[(size_t)y * r->stride + gx] != full) partial = 1;
+            }
+            /* A byte write owns only those channels. Preserve every physical
+             * sample of the others, not just one resolved PSP pixel -- an
+             * alpha-only CPU write must not erase a fine RGB edge. Full-pixel
+             * uploads keep the fast path with no GPU read. */
+            uint32_t *previous = NULL;
+            if (partial) {
+                previous = malloc((size_t)(right - left) * (gy1 - gy0) * 4);
+                if (!previous) {
+                    free(row);
+                    free(values);
+                    g.failed = 1;
+                    return;
+                }
+                p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
+                p_glReadPixels(left, r->h - gy1, right - left, gy1 - gy0, GL_RGBA, GL_UNSIGNED_BYTE,
+                               previous);
+            }
+            for (int py = gy0; py < gy1; py++) {
+                for (int k = left; k < right; k++) {
+                    const int gx = (int)((k + 0.5) / r->sx);
+                    const unsigned mask = r->cpu_dirty[(size_t)y * r->stride + gx];
+                    uint32_t value = values[gx];
+                    if (mask != full) {
+                        uint32_t old = pack_pixel(
+                            previous[(size_t)(gy1 - 1 - py) * (right - left) + k - left], r->fmt);
+                        uint32_t cpu = pack_pixel(value, r->fmt), bits = 0;
+                        for (int b = 0; b < bpp; b++)
+                            if (mask & (1u << b)) bits |= 255u << (b * 8);
+                        value = decode_pixel((old & ~bits) | (cpu & bits), r->fmt);
+                    }
+                    row[k - left] = value;
+                }
+                p_glTexSubImage2D(GL_TEXTURE_2D, 0, left, r->h - 1 - py, right - left, 1, GL_RGBA,
+                                  GL_UNSIGNED_BYTE, row);
+            }
+            free(previous);
+        }
+    }
+    free(row);
+    free(values);
+    memset(r->cpu_dirty, 0, (size_t)r->stride * r->guest_h);
+    r->cpu_pending = 0;
+    r->stencil_valid = 0;
+    r->dirty = 1;
+    g.cpu_uploads++;
+}
+
+static void rt_resize_all(void) {
+    for (int i = 0; i < g.n_rts; i++) {
+        rendertarget *r = &g.rts[i];
+        if (!r->configured || !r->display) continue;
+        rendertarget next = *r;
+        rt_layout(&next);
+        if (r->w == next.w && r->h == next.h && r->wide_w == next.wide_w &&
+            r->visible_w == next.visible_w && r->visible_h == next.visible_h)
+            continue;
+        rt_import(r);
+        stencil_to_alpha(r);
+        next.fbo = next.colour = next.depth = 0;
+        next.cpu_dirty = NULL;
+        if (rt_allocate(&next, 0) != 0) continue; /* keep the working allocation */
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
+        p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, next.fbo);
+        p_glDisable(GL_SCISSOR_TEST);
+        p_glBlitFramebuffer(0, 0, r->w, r->h, 0, 0, next.w, next.h,
+                            GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT,
+                            GL_NEAREST);
+        next.stencil_valid = r->stencil_valid;
+        next.alpha_dirty = 0;
+        next.cpu_pending = 0;
+        next.dirty = r->dirty;
+        rt_release(r);
+        *r = next;
+        g.resizes++;
+        g.wide_retired++;
+    }
 }
 
 /* Claim the context, once, on whichever thread the GE turns out to be. Every
@@ -906,6 +1159,13 @@ static int claim(void) {
 
     if (present_gl_make_current() != 0 || gl_load() != 0) { g.failed = 1; return -1; }
     g.thread = me;
+    GLint tex_limit, rb_limit, viewport_limit[2];
+    p_glGetIntegerv(GL_MAX_TEXTURE_SIZE, &tex_limit);
+    p_glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &rb_limit);
+    p_glGetIntegerv(GL_MAX_VIEWPORT_DIMS, viewport_limit);
+    g.max_size = tex_limit < rb_limit ? tex_limit : rb_limit;
+    if (viewport_limit[0] < g.max_size) g.max_size = viewport_limit[0];
+    if (viewport_limit[1] < g.max_size) g.max_size = viewport_limit[1];
 
     if (build_program() != 0) { g.failed = 1; return -1; }
     if (build_stencil_program() != 0) { g.failed = 1; return -1; }
@@ -957,7 +1217,8 @@ static int claim(void) {
     fprintf(stderr, "gl: context claimed on thread %lu, %dx%d target\n",
             me, g.w, g.h);
     g.ready = 1;
-    if (g.adaptive_aspect) g.wide_w = present_aspect_wide_width();
+    resolution_size();
+    if (g.resolution) psp_mem_set_write_observer(rt_guest_write);
     /* Whatever the GE last named, or the primary display buffer if it has not
      * named one yet -- a target has to exist before the first draw. */
     g.cur_rt = rt_for(g.target_addr ? g.target_addr : 0x04000000u);
@@ -970,11 +1231,16 @@ static int gl_init(int w, int h) {
     /* No GL here on purpose: this runs on boot.c's thread, not the GE's. */
     g.w = w; g.h = h;
     g.wide_w = w;
+    g.pixel_w = w; g.pixel_h = h;
+    g.resolution = render_gl_resolution_mode();
+    if (g.resolution < 0) return -1;
     g.adaptive_aspect = present_adaptive_aspect();
     return 0;
 }
 
-static void gl_shutdown(void) { }
+static void gl_shutdown(void) {
+    if (g.resolution) psp_mem_set_write_observer(NULL);
+}
 
 static void gl_target(uint32_t addr, uint32_t stride, int fmt) {
     /* No claim() here: set_target is the one setter ge.c calls while the
@@ -1123,7 +1389,7 @@ static void cache_record(texcache_entry *e, const psp_tex_state *t, int top,
     e->last_used = g.cache_clock;
 }
 
-static GLuint texcache_get(const psp_tex_state *t) {
+static GLuint texcache_native(const psp_tex_state *t) {
     if (!t->addr || t->w <= 0 || t->h <= 0) return 0;
     g.tex_requests++;
     const int top = texture_top(t);
@@ -1138,7 +1404,7 @@ static GLuint texcache_get(const psp_tex_state *t) {
         if (g.rts[i].used && g.rts[i].addr == t->addr) {
             g.tex_from_rt++;
             rendertarget *r = &g.rts[i];
-            if (r->configured && r->fmt == 3 && t->fmt == 3 &&
+            if (!g.resolution && r->configured && r->fmt == 3 && t->fmt == 3 &&
                 !t->swizzled && t->stride == r->stride &&
                 t->w == r->w && t->h == r->h && top == 0) {
                 g.bound_top = 0;
@@ -1274,12 +1540,89 @@ upload: {
 }
 }
 
+/* A view has the texture's declared extent, populated from guest bytes and
+ * overlaid with all compatible GPU-owned rows. Its top row is texture row 0,
+ * unlike a render attachment. Snapshotting also makes self-composites safe. */
+static GLuint texcache_get(const psp_tex_state *t) {
+    g.tex_sx = g.tex_sy = 1;
+    int hit = 0;
+    double sx = 1, sy = 1;
+    const uint32_t base = t->addr & PSP_ADDR_MASK;
+    const uint64_t end = (uint64_t)base + (uint64_t)t->stride * t->h * (t->fmt == 3 ? 4 : 2);
+    if (g.resolution)
+        for (int i = 0; i < g.n_rts; i++) {
+            rendertarget *r = &g.rts[i];
+            const uint64_t re =
+                (uint64_t)r->addr + (uint64_t)r->stride * r->guest_h * (r->fmt == 3 ? 4 : 2);
+            if (!r->configured || base >= re || end <= r->addr) continue;
+            if (r->dirty || r->cpu_pending) {
+                readback_rt(i);
+                r->dirty = 0;
+            }
+            if (t->fmt == 3 && r->fmt == 3 && !t->swizzled && texture_top(t) == 0 &&
+                t->stride == r->stride &&
+                ((int64_t)r->addr - base) % ((int64_t)t->stride * 4) == 0) {
+                hit = 1;
+                if (r->sx > sx) sx = r->sx;
+                if (r->sy > sy) sy = r->sy;
+            }
+        }
+    GLuint native = texcache_native(t);
+    if (!hit || !native) return native;
+    const int w = (int)ceil(t->w * sx), h = (int)ceil(t->h * sy);
+    if (w > g.max_size || h > g.max_size || w < 1 || h < 1) return native;
+    if (!g.view_fbo) {
+        p_glGenFramebuffers(1, &g.view_fbo);
+        p_glGenFramebuffers(1, &g.copy_fbo);
+        p_glGenTextures(1, &g.view_tex);
+    }
+    p_glBindTexture(GL_TEXTURE_2D, g.view_tex);
+    if (g.view_w != w || g.view_h != h) {
+        p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        g.view_w = w;
+        g.view_h = h;
+    }
+    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g.view_fbo);
+    p_glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.view_tex,
+                             0);
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g.copy_fbo);
+    p_glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, native, 0);
+    p_glDisable(GL_SCISSOR_TEST);
+    p_glBlitFramebuffer(0, 0, t->w, t->h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    for (int i = 0; i < g.n_rts; i++) {
+        rendertarget *r = &g.rts[i];
+        if (!r->configured || r->fmt != 3 || t->stride != r->stride) continue;
+        const int64_t delta = (int64_t)r->addr - base, pitch = (int64_t)t->stride * 4;
+        if (delta % pitch) continue;
+        const int row = (int)(delta / pitch);
+        const int y0 = row < 0 ? -row : 0;
+        const int y1 = row + r->guest_h > t->h ? t->h - row : r->guest_h;
+        if (y0 >= y1) continue;
+        const int cols = t->w < r->guest_w ? t->w : r->guest_w;
+        rt_import(r);
+        stencil_to_alpha(r);
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
+        p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g.view_fbo);
+        p_glDisable(GL_SCISSOR_TEST);
+        p_glBlitFramebuffer(0, r->h - pixel_edge(y0 * r->sy), pixel_edge(cols * r->sx),
+                            r->h - pixel_edge(y1 * r->sy), 0, pixel_edge((row + y0) * sy),
+                            pixel_edge(cols * sx), pixel_edge((row + y1) * sy), GL_COLOR_BUFFER_BIT,
+                            GL_NEAREST);
+    }
+    g.tex_sx = (float)sx;
+    g.tex_sy = (float)sy;
+    g.bound_top = 0;
+    g.rt_views++;
+    return g.view_tex;
+}
+
 static void gl_texture(const psp_tex_state *t) {
     if (claim() != 0) return;
     flush();
     g.tex = *t;
     g.tex_enable = t->addr != 0;
     g.bound_top = 0;
+    g.tex_sx = g.tex_sy = 1;
     const uint64_t bind_t0 = psp_os_mono_ns();
     g.bound = g.tex_enable ? texcache_get(t) : 0;
     g.tex_bind_ns += psp_os_mono_ns() - bind_t0;
@@ -1329,11 +1672,12 @@ static void reserve_vertices(size_t n) {
 
 static void push(const psp_vertex *v, int lod16) {
     float *o = g.batch + g.batch_n * FLOATS_PER_VERT;
-    /* 12.4 fixed point to pixels. The quarter-pixel this throws away is the
-     * PSP's own precision, not ours -- see ROADMAP M7 on why that caps the
-     * backend at 1x. */
-    o[0] = (float)v->x / (float)PSP_SUBPX;
-    o[1] = (float)v->y / (float)PSP_SUBPX;
+    /* The reference path keeps PSP quantization. Enhanced display targets can
+     * use the float position retained by the GE; byte-interpreted scratch
+     * surfaces continue using the exact 1x coordinate contract. */
+    const int precise = g.resolution && g.rts[g.cur_rt].display && v->precise;
+    o[0] = precise ? v->precise_x : (float)v->x / PSP_SUBPX;
+    o[1] = precise ? v->precise_y : (float)v->y / PSP_SUBPX;
     o[2] = v->z / 65535.0f;                /* the PSP's window depth scale */
     o[3] = (float)( v->rgba        & 0xFF) / 255.0f;
     o[4] = (float)((v->rgba >>  8) & 0xFF) / 255.0f;
@@ -1397,6 +1741,11 @@ static void push_sprite(const psp_vertex *v) {
     b.x = v[1].x; b.y = v[0].y;
     c.x = v[1].x; c.y = v[1].y;
     d.x = v[0].x; d.y = v[1].y;
+    a.precise_x = d.precise_x = v[0].precise_x;
+    a.precise_y = b.precise_y = v[0].precise_y;
+    b.precise_x = c.precise_x = v[1].precise_x;
+    c.precise_y = d.precise_y = v[1].precise_y;
+    a.precise = b.precise = c.precise = d.precise = v[0].precise && v[1].precise;
     a.z = b.z = c.z = d.z = v[0].z;
     /* A sprite's two-corner mapping is affine even when its endpoints came
      * through the transform pipeline.  The software rectangle path has the
@@ -1433,15 +1782,49 @@ static void push_sprite(const psp_vertex *v) {
  * pass through the normal texture, alpha, depth, stencil and blend pipeline. */
 static void push_point_sample(const psp_vertex *v, void *opaque) {
     psp_vertex a = *v, b = *v, c = *v, d = *v;
+    a.precise = b.precise = c.precise = d.precise = 0;
     const int x = (int)floorf((float)v->x / PSP_SUBPX);
     const int y = (int)floorf((float)v->y / PSP_SUBPX);
-    if (x < 0 || y < 0 || x >= g.rts[g.cur_rt].guest_w || y >= g.rts[g.cur_rt].h) return;
+    if (x < 0 || y < 0 || x >= g.rts[g.cur_rt].guest_w || y >= g.rts[g.cur_rt].guest_h) return;
     a.x = d.x = x * PSP_SUBPX; b.x = c.x = a.x + PSP_SUBPX;
     a.y = b.y = y * PSP_SUBPX; c.y = d.y = a.y + PSP_SUBPX;
     const int lod16 = *(const int *)opaque;
     reserve_vertices(6);
     push(&a, lod16); push(&b, lod16); push(&c, lod16);
     push(&a, lod16); push(&c, lod16); push(&d, lod16);
+}
+
+/* Last Raven's body font: 512x512 CLUT4 atlas, axis-aligned 13-pixel-high
+ * glyph triangles with a 1:1 texel mapping. At 1x LINEAR samples texel centres
+ * exactly. At higher resolution it interpolates the bitmap's already shaded
+ * edges again, reducing stroke contrast. Preserve those texels with NEAREST.
+ * Recognize the draw rather than an allocation address (which changes across
+ * menus). This policy belongs to the game host, not the PSP sampler. */
+static int bitmap_glyph_draw(int prim, const psp_vertex *v, int count) {
+    const rendertarget *r = &g.rts[g.cur_rt];
+    if (!g.resolution || !r->display || r->sy <= 1.0 || !g.tex_enable || g.tex.fmt != 4 ||
+        g.tex.w != 512 || g.tex.h != 512 || g.bound_top || prim != PSP_PRIM_TRIANGLES ||
+        count <= 0 || count % 3 || (g.z_test && g.z_func != 1))
+        return 0;
+    for (int i = 0; i < count; i += 3) {
+        int x0 = v[i].x, x1 = x0, y0 = v[i].y, y1 = y0;
+        const float du = v[i].u - (float)v[i].x / PSP_SUBPX;
+        const float dv = v[i].v - (float)v[i].y / PSP_SUBPX;
+        for (int j = i; j < i + 3; j++) {
+            if (!v[j].screen_space || fabsf(v[j].tex_q - 1.0f) > 0.0001f ||
+                fabsf(v[j].u - (float)v[j].x / PSP_SUBPX - du) > 0.01f ||
+                fabsf(v[j].v - (float)v[j].y / PSP_SUBPX - dv) > 0.01f)
+                return 0;
+            if (v[j].x < x0) x0 = v[j].x;
+            if (v[j].x > x1) x1 = v[j].x;
+            if (v[j].y < y0) y0 = v[j].y;
+            if (v[j].y > y1) y1 = v[j].y;
+        }
+        if (y1 - y0 != 13 * PSP_SUBPX || x1 - x0 <= 0 || x1 - x0 > 13 * PSP_SUBPX) return 0;
+        for (int j = i; j < i + 3; j++)
+            if ((v[j].x != x0 && v[j].x != x1) || (v[j].y != y0 && v[j].y != y1)) return 0;
+    }
+    return 1;
 }
 
 static void gl_draw(int prim, const psp_vertex *v, int count) {
@@ -1453,7 +1836,10 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
         if (g.target_fmt == 3 && (!r->configured || r->fmt == 3)) g.stencil_draws++;
         else g.unsupported_stencil_draws++;
     }
-    if (prim <= PSP_PRIM_LINE_STRIP && rt_prepare(g.cur_rt) != 0) return;
+    if ((g.resolution || prim <= PSP_PRIM_LINE_STRIP) && rt_prepare(g.cur_rt) != 0) return;
+    const int glyph = bitmap_glyph_draw(prim, v, count);
+    if (glyph != g.batch_glyph) { flush(); g.batch_glyph = glyph; }
+    if (glyph) g.glyph_draws++;
 
     /* Adaptive aspect: place this draw. SCENE is anything with projected
      * geometry, and any screen-space draw spanning the full guest width --
@@ -1505,7 +1891,7 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
         const int x0 = g.sc_valid && g.sc_x0 > 0 ? g.sc_x0 : 0;
         const int y0 = g.sc_valid && g.sc_y0 > 0 ? g.sc_y0 : 0;
         const int x1 = g.sc_valid && g.sc_x1 < r->guest_w - 1 ? g.sc_x1 : r->guest_w - 1;
-        const int y1 = g.sc_valid && g.sc_y1 < r->h - 1 ? g.sc_y1 : r->h - 1;
+        const int y1 = g.sc_valid && g.sc_y1 < r->guest_h - 1 ? g.sc_y1 : r->guest_h - 1;
         for (int i = 0; i + 1 < count; i += prim == PSP_PRIM_LINES ? 2 : 1) {
             int lod16 = psp_render_line_lod16(&g.tex, &v[i], &v[i + 1]);
             psp_render_walk_line(&v[i], &v[i + 1], x0, y0, x1, y1, push_point_sample, &lod16);
@@ -1651,22 +2037,23 @@ static void apply_state(void) {
 
     if (g.sc_valid) {
         p_glEnable(GL_SCISSOR_TEST);
-        /* GE corners are inclusive and top-left; GL's origin is bottom-left.
-         * On a wide target the x edges follow the batch's placement. */
         const rendertarget *r = &g.rts[g.cur_rt];
-        int x0 = g.sc_x0, x1 = g.sc_x1;
-        if (r->wide && g.batch_class == CLASS_HUD) {
-            x0 += rt_off(r);
-            x1 += rt_off(r);
-        } else if (r->wide) {
-            const double s = rt_scale(r);
-            x0 = (int)floor((double)x0 * s);
-            x1 = (int)ceil((double)(x1 + 1) * s) - 1;
+        const int hud = r->wide && g.batch_class == CLASS_HUD;
+        const double sx = hud ? r->ui_scale : r->sx;
+        const double sy = hud ? r->ui_scale : r->sy;
+        const double off = hud ? rt_off(r) : 0;
+        int x0, x1, y0, y1;
+        if (g.resolution) {
+            x0 = pixel_edge(g.sc_x0*sx+off);
+            x1 = pixel_edge((g.sc_x1+1)*sx+off);
+            y0 = pixel_edge(g.sc_y0*sy);
+            y1 = pixel_edge((g.sc_y1+1)*sy);
+        } else {
+            x0 = (int)floor(g.sc_x0*sx+off);
+            x1 = (int)ceil((g.sc_x1+1)*sx+off);
+            y0 = g.sc_y0; y1 = g.sc_y1+1;
         }
-        const int w = x1 - x0 + 1, h = g.sc_y1 - g.sc_y0 + 1;
-        const int target_h = r->h;
-        p_glScissor(x0, target_h - g.sc_y0 - h,
-                    w > 0 ? w : 0, h > 0 ? h : 0);
+        p_glScissor(x0, r->h-y1, x1>x0?x1-x0:0, y1>y0?y1-y0:0);
     } else {
         p_glDisable(GL_SCISSOR_TEST);
     }
@@ -1721,8 +2108,9 @@ static void apply_state(void) {
                            (float)((g.tex.env >>  8) & 0xFF) / 255.0f,
                            (float)((g.tex.env >> 16) & 0xFF) / 255.0f);
     p_glUniform1i(g.u_tex, 0);
-    p_glUniform1i(g.u_minfilter, g.tex.min_filter);
-    p_glUniform1i(g.u_magfilter, g.tex.mag_filter);
+    p_glUniform2f(g.u_texscale, g.tex_sx, g.tex_sy);
+    p_glUniform1i(g.u_minfilter, g.batch_glyph ? g.tex.min_filter & ~1 : g.tex.min_filter);
+    p_glUniform1i(g.u_magfilter, g.batch_glyph ? g.tex.mag_filter & ~1 : g.tex.mag_filter);
     p_glUniform1i(g.u_wraps, g.tex.wrap_s ? 1 : 0);
     p_glUniform1i(g.u_wrapt, g.tex.wrap_t ? 1 : 0);
     p_glUniform1i(g.u_miptop, g.bound_top);
@@ -1739,19 +2127,36 @@ static void apply_state(void) {
     p_glUniform1i(g.u_amask, g.bs.alpha_mask);
 }
 
+static void apply_placement(const rendertarget *r) {
+    const int hud = r->wide && g.batch_class == CLASS_HUD;
+    p_glUseProgram(g.prog);
+    if (g.resolution) {
+        p_glViewport(0, 0, r->w, r->h);
+        p_glUniform2f(g.u_viewport, (float)r->w, (float)r->h);
+        p_glUniform3f(g.u_placement, hud?r->ui_scale:r->sx,
+                      hud?r->ui_scale:r->sy, hud?rt_off(r):0);
+    } else {
+        p_glViewport(hud?(int)rt_off(r):0, 0, hud?r->guest_w:rt_scene_w(r), r->h);
+        p_glUniform2f(g.u_viewport, (float)r->guest_w, (float)r->guest_h);
+        p_glUniform3f(g.u_placement, 1, 1, 0);
+    }
+    p_glUniform1f(g.u_ybias, 1.0f/256.0f);
+}
+
 static void flush(void) {
     if (!g.ready || g.batch_n == 0) return;
     if (rt_prepare(g.cur_rt) != 0) { g.batch_n = 0; return; }
     rendertarget *r = &g.rts[g.cur_rt];
     gpu_query_begin_frame();
+    rt_import(r);
     /* Clear-mode alpha writes invalidate the hardware stencil. Synchronise
      * pending stencil first so a scissored alpha clear preserves the rest. */
     if (g.bs.write_alpha || uses_dest_alpha()) stencil_to_alpha(r);
     if (g.bs.stencil_test) alpha_to_stencil(r);
     p_glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
     r->dirty = 1;
-    /* Placement is a viewport, not a vertex transform (see rt_scale). The
-     * shader keeps mapping guest x over the guest width. */
+    /* Retain the aspect diagnostics; apply_placement sets the final viewport
+     * and, in window-resolution mode, the physical coordinate transform. */
     if (r->wide && g.batch_class == CLASS_HUD) {
         p_glViewport(rt_off(r), 0, r->guest_w, r->h);
         g.hud_flushes++;
@@ -1788,7 +2193,7 @@ static void flush(void) {
         p_glViewport(0, 0, rt_scene_w(r), r->h);
     }
     p_glUseProgram(g.prog);
-    p_glUniform2f(g.u_viewport, (float)r->guest_w, (float)r->h);
+    apply_placement(r);
     apply_state();
     p_glBindVertexArray(g.vao);
     p_glBindBuffer(GL_ARRAY_BUFFER, g.vbo);
@@ -1804,7 +2209,7 @@ static void flush(void) {
         for (size_t i = 0; i < g.batch_n; i += 3) {
             if (i) {
                 stencil_to_alpha(r);
-                p_glUseProgram(g.prog);
+                apply_placement(r);
                 apply_state();
             }
             p_glDrawArrays(GL_TRIANGLES, (GLint)i, 3);
@@ -1863,15 +2268,17 @@ static int stage_prepare(int w, int h) {
 static void readback_rt(int i) {
     rendertarget *r = &g.rts[i];
     if (!r->configured || !r->addr || !r->stride) return;
+    rt_import(r);
     const int bpp = r->fmt == 3 ? 4 : 2;
-    const size_t bytes = (size_t)r->stride * (size_t)r->h * (size_t)bpp;
+    const size_t bytes = (size_t)r->stride * (size_t)r->guest_h * (size_t)bpp;
     void *dst = psp_mem_ptr(r->addr, bytes);
     if (!dst) return;
 
     static uint8_t *pixels;
     static size_t capacity;
-    const int rw = r->wide ? r->guest_w : r->w;
-    const size_t need = (size_t)rw * (size_t)r->h * 4u;
+    const int rw = r->guest_w;
+    const int rh = r->guest_h;
+    const size_t need = (size_t)rw * (size_t)r->guest_h * 4u;
     if (need > capacity) {
         uint8_t *larger = realloc(pixels, need);
         if (!larger) return;
@@ -1881,28 +2288,28 @@ static void readback_rt(int i) {
 
     const uint64_t readback_t0 = psp_os_mono_ns();
     stencil_to_alpha(r);
-    if (r->wide) {
+    if (r->w != rw || r->h != rh) {
         /* Guest memory keeps its 480x272 picture: the wide attachment is
          * resolved to guest width first. Nearest, because the alpha byte is
          * the stencil and the bytes are re-read as palette indices; and the
          * HUD comes out narrower here, which is the guest's view of it. */
-        if (stage_prepare(rw, r->h) != 0) return;
+        if (stage_prepare(rw, rh) != 0) return;
         p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
         p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g.stage_fbo);
         p_glDisable(GL_SCISSOR_TEST);
         p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        p_glBlitFramebuffer(0, 0, rt_scene_w(r), r->h, 0, 0, rw, r->h,
+        p_glBlitFramebuffer(0, 0, rt_scene_w(r), r->h, 0, 0, rw, rh,
                             GL_COLOR_BUFFER_BIT, GL_NEAREST);
         p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g.stage_fbo);
     } else {
         p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
     }
-    p_glReadPixels(0, 0, rw, r->h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    p_glReadPixels(0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
     uint8_t *out = (uint8_t *)dst;
     const int copy_w = rw < (int)r->stride ? rw : (int)r->stride;
-    for (int y = 0; y < r->h; y++) {
-        const uint8_t *row = pixels + (size_t)(r->h - 1 - y) * (size_t)rw * 4u;
+    for (int y = 0; y < rh; y++) {
+        const uint8_t *row = pixels + (size_t)(rh - 1 - y) * (size_t)rw * 4u;
         if (r->fmt == 3) {
             memcpy(out + (size_t)y * r->stride * 4u, row, (size_t)copy_w * 4u);
             continue;
@@ -1927,7 +2334,9 @@ static void readback_rt(int i) {
     /* The raw pointer deliberately avoids one mark per output pixel. One range
      * mark after conversion gives every texture overlapping this target the
      * same precise invalidation signal. */
+    g.exporting = i+1;
     psp_mem_mark_write(r->addr, (uint32_t)bytes);
+    g.exporting = 0;
     g.readbacks++;
     g.readback_ns += psp_os_mono_ns() - readback_t0;
 }
@@ -2014,17 +2423,20 @@ static void gl_present(void) {
         return;
     }
     rendertarget *shown = &g.rts[g.cur_rt];
+    rt_import(shown);
     /* The picture is 480 guest pixels wide, or the virtual width they were
      * spread over. The fit is uniform either way: a wide target has the
      * window's shape by construction, so its letterbox is only the rounding. */
     const int pic_w = shown->wide ? shown->wide_w : g.w;
-    const int src_w = shown->wide ? shown->wide_w : (shown->w < g.w ? shown->w : g.w);
-    const int src_h = shown->h < g.h ? shown->h : g.h;
+    const int src_w = shown->display ? shown->visible_w : (shown->w < g.w ? shown->w : g.w);
+    const int src_h = shown->display ? shown->visible_h : (shown->h < g.h ? shown->h : g.h);
     int out_w = draw_w;
-    int out_h = (int)((long long)draw_w * g.h / pic_w);
+    int out_h = (int)((long long)draw_w * (g.resolution?src_h:g.h) /
+                     (g.resolution?src_w:pic_w));
     if (out_h > draw_h) {
         out_h = draw_h;
-        out_w = (int)((long long)draw_h * pic_w / g.h);
+        out_w = (int)((long long)draw_h * (g.resolution?src_w:pic_w) /
+                      (g.resolution?src_h:g.h));
     }
     const int out_x = (draw_w - out_w) / 2;
     const int out_y = (draw_h - out_h) / 2;
@@ -2034,7 +2446,7 @@ static void gl_present(void) {
     p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     p_glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     p_glClear(GL_COLOR_BUFFER_BIT);
-    p_glBlitFramebuffer(0, 0, src_w, src_h,
+    p_glBlitFramebuffer(0, shown->h-src_h, src_w, shown->h,
                         out_x, out_y, out_x + out_w, out_y + out_h,
                         GL_COLOR_BUFFER_BIT, GL_LINEAR);
     gl_shot(draw_w, draw_h);
@@ -2047,37 +2459,15 @@ static void gl_present(void) {
      * made true rather than guessing at one. */
     int rendered = 0;
     for (int i = 0; i < g.n_rts; i++) {
-        if (!g.rts[i].dirty) continue;
+        if (!g.rts[i].dirty && !g.rts[i].cpu_pending) continue;
         readback_rt(i);
         g.rts[i].dirty = 0;
         rendered = 1;
     }
     gpu_query_poll();
 
-    /* Latch the virtual width for the next frame, and retire the display
-     * targets allocated for another one. Everything drawn was just read back,
-     * so the reallocation restores it from guest memory. A frame boundary is
-     * the one place this can happen without tearing a batch. */
-    if (g.adaptive_aspect) {
-        const int want = present_aspect_wide_width();
-        if (want != g.wide_w) {
-            g.wide_w = want;
-            for (int i = 0; i < g.n_rts; i++) {
-                rendertarget *r = &g.rts[i];
-                if (!r->configured || r->stride < (uint32_t)g.w) continue;
-                if (r->wide ? r->wide_w == want : want <= g.w) continue;
-                if (r->dirty) { readback_rt(i); r->dirty = 0; }
-                p_glDeleteFramebuffers(1, &r->fbo);
-                p_glDeleteTextures(1, &r->colour);
-                p_glDeleteRenderbuffers(1, &r->depth);
-                r->fbo = r->colour = r->depth = 0;
-                r->configured = 0;
-                r->stencil_valid = 0;
-                r->alpha_dirty = 0;
-                g.wide_retired++;
-            }
-        }
-    }
+    resolution_size();
+    rt_resize_all();
     if (g.rts[g.cur_rt].configured)
         p_glBindFramebuffer(GL_FRAMEBUFFER, g.rts[g.cur_rt].fbo);
     /* This game calls sceDisplaySetFrameBuf twice per rendered frame. Counting
@@ -2086,20 +2476,50 @@ static void gl_present(void) {
     if (rendered) note_frame_time();
 }
 
+unsigned char *render_gl_capture(uint32_t addr, int *w, int *h) {
+    if (claim() != 0) return NULL;
+    flush();
+    for (int i = 0; i < g.n_rts; i++) {
+        rendertarget *r = &g.rts[i];
+        if (!r->configured || r->addr != (addr & PSP_ADDR_MASK)) continue;
+        rt_import(r);
+        stencil_to_alpha(r);
+        uint8_t *out = malloc((size_t)r->w * r->h * 4), *row = malloc((size_t)r->w * 4);
+        if (!out || !row) {
+            free(out);
+            free(row);
+            return NULL;
+        }
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
+        p_glReadPixels(0, 0, r->w, r->h, GL_RGBA, GL_UNSIGNED_BYTE, out);
+        for (int y = 0; y < r->h / 2; y++) {
+            uint8_t *a = out + (size_t)y * r->w * 4, *b = out + (size_t)(r->h - 1 - y) * r->w * 4;
+            memcpy(row, a, (size_t)r->w * 4);
+            memcpy(a, b, (size_t)r->w * 4);
+            memcpy(b, row, (size_t)r->w * 4);
+        }
+        free(row);
+        *w = r->w;
+        *h = r->h;
+        return out;
+    }
+    return NULL;
+}
+
 static const psp_render_backend gl_backend = {
-    .name        = "gl",
-    .init        = gl_init,
-    .shutdown    = gl_shutdown,
-    .set_target  = gl_target,
+    .name = "gl",
+    .init = gl_init,
+    .shutdown = gl_shutdown,
+    .set_target = gl_target,
     .set_scissor = gl_scissor,
     .set_texture = gl_texture,
-    .set_clut    = gl_clut,
-    .set_depth   = gl_depth,
-    .set_blend   = gl_blend,
-    .set_fog     = gl_fog,
-    .draw        = gl_draw,
-    .finish      = gl_finish,
-    .present     = gl_present,
+    .set_clut = gl_clut,
+    .set_depth = gl_depth,
+    .set_blend = gl_blend,
+    .set_fog = gl_fog,
+    .draw = gl_draw,
+    .finish = gl_finish,
+    .present = gl_present,
 };
 
 const psp_render_backend *render_gl_backend(void) { return &gl_backend; }
@@ -2119,6 +2539,11 @@ void render_gl_report(FILE *out) {
                     g.rts[i].w, g.rts[i].h, g.rts[i].stride, g.rts[i].fmt);
         else
             fprintf(out, " %08X(unused)", g.rts[i].addr);
+    if (g.resolution)
+        fprintf(out, "\n          resolution: window %dx%d, %llu resize(s), %llu CPU upload(s), %llu GPU texture view(s), %llu bitmap font draw(s)",
+                g.pixel_w, g.pixel_h, (unsigned long long)g.resizes,
+                (unsigned long long)g.cpu_uploads, (unsigned long long)g.rt_views,
+                (unsigned long long)g.glyph_draws);
     if (g.adaptive_aspect)
         fprintf(out, "\n          aspect: virtual width %d (x%.4f), %llu scene draw(s),"
                      " %llu HUD draw(s) in %llu batch(es), HUD hazards depth %llu"
@@ -2238,5 +2663,8 @@ void render_gl_report(FILE *out) {
 
 const psp_render_backend *render_gl_backend(void) { return NULL; }
 void render_gl_report(FILE *out) { (void)out; }
+unsigned char *render_gl_capture(uint32_t addr, int *w, int *h) {
+    (void)addr; (void)w; (void)h; return NULL;
+}
 
 #endif

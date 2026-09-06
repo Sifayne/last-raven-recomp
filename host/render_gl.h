@@ -18,6 +18,13 @@
 
 const psp_render_backend *render_gl_backend(void);
 
+/* Validate PSPRECOMP_RESOLUTION. 0 is PSP, 1 is window, -1 is invalid. */
+int render_gl_resolution_mode(void);
+
+/* Read a target's physical RGBA pixels, top-left first, for renderer checks
+ * and captures. Call on the GE/context thread after finish(). Caller frees. */
+unsigned char *render_gl_capture(uint32_t addr, int *w, int *h);
+
 /* One line for the end-of-run summary: whether it ran, and what it drew. */
 void render_gl_report(FILE *out);
 

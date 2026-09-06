@@ -41,6 +41,8 @@ static inline int present_start(void) {
 void  present_want_gl(void);
 int   present_gl_make_current(void);
 void  present_gl_drawable_size(int *w, int *h);
+/* Queue a window resize on the SDL thread; useful for settings and checks. */
+void  present_request_window_size(int w, int h);
 /* PSPRECOMP_ASPECT=window is deliberately owned by the window layer: both the
  * game-camera replacement and the final GL blit ask the same question, rather
  * than growing two parsers which can disagree. */
@@ -62,6 +64,7 @@ static inline void  present_gl_drawable_size(int *w, int *h) {
     if (h) *h = 0;
 }
 static inline int   present_adaptive_aspect(void) { return 0; }
+static inline void  present_request_window_size(int w, int h) { (void)w; (void)h; }
 static inline int   present_aspect_wide_width(void) { return 480; }
 static inline void  present_gl_swap(void) { }
 static inline void *present_gl_proc(const char *name) { (void)name; return 0; }

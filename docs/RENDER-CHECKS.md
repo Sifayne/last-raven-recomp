@@ -159,6 +159,97 @@ targets; the six fixed snapshots do not contain those cases. It executes
 seen in the earlier full run. Capture instrumentation and load transitions
 still produce long outlier frame intervals (maximum 471 ms).
 
+## Window-resolution rendering
+
+`PSPRECOMP_RESOLUTION=window` enables physical-resolution display targets in
+Last Raven's GL host. It selects GL when no backend is named and rejects an
+explicit software/null backend. `psp` or unset keeps the reference mode.
+Aspect and resolution are independent:
+
+```bash
+# Fill the drawable with Claude's adaptive camera and centered HUD.
+PSPRECOMP_RESOLUTION=window PSPRECOMP_ASPECT=window scripts/06-boot.sh
+
+# Keep the PSP aspect and render the fitted picture at physical resolution.
+PSPRECOMP_RESOLUTION=window PSPRECOMP_ASPECT=native scripts/06-boot.sh
+
+# Standalone GPU checks: no game files required.
+scripts/13-resolution-tests.sh
+```
+
+Guest addresses, format, stride and dimensions stay in PSP units. Display
+attachments use the physical drawable size (including stride padding);
+byte-interpreted scratch targets remain at 1x. Projected float positions reach
+the enhanced rasterizer before PSP subpixel rounding. A coherent drawable-size
+snapshot controls allocation, viewport, scissor and presentation. Resizes
+migrate color, depth and stencil with a GPU blit; allocation failures retain
+the working surface, and hardware size limits cap allocation.
+
+Compatible unswizzled RGBA8888 framebuffer textures use separate GPU snapshots,
+including row-offset views, declared heights larger than the rendered rows and
+self-composites. This keeps fine detail through framebuffer effects. Other
+aliases resolve through guest bytes. CPU writes are tracked by touched byte,
+including same-value stores; partial writes preserve the untouched channels
+of every physical sample. Guest readback resolves with nearest sampling so
+alpha/stencil values and packed reinterpretation are not averaged.
+
+The body font has a game-specific sampling exception in `host/render_gl.c`.
+Its 512x512 CLUT4 atlas is drawn as 13-pixel-high, axis-aligned, 1:1 glyph
+triangles. At 1x, linear filtering samples texel centers exactly; magnification
+interpolates the already shaded glyph edges again and weakens the strokes.
+Enhanced rendering recognizes this draw pattern, without a fixed allocation
+address, and uses nearest filtering. Other texture draws retain their filters.
+This preserves the original bitmap's weight, with visibly square texels;
+it does not supply a higher-resolution font asset. The garage comparison is
+`reports/resolution-font-comparison.png`; only the body-text rectangle changes
+in that fixed frame (8,013 pixels inside x=63..649, y=1015..1063 at 1080p).
+
+Validation on the development desktop:
+
+| Check | Result / local artifact |
+| --- | --- |
+| Physical framebuffer fixture | 40 checks in each aspect mode, all passing: `reports/resolution-fixture-final.log` |
+| Detail and memory ownership | Sub-PSP-pixel stripes and pre-quantization edges survive texture views; CPU byte/same-value writes, per-sample channel preservation, scratch format reuse, depth/stencil and scissor pass |
+| Resize matrix | 960x544, 1365x767, 2560x1440, 3440x1440, 3840x2160, 641x961, back to 960x544; both aspect modes; no GL errors |
+| Reference backend fixture | 430/430 software and GL checks; enhanced 2x also 430/430: `reports/resolution-base-tests.log`, `resolution-1x-gl.log`, `resolution-2x-gl.log` |
+| Runtime and check-runner tests | CTest 24/24 and Python 13/13: `reports/resolution-ctest.log`, `resolution-python-tests.log` |
+| Fixed 1x scene gate | `reports/resolution-1x-final/results.json`, against `reports/m5-stencil-lines-final/results.json`; unchanged oracle hashes and comparison metrics |
+| Repeated enhanced scenes | Six captures, each rendered twice at 1920x1080 with native aspect; physical-window images repeat identically: `reports/resolution-captures-final-1080/results.json` |
+| Build/configuration | SDL and no-SDL host sources compile; invalid resolution and window-resolution/software combinations reject explicitly |
+
+The final full gameplay replay is `reports/resolution-live-validated-1080/`:
+1920x1080, window aspect, 87/87 events through poll 2210, zero bad accesses and
+no live-input taint. The physical screenshots include the garage, mission
+opening and combat. It exercised 2,047 GPU framebuffer views, 15 CPU uploads
+and 160,850 body-font draws. The padded display pair is 2048x1080; the scratch
+target ends at 128x64. GPU draw-plus-blit time averaged 1.60 ms, p95 3.6 ms,
+maximum 5.36 ms. There were 2,211 rendered frames / 4,426 present callbacks over
+70.976 seconds, interval p50 33 ms / p95 36 ms, with a 452.7 ms load/capture
+outlier. These measurements include the screenshot instrumentation and are
+not a sustained 4K performance claim.
+
+Use `PSPRECOMP_GL_SHOT=<prefix> PSPRECOMP_GL_SHOT_EVERY=1` to inspect physical
+window output. Ordinary `PSPRECOMP_FRAME` and gereplay output still read native
+guest pixels and cannot prove that enhanced detail survived. Fixed captures
+already contain the camera projection, so the repeated enhanced capture check
+uses native aspect; the full gameplay run exercises adaptive camera placement.
+
+Remaining work before treating this as a finished enhancement suite:
+
+- Points and lines retain the PSP sample walker and pixel-quad coverage. Their
+  staircase grows with resolution; physical-resolution vector coverage remains
+  a separate increment.
+- Swizzled, differently strided/formatted, non-row-aligned and mipmapped target
+  aliases retain the native-byte fallback. Original image and movie assets
+  keep their original resolution. Reduced-bit-depth stencil remains outside
+  the existing RGBA8888 implementation.
+- Presentation still chooses the current GE target; general scanout-address
+  selection is unchanged. Adaptive aspect retains its documented backdrop and
+  unclassified screen-space tracking limits.
+- The resize matrix tests one desktop/driver. Minimize/restore, monitor DPI
+  transitions, allocation exhaustion and sustained 4K gameplay need additional
+  real-display coverage. The default remains PSP resolution.
+
 Remaining: stencil semantics for 5650/5551/4444 targets, history-dependent
 target format/size reuse, remaining blend modes, dithering, and broader
 hardware/scene validation. Small RGB errors do not establish full PSP parity.

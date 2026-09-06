@@ -566,8 +566,8 @@ static int             g_gl_want;        /* set before present_start */
 static SDL_Window     *g_gl_win;
 static SDL_GLContext   g_gl_ctx;
 static int             g_gl_state;       /* 0 pending, 1 ready, -1 failed */
-static _Atomic int     g_gl_draw_w;
-static _Atomic int     g_gl_draw_h;
+static _Atomic uint64_t g_gl_draw_size;
+static _Atomic uint64_t g_requested_size;
 static pthread_mutex_t g_gl_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_gl_cv   = PTHREAD_COND_INITIALIZER;
 
@@ -622,8 +622,14 @@ void present_gl_swap(void) { if (g_gl_win) SDL_GL_SwapWindow(g_gl_win); }
  * drawable size through atomics so the GE thread can scale its final blit
  * correctly on high-DPI displays without reaching back into SDL. */
 void present_gl_drawable_size(int *w, int *h) {
-    if (w) *w = atomic_load(&g_gl_draw_w);
-    if (h) *h = atomic_load(&g_gl_draw_h);
+    const uint64_t size = atomic_load(&g_gl_draw_size);
+    if (w) *w = (int)(size >> 32);
+    if (h) *h = (int)(size & UINT32_MAX);
+}
+
+void present_request_window_size(int w, int h) {
+    if (w > 0 && h > 0)
+        atomic_store(&g_requested_size, ((uint64_t)(uint32_t)w << 32) | (uint32_t)h);
 }
 
 int present_adaptive_aspect(void) {
@@ -701,8 +707,7 @@ static void *sdl_thread(void *arg) {
             SDL_GL_MakeCurrent(win, NULL);
             int dw = 0, dh = 0;
             SDL_GL_GetDrawableSize(win, &dw, &dh);
-            atomic_store(&g_gl_draw_w, dw);
-            atomic_store(&g_gl_draw_h, dh);
+            atomic_store(&g_gl_draw_size, ((uint64_t)(uint32_t)dw << 32) | (uint32_t)dh);
             fprintf(stderr, "present: GL 3.3 core context created, "
                             "handed to the GE thread\n");
         } else {
@@ -804,14 +809,16 @@ static void *sdl_thread(void *arg) {
                 done = 1;
             }
         }
+        const uint64_t requested = atomic_exchange(&g_requested_size, 0);
+        if (requested && win)
+            SDL_SetWindowSize(win, (int)(requested >> 32), (int)(requested & UINT32_MAX));
         /* Logical window pixels and GL drawable pixels differ under desktop
          * scaling.  Refresh this on the SDL thread so resize and display-scale
          * changes are reflected by the next GL presentation. */
         if (g_gl_want && win) {
             int dw = 0, dh = 0;
             SDL_GL_GetDrawableSize(win, &dw, &dh);
-            atomic_store(&g_gl_draw_w, dw);
-            atomic_store(&g_gl_draw_h, dh);
+            atomic_store(&g_gl_draw_size, ((uint64_t)(uint32_t)dw << 32) | (uint32_t)dh);
         }
 
         /* Publish the latest frame, if the guest has produced one. Waiting

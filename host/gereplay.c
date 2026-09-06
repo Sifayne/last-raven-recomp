@@ -103,6 +103,10 @@ int main(int argc, char **argv) {
         return 2;
     }
     const char *path = argv[1], *backend = argv[2], *out = argv[3];
+    const int resolution = render_gl_resolution_mode();
+    if (resolution < 0) return 2;
+    if (resolution && strcmp(backend, "gl"))
+        return die("PSPRECOMP_RESOLUTION=window requires the gl backend");
 
     FILE *f = fopen(path, "rb");
     if (!f) return die("cannot open the capture");
