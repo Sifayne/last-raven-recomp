@@ -551,6 +551,71 @@ vertices still pay the colour conversion; the two decodes and the products
 are each about 10%. The remaining ~3.4 ms of pipeline per frame is what a
 GPU path would now be buying.
 
+## 17. The transform on the GPU
+
+The backend interface gains an optional pair, `model_ok()` and
+`draw_model(prim, model vertices, count, xform state)`. When a backend offers
+them, `draw_prim_transformed` decodes the batch into `psp_model_vertex`
+(model-space position and normal, the colour or the material colour, texels)
+and hands it over with `psp_xform_state`: the four matrices, the lights in
+eye space, material, fog, viewport, cull, depth clamp and texgen, everything
+its own pipeline would have applied. Triangles only, and never for a
+screen-space projection, whose flag the GL backend uses to tell HUD from
+scene; points, lines, sprites and the whole 2D layer keep the CPU path, as
+does any backend that does not offer the pair (software, null).
+
+The GL backend implements it as a second program whose fragment shader is
+the existing one. The vertex stage is `draw_prim_transformed`'s per-vertex
+work transcribed: the three products term by term, fog, `light_vertex`,
+texgen. The geometry stage is `emit_tri`: the near test or the near clip
+with its attribute rule (coordinates and texels move, the rest come from the
+first vertex), the guard band, the cull by the sign of the 1/16-snapped
+integer area, and the per-triangle texture LOD the batched path computes in
+`push_triangle`; it emits exactly what `push()` would have put in the batch,
+so the fragment stage's PSP edge rules are untouched. Strips and fans arrive
+as triangle lists through static index tables so the geometry stage sees the
+PSP's vertex order and takes the winding flip from the primitive's parity.
+`precise` and the explicit expression order keep the float arithmetic in C's
+order; the exact 64-bit area needs a `double`, so the program is GLSL 4.0 and
+`present.c` now asks for a 4.0 core context first, falling back to 3.3, in
+which case the program stays unbuilt and `model_ok()` answers 0.
+
+The first version issued one fully-stated draw per display-list primitive,
+683 a frame, and ran *slower* than the CPU transform at 1080p (42 fps
+against 70). Three changes fixed that: the transform state travels in a
+std140 uniform block written once per draw into a ring of aligned slots;
+vertices go into a ring buffer with base-vertex draws so no upload waits on a
+draw still reading the last one; and state is re-applied only when a setter
+or the target changed since the previous model draw.
+
+| Capture | Software vs GL, CPU transform | Software vs GL, GPU transform | GL CPU vs GL GPU |
+| --- | ---: | ---: | ---: |
+| poll 300 (title, all screen-space) | 203 px | 203 px | 0 |
+| poll 1400 | 50.6 px | 50.7 px | 0.1 |
+| poll 2120 (mission, 683 model draws) | 52.2 px | 52.2 px | 0 |
+
+The GPU path reproduces the CPU-transform GL rendering pixel for pixel on
+these frames, and both stand at the same small distance from the software
+reference that the GL backend already had. The render tests pass 430 checks
+on each backend. Then, at 1920x1080 window resolution, uncapped, the
+optimised game code, interpolation on:
+
+| GL backend at 1080p | Transform on the CPU | Transform on the GPU |
+| --- | ---: | ---: |
+| Frame rate | 70.0 fps | 78.1 fps |
+| Frame time, mean (min) | 14.40 ms (11.63) | 12.91 ms (7.02) |
+| Stall updates per frame | 8.1 ms | 6.2 ms |
+| Vertices through the CPU pipeline per run | 29.7 M | 0.9 M |
+
+The CPU pipeline is now a few per cent of what it was; what remains in the
+frame is the GL driver's per-draw cost, about 9 µs for each of the ~680
+draws, and the 1080p blit. The next step there is batching consecutive
+model draws that share GL state into one multi-draw with a per-draw block
+index, which the block-on-a-ring layout already suits. Two fidelity notes:
+`log2` and `pow` on the GPU are not glibc's, so a mip level or a specular
+byte can differ at exact boundaries, and none of the three frames showed it;
+and `PSPRECOMP_GL_TRANSFORM=cpu` keeps the old path for comparison.
+
 ## Reproduction
 
 ```sh
@@ -576,6 +641,7 @@ bash reports/game-tick-review/opt/build-opt.sh   # -O2 chunks, boot8opt-10 (exac
 bash reports/game-tick-review/opt/run-opt.sh     # exactness + 60/120/144/uncapped at -O2
 bash reports/game-tick-review/opt/link-probe9.sh # section profiler, boot9opt-14
 PSPRECOMP_GE_PROFILE=1 <any boot> ...            # per-vertex pipeline breakdown at the end of the run
+build/host-opt/gereplay frame.gcap gl out.ppm    # GL with the GPU transform; PSPRECOMP_GL_TRANSFORM=cpu for the old path
 OPT=1 scripts/04-emit-build.sh && OPT=1 BOOT_NO_RUN=1 scripts/06-boot.sh   # the optimised build, build/host-opt/
 ```
 

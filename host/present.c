@@ -663,9 +663,14 @@ static void *sdl_thread(void *arg) {
         return NULL;
     }
 
+    /* 4.0 core first: the GL backend's model program (the transform on the
+     * GPU) needs GLSL 4.0 for its doubles. A driver that cannot give 4.0
+     * gets the 3.3 core context the rest of the backend needs, and the model
+     * program stays unbuilt. */
+    int gl_major = 4, gl_minor = 0;
     if (g_gl_want) {
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, gl_major);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, gl_minor);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
                             SDL_GL_CONTEXT_PROFILE_CORE);
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
@@ -700,6 +705,12 @@ static void *sdl_thread(void *arg) {
      * SDL_Renderer on the same window would fight it for the context. */
     if (g_gl_want) {
         SDL_GLContext ctx = win ? SDL_GL_CreateContext(win) : NULL;
+        if (!ctx && win) {
+            gl_major = 3; gl_minor = 3;
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, gl_major);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, gl_minor);
+            ctx = SDL_GL_CreateContext(win);
+        }
         if (ctx) {
             /* Created here because SDL wants it on the thread that made the
              * window, released here because it has to be current on the GE
@@ -708,8 +719,8 @@ static void *sdl_thread(void *arg) {
             int dw = 0, dh = 0;
             SDL_GL_GetDrawableSize(win, &dw, &dh);
             atomic_store(&g_gl_draw_size, ((uint64_t)(uint32_t)dw << 32) | (uint32_t)dh);
-            fprintf(stderr, "present: GL 3.3 core context created, "
-                            "handed to the GE thread\n");
+            fprintf(stderr, "present: GL %d.%d core context created, "
+                            "handed to the GE thread\n", gl_major, gl_minor);
         } else {
             fprintf(stderr, "present: no GL 3.3 core context: %s\n",
                     SDL_GetError());
