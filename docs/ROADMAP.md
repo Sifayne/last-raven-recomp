@@ -463,7 +463,10 @@ scenario frame dumps).
   and quantized, which is the right input for matching the oracle and the
   wrong input for rendering at a higher internal resolution. Do not try to
   retrofit scaling onto it; M5's gate is a pixel comparison, and that gate is
-  only meaningful at 1x.
+  only meaningful at 1x. The adaptive-aspect target (`PSPRECOMP_ASPECT=window`,
+  5 Sep) is still this path: 1x vertically, and horizontally the same
+  PSP-precision geometry spread over the window's width by the viewport --
+  what the present blit did before, rasterised at the target's resolution.
 - **Mipmaps and LOD — done 4 Sep.** Cache identities include every active
   level's address, stride and dimensions; all levels are decoded and uploaded.
   Software and GL share the PSP's AUTO/CONST/SLOPE calculation, including its

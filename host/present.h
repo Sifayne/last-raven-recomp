@@ -45,6 +45,13 @@ void  present_gl_drawable_size(int *w, int *h);
  * game-camera replacement and the final GL blit ask the same question, rather
  * than growing two parsers which can disagree. */
 int   present_adaptive_aspect(void);
+/* The virtual PSP width the window's shape asks for: 480 unless
+ * PSPRECOMP_ASPECT=window and the drawable is known, else
+ * max(480, round(272 * draw_w / draw_h)). One helper because the camera
+ * replacement (guest thread) and the GL backend (GE thread) must agree to the
+ * pixel; never below 480, so a narrower window letterboxes instead of
+ * shrinking the HUD. */
+int   present_aspect_wide_width(void);
 void  present_gl_swap(void);
 void *present_gl_proc(const char *name);
 #else
@@ -55,6 +62,7 @@ static inline void  present_gl_drawable_size(int *w, int *h) {
     if (h) *h = 0;
 }
 static inline int   present_adaptive_aspect(void) { return 0; }
+static inline int   present_aspect_wide_width(void) { return 480; }
 static inline void  present_gl_swap(void) { }
 static inline void *present_gl_proc(const char *name) { (void)name; return 0; }
 #endif

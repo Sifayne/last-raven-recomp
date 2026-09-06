@@ -631,6 +631,17 @@ int present_adaptive_aspect(void) {
     return mode && strcmp(mode, "window") == 0;
 }
 
+int present_aspect_wide_width(void) {
+    if (!present_adaptive_aspect()) return SCREEN_W;
+    int w = 0, h = 0;
+    present_gl_drawable_size(&w, &h);
+    if (w <= 0 || h <= 0) return SCREEN_W;
+    long long ww = ((long long)SCREEN_H * w + h / 2) / h;
+    if (ww < SCREEN_W) ww = SCREEN_W;
+    if (ww > 8192) ww = 8192;       /* a texture limit, and past any monitor */
+    return (int)ww;
+}
+
 void *present_gl_proc(const char *name) { return SDL_GL_GetProcAddress(name); }
 
 /* ---- the SDL thread -------------------------------------------------------- */
@@ -653,10 +664,20 @@ static void *sdl_thread(void *arg) {
                             SDL_GL_CONTEXT_PROFILE_CORE);
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     }
+    /* PSPRECOMP_WINDOW_SIZE=WxH opens the window at a chosen size, so a
+     * capture at 21:9 or 16:9 is a command rather than a drag. */
+    int win_w = SCREEN_W * 2, win_h = SCREEN_H * 2;
+    {
+        const char *sz = getenv("PSPRECOMP_WINDOW_SIZE");
+        int ww = 0, wh = 0;
+        if (sz && sscanf(sz, "%dx%d", &ww, &wh) == 2 && ww > 0 && wh > 0) {
+            win_w = ww; win_h = wh;
+        }
+    }
     SDL_Window *win = SDL_CreateWindow(
         "Armored Core: Last Raven -- recompiled",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        SCREEN_W * 2, SCREEN_H * 2,
+        win_w, win_h,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
         (g_gl_want ? SDL_WINDOW_OPENGL : 0));
     if (!win) {
@@ -763,6 +784,26 @@ static void *sdl_thread(void *arg) {
     start_publish(1);
 
     for (;;) {
+        /* PSPRECOMP_WINDOW_RESIZE=<seconds>:WxH resizes the window once, that
+         * many seconds after it opened, so the renderer's resize path is a
+         * command rather than a drag. */
+        {
+            static int done, at_s = -1, rw, rh;
+            static uint32_t t0;
+            if (at_s < 0) {
+                const char *rs = getenv("PSPRECOMP_WINDOW_RESIZE");
+                int a = 0, w = 0, h = 0;
+                at_s = rs && sscanf(rs, "%d:%dx%d", &a, &w, &h) == 3 &&
+                       a > 0 && w > 0 && h > 0 ? a : 0;
+                if (at_s <= 0) done = 1;
+                rw = w; rh = h; t0 = SDL_GetTicks();
+            }
+            if (!done && win && SDL_GetTicks() - t0 >= (uint32_t)at_s * 1000u) {
+                SDL_SetWindowSize(win, rw, rh);
+                fprintf(stderr, "present: resized the window to %dx%d\n", rw, rh);
+                done = 1;
+            }
+        }
         /* Logical window pixels and GL drawable pixels differ under desktop
          * scaling.  Refresh this on the SDL thread so resize and display-scale
          * changes are reflected by the next GL presentation. */

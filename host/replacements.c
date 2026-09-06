@@ -172,40 +172,40 @@ void psp_func_000889B4(void) {
         return;
     }
 
-    int draw_w = 0, draw_h = 0;
-    present_gl_drawable_size(&draw_w, &draw_h);
     const uint32_t render = psp_read32(RENDER_SYSTEM + RENDER_ACTIVE);
     const uint32_t width_addr = render + RENDER_WIDTH;
     const uint32_t height_addr = render + RENDER_HEIGHT;
     const uint32_t old_w = render ? psp_read32(width_addr) : 0;
     const uint32_t old_h = render ? psp_read32(height_addr) : 0;
-    if (draw_w <= 0 || draw_h <= 0 || old_w == 0 || old_h == 0) {
+    /* Only the display's camera. The same rebuild serves the AC preview,
+     * whose descriptor is the 256x128 scratch surface; widening that camera
+     * would distort a preview that is composited at its native size. */
+    if (old_w != 480u || old_h != 272u) {
         psp_func_000889B4__orig();
         return;
     }
 
-    /* Round to the nearest virtual PSP pixel. At the native 480:272 ratio
-     * this is exactly 480, so enabling the option without resizing remains
-     * bit-for-bit on the original path. */
-    uint64_t virtual_w = ((uint64_t)old_h * (uint64_t)draw_w +
-                          (uint64_t)draw_h / 2u) / (uint64_t)draw_h;
-    if (virtual_w < 1u) virtual_w = 1u;
-    if (virtual_w > UINT32_MAX) virtual_w = UINT32_MAX;
-    if ((uint32_t)virtual_w == old_w) {
+    /* present_aspect_wide_width rounds to the nearest virtual PSP pixel and
+     * is the number the GL backend sizes its target by, so camera and target
+     * agree. At the native 480:272 ratio it is exactly 480, so enabling the
+     * option without resizing remains bit-for-bit on the original path. */
+    const uint32_t virtual_w = (uint32_t)present_aspect_wide_width();
+    if (virtual_w == old_w) {
         psp_func_000889B4__orig();
         return;
     }
 
-    psp_write32(width_addr, (uint32_t)virtual_w);
+    psp_write32(width_addr, virtual_w);
     psp_func_000889B4__orig();
     psp_write32(width_addr, old_w);
 
-    static int last_draw_w, last_draw_h;
-    if (draw_w != last_draw_w || draw_h != last_draw_h) {
+    static uint32_t last_virtual_w;
+    if (virtual_w != last_virtual_w) {
+        int draw_w = 0, draw_h = 0;
+        present_gl_drawable_size(&draw_w, &draw_h);
         printf("      aspect    drawable %dx%d, virtual camera %ux%u\n",
                draw_w, draw_h, (unsigned)virtual_w, (unsigned)old_h);
-        last_draw_w = draw_w;
-        last_draw_h = draw_h;
+        last_virtual_w = virtual_w;
     }
 }
 
