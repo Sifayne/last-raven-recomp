@@ -159,6 +159,43 @@ targets; the six fixed snapshots do not contain those cases. It executes
 seen in the earlier full run. Capture instrumentation and load transitions
 still produce long outlier frame intervals (maximum 471 ms).
 
+## Adaptive mission camera
+
+`PSPRECOMP_ASPECT=window` must update two camera paths. The garage's
+`00154C80` copies the adjusted aspect from `camera+724`; missions rebuild a
+separate shared camera through `0000100C -> 002588D0`. Its aspect at
+`0x00421040+268` previously stayed at 480/272, stretching the mission scene
+across the wider output even though the HUD was centered. The camera
+replacement now updates that shared aspect before rebuilding. `00088F6C`
+uses the same value for horizontal culling. Resizing back to native width
+restores it before taking the native-width fast path.
+
+```bash
+# Actual recompiled camera/projection/culling code, without SDL or a full boot.
+# Requires the local decrypted ELF and generated module from stage 04.
+scripts/14-aspect-tests.sh
+```
+
+The 35 checks cover mission horizontal expansion, unchanged vertical scale,
+horizontal culling, agreement with the garage camera, repeated resizes and
+return to native width, unchanged scratch previews, restored guest dimensions,
+and guest stack/return preservation. The previous replacement fails four
+checks; the fix passes all 35. This complements the renderer fixtures, which
+do not execute the game's camera code.
+
+Ultrawide replay evidence is in `reports/aspect-mission/`: at 1920x816,
+poll 1780's mission projection changes from X=1.7972368 to X=1.3479276
+while Y stays 3.1715944. The extra width therefore reveals additional scenery
+with the same vertical field of view. Native and ultrawide diagnostic runs of
+`pitch-sweep.pad` reach all 121 events through poll 2600 with zero bad accesses.
+The final build also completed a real-window 1920x816 run with window
+resolution and dual controls, with zero bad accesses and zero HUD depth,
+stencil, or destination-alpha hazards (`final.log`). That run accepted live
+input and is marked tainted; it is a gameplay check, not determinism evidence.
+Renderer fixtures passed 430/430 on each backend, and resolution fixtures
+passed 40/40 in each aspect mode on the real display. The offscreen GL driver
+failed two bitmap-font checks, so those resolution results use the real GPU.
+
 ## Window-resolution rendering
 
 `PSPRECOMP_RESOLUTION=window` enables physical-resolution display targets in

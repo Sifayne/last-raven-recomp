@@ -164,6 +164,8 @@ enum {
     RENDER_ACTIVE = 260,
     RENDER_WIDTH = 12,
     RENDER_HEIGHT = 16,
+    SCENE_CAMERA = 0x00421040u,
+    SCENE_ASPECT = 268,
 };
 
 void psp_func_000889B4(void) {
@@ -190,6 +192,13 @@ void psp_func_000889B4(void) {
      * agree. At the native 480:272 ratio it is exactly 480, so enabling the
      * option without resizing remains bit-for-bit on the original path. */
     const uint32_t virtual_w = (uint32_t)present_aspect_wide_width();
+    /* The garage copies camera+724 into its rendering camera in 00154C80.
+     * Missions instead rebuild the shared camera at 00421040 through
+     * 0000100C -> 002588D0, whose aspect at +268 otherwise stays 480/272.
+     * 00088F6C also reads that shared aspect for the horizontal cull planes.
+     * Keep both consumers in step with the display camera, including when
+     * resizing back to native width (before the identity-path return). */
+    f32_write(SCENE_CAMERA + SCENE_ASPECT, (float)virtual_w / (float)old_h);
     if (virtual_w == old_w) {
         psp_func_000889B4__orig();
         return;

@@ -1,0 +1,114 @@
+/* Exercise the game's camera code: renderer fixtures alone cannot detect a
+ * mission projection that still uses the PSP aspect. Requires the local ELF
+ * and generated module, but no window, ISO, save, or recorded RAM snapshot. */
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "loader.h"
+#include "psprecomp/cpu.h"
+#include "psprecomp/mem.h"
+#include "aclr_funcs.h"
+#include "present.h"
+
+enum {
+    SCENE = 0x00421040u, RENDER = 0x0043D8D0u,
+    CAMERA = PSP_RAM_BASE + 0x1000, DESCRIPTOR = PSP_RAM_BASE + 0x2000,
+    STACK = PSP_RAM_BASE + PSP_RAM_SIZE - 0x1000,
+};
+static int adaptive, wide = 480, checks, failures;
+
+/* Only the drawable input is substituted; projection and culling execute the
+ * actual recompiled game functions and the production replacement. */
+int present_adaptive_aspect(void) { return adaptive; }
+int present_aspect_wide_width(void) { return wide; }
+void present_gl_drawable_size(int *w, int *h) { *w = wide; *h = 272; }
+void psp_syscall(uint32_t id) {
+    fprintf(stderr, "unexpected syscall %x\n", id); abort();
+}
+void psp_unimplemented(uint32_t addr, const char *what) {
+    fprintf(stderr, "unexpected instruction %x: %s\n", addr, what); abort();
+}
+static void check(int ok, const char *name) {
+    checks++;
+    if (!ok) { fprintf(stderr, "FAIL: %s\n", name); failures++; }
+}
+static int near(float a, float b) { return fabsf(a - b) < 0.00001f; }
+static void call(void (*fn)(void), uint32_t arg) {
+    r_a0 = arg; r_sp = STACK; r_ra = 0xDEAD000u;
+    fn();
+    check(r_sp == STACK && r_ra == 0xDEAD000u, "guest stack and return address");
+}
+static void seed(int w, int h) {
+    memset(&psp_cpu, 0, sizeof psp_cpu);
+    psp_cpu_reset_fp();
+    memset(psp_mem_ptr(CAMERA, 736), 0, 736);
+    call(psp_func_00088928, CAMERA);
+    call(psp_func_002586A8, SCENE + 64);
+    psp_write_f32(SCENE + 256, 45.0f);
+    psp_write_f32(SCENE + 260, 4.0f);
+    psp_write_f32(SCENE + 264, 6000.0f);
+    psp_write_f32(SCENE + 268, 480.0f / 272.0f);
+    psp_write_f32(SCENE + 448, 4.0f);
+    psp_write_f32(SCENE + 452, 6000.0f);
+    psp_write32(RENDER + 260, DESCRIPTOR);
+    psp_write32(DESCRIPTOR + 12, w);
+    psp_write32(DESCRIPTOR + 16, h);
+}
+static void rebuild(void) {
+    call(psp_func_000889B4, CAMERA);
+    /* 0000100C invokes this shared-camera rebuild through its vtable. */
+    call(psp_func_002588D0, SCENE + 64);
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) return 2;
+    psp_blob blob; elf_info elf; psp_load_info loaded;
+    if (psp_blob_read(argv[1], &blob) ||
+        elf_parse(blob.data, blob.size, &elf) || psp_mem_init() ||
+        psp_load_module(&blob, &elf, &loaded)) return 1;
+
+    unsigned char original[736], native[736];
+    seed(480, 272);
+    call(psp_func_000889B4__orig, CAMERA);
+    memcpy(original, psp_mem_ptr(CAMERA, sizeof original), sizeof original);
+    seed(480, 272); adaptive = 0; wide = 640; rebuild();
+    memcpy(native, psp_mem_ptr(CAMERA, sizeof native), sizeof native);
+    check(!memcmp(original, native, sizeof native), "disabled camera matches original");
+    const float px = psp_read_f32(SCENE + 192);
+    const float py = psp_read_f32(SCENE + 212);
+    const float side = fabsf(psp_read_f32(CAMERA + 456) / psp_read_f32(CAMERA + 448));
+
+    adaptive = 1; wide = 480; rebuild();
+    check(!memcmp(native, psp_mem_ptr(CAMERA, sizeof native), sizeof native),
+          "native-width camera matches original");
+    wide = 640; rebuild();
+    check(near(psp_read_f32(SCENE + 192), px * 480 / 640),
+          "mission horizontal projection follows drawable");
+    check(psp_read_f32(SCENE + 212) == py, "vertical projection unchanged");
+    check(near(fabsf(psp_read_f32(CAMERA + 456) / psp_read_f32(CAMERA + 448)),
+               side * 640 / 480), "horizontal culling expands with projection");
+    check(psp_read_f32(CAMERA + 724) == psp_read_f32(SCENE + 268),
+          "garage and mission agree on aspect");
+    check(psp_read32(DESCRIPTOR + 12) == 480 &&
+          psp_read32(DESCRIPTOR + 16) == 272, "guest framebuffer dimensions restored");
+    wide = 960; rebuild();
+    check(near(psp_read_f32(SCENE + 192) * 2, px), "second resize follows width");
+    wide = 480; rebuild();
+    check(psp_read_f32(SCENE + 192) == px, "resize back restores native projection");
+    check(!memcmp(native, psp_mem_ptr(CAMERA, sizeof native), sizeof native),
+          "resize back restores native culling and camera");
+
+    seed(256, 128);
+    call(psp_func_000889B4__orig, CAMERA);
+    memcpy(original, psp_mem_ptr(CAMERA, sizeof original), sizeof original);
+    seed(256, 128); wide = 640; rebuild();
+    check(!memcmp(original, psp_mem_ptr(CAMERA, sizeof original), sizeof original),
+          "scratch preview camera matches original");
+    check(psp_read_f32(SCENE + 268) == 480.0f / 272.0f,
+          "scratch preview does not change shared aspect");
+    check(psp_mem_bad_access == 0, "no invalid guest accesses");
+    printf("aspect: %d/%d checks passed\n", checks - failures, checks);
+    psp_blob_free(&blob); psp_mem_free();
+    return failures != 0;
+}
