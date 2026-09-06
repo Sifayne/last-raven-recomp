@@ -69,6 +69,7 @@
 #include "psprecomp/mem.h"
 #include "psprecomp/hle.h"
 #include "aclr_funcs.h"        /* psp_func_*, the __orig originals, r_* aliases */
+#include "controls.h"
 
 /* ---- configuration ------------------------------------------------------ */
 
@@ -89,6 +90,22 @@ static int input_mode(void) {
                    "moves; PSPRECOMP_INPUT=classic for the game's own\n");
     }
     return mode;
+}
+
+/* Button layout is independently overridable so the analog work can be
+ * compared with the PSP buttons, or the modern buttons can be used with the
+ * original one-stick movement.  By default it follows modern/dual. */
+static int gamepad_modern(void) {
+    static int modern = -1;
+    if (modern < 0) {
+        const char *e = getenv("PSPRECOMP_GAMEPAD");
+        if (e && !strcmp(e, "modern")) modern = 1;
+        else if (e && !strcmp(e, "classic")) modern = 0;
+        else modern = input_mode() != INPUT_CLASSIC;
+        if (modern)
+            printf("      gamepad   modern -- triggers, bumpers and stick clicks are gameplay actions\n");
+    }
+    return modern;
 }
 
 /* Radians of yaw per mouse count. 0.001 puts a full turn at ~6,300 counts,
@@ -127,28 +144,87 @@ static void f32_write(uint32_t addr, float v) {
     psp_write32(addr, c.u);
 }
 
-/* A stick byte as -1..1 with a small deadzone, for the yaw law. */
-static float stick_axis(uint8_t v) {
-    float x = ((int)v - 128) / 127.0f;
-    if (x >  1.0f) x =  1.0f;
-    if (x < -1.0f) x = -1.0f;
-    const float dead = 0.06f;                 /* ~8 of 127: stick noise only */
-    if (x > -dead && x < dead) x = 0.0f;
-    return x;
+typedef struct {
+    float x, y;                    /* processed components, magnitude `m` */
+    float m;                       /* 0..1 after the radial deadzones       */
+    float raw_m;                   /* magnitude before them                */
+} stick2;
+
+typedef struct {
+    int init;
+    float move_dead, move_enter;
+    float look_dead, outer_dead, look_expo;
+} input_tuning;
+
+static float env_range(const char *name, float dflt, float lo, float hi) {
+    const char *s = getenv(name);
+    if (!s || !*s) return dflt;
+    char *end = NULL;
+    const float v = strtof(s, &end);
+    if (end == s || *end || !isfinite(v)) return dflt;
+    return v < lo ? lo : v > hi ? hi : v;
 }
 
-/* The look stick's response: an expo blend, (1-e)x + e x^3. Full deflection
- * is still the full rate; half deflection is 0.29 of it rather than 0.5, so
- * the centre is for aiming and the edge for turning round. The same curve
- * on both axes of the stick, or a diagonal push would feel bent. */
-static float look_curve(float x) {
-    const float e = 0.6f;
-    return (1.0f - e) * x + e * x * x * x;
+static const input_tuning *input_tune(void) {
+    static input_tuning t;
+    if (!t.init) {
+        t.move_dead = env_range("PSPRECOMP_MOVE_DEADZONE", 0.10f, 0.0f, 0.50f);
+        t.move_enter = fminf(t.move_dead + 0.03f, 0.55f);
+        t.look_dead = env_range("PSPRECOMP_LOOK_DEADZONE", 0.08f, 0.0f, 0.50f);
+        t.outer_dead = env_range("PSPRECOMP_STICK_OUTER_DEADZONE", 0.02f, 0.0f, 0.20f);
+        t.look_expo = env_range("PSPRECOMP_LOOK_EXPO", 0.60f, 0.0f, 1.0f);
+        t.init = 1;
+        if (input_mode() != INPUT_CLASSIC)
+            printf("      sticks    radial -- move %.0f/%.0f%% exit/enter, "
+                   "look %.0f%%, outer %.0f%%, expo %.2f\n",
+                   100.0f * t.move_dead, 100.0f * t.move_enter,
+                   100.0f * t.look_dead, 100.0f * t.outer_dead, t.look_expo);
+    }
+    return &t;
+}
+
+static float byte_axis(uint8_t v) {
+    const int x = (int)v - 128;
+    return x < 0 ? x / 128.0f : x / 127.0f;
+}
+
+/* One radial inner deadzone, applied after the byte is in the recorded input
+ * lane.  The host deliberately does no deadzoning of its own.  Rescaling the
+ * remaining radius makes the first live value continuous at zero, preserves
+ * the stick's angle, and still reaches one on a pad whose rim falls short. */
+static stick2 stick_radial(uint8_t xb, uint8_t yb, float dead) {
+    const input_tuning *t = input_tune();
+    stick2 out = { byte_axis(xb), byte_axis(yb), 0.0f, 0.0f };
+    out.raw_m = hypotf(out.x, out.y);
+    if (out.raw_m <= dead) { out.x = out.y = 0.0f; return out; }
+    const float outer = 1.0f - t->outer_dead;
+    const float rim = fmaxf(outer, dead + 0.01f);
+    const float radius = fminf(out.raw_m, rim);
+    out.m = (radius - dead) / (rim - dead);
+    const float scale = out.m / out.raw_m;
+    out.x *= scale;
+    out.y *= scale;
+    return out;
+}
+
+/* Shape the look stick's radial magnitude, then restore its direction.  A
+ * component-wise cubic bends diagonals; doing it once to the radius does not. */
+static stick2 stick_look(uint8_t xb, uint8_t yb) {
+    const input_tuning *t = input_tune();
+    stick2 out = stick_radial(xb, yb, t->look_dead);
+    if (out.m == 0.0f) return out;
+    const float curved = (1.0f - t->look_expo) * out.m +
+                         t->look_expo * out.m * out.m * out.m;
+    const float scale = curved / out.m;
+    out.x *= scale;
+    out.y *= scale;
+    out.m = curved;
+    return out;
 }
 
 /* The left stick as a direction and a magnitude for the walk: the unit vector
- * in the AC's frame and how far past the game's 30-unit deadzone circle the
- * stick sits, 0..1. Zero inside the circle.
+ * in the AC's frame and how far past the profile's radial deadzone the stick
+ * sits, 0..1. Zero inside the circle.
  *
  * The frame is the game's direction table's: z back, and **x to the left** --
  * the table's entry 3 is (+1, 0) and the game orders its stick actions
@@ -156,14 +232,11 @@ static float look_curve(float x) {
  * and the first mission played with the strafes swapped. The stick's x is to
  * the right, hence the sign. */
 static float stick_walk(uint8_t axb, uint8_t ayb, float *sx, float *sz) {
-    const float ax = (float)((int)axb - 128), ay = (float)((int)ayb - 128);
-    const float r = sqrtf(ax * ax + ay * ay);
-    const float dead = 30.0f;                 /* psp_func_00279910's circle */
-    if (r <= dead) { *sx = 0.0f; *sz = 0.0f; return 0.0f; }
-    *sx = -ax / r;
-    *sz = ay / r;
-    float m = (r - dead) / (127.0f - dead);
-    return m > 1.0f ? 1.0f : m;
+    const stick2 s = stick_radial(axb, ayb, input_tune()->move_dead);
+    if (s.m == 0.0f) { *sx = 0.0f; *sz = 0.0f; return 0.0f; }
+    *sx = -s.x / s.m;
+    *sz =  s.y / s.m;
+    return s.m;
 }
 
 /* ---- the AC's yaw integrator ------------------------------------------------
@@ -274,8 +347,10 @@ void psp_func_0004F248(void) {
      * curve; the game's own stick in `modern` stays linear, since it is also
      * the walk stick. No ease-in here: the chase camera's own filter smooths
      * yaw, and the ramp was the other half of what felt clunky. */
-    float rate = max * (mode == INPUT_DUAL ? look_curve(stick_axis(rx))
-                                            : stick_axis(ax));
+    const stick2 turn = mode == INPUT_DUAL
+        ? stick_look(rx, ry)
+        : stick_radial(ax, ay, input_tune()->move_dead);
+    float rate = max * turn.x;
     if (mode == INPUT_DUAL) rate += mouse_sens() * (float)mdx;
 
     f32_write(ac + AC_RATE, rate);
@@ -298,9 +373,8 @@ void psp_func_0004F248(void) {
  * either way. The shipped path, read from the listing:
  *
  *   - gate: the byte at (*(ac+9728))+182 must be -1, as the yaw integrator;
- *   - triangle and circle together recentre -- angle and rate to zero -- and
- *     start the lockout; while the counter is positive it counts down and
- *     nothing else happens;
+ *   - action 12 recentres the view; it has no PSP key-assign mask in the
+ *     active row, but the modern gamepad can expose it directly;
  *   - triangle held (action 10): the rate approaches +2*max by +2*accel,
  *     twice a frame: 0.00544 rad/frame^2 to 0.054 rad/frame, 3.09 deg/frame
  *     against yaw's 2.10. Circle (action 11) is the mirror;
@@ -323,10 +397,21 @@ static int in_play(void);              /* defined with the converter, below */
 /* psp_func_0005EFA0(pad, action): the pad's button word against the
  * key-assign mask for one action, where pad = *(*(ac+9732)+4). The registers
  * it clobbers are caller-saved, and a replacement is the callee. */
-static int pressed(uint32_t ac, uint32_t action) {
-    r_a0 = psp_read32(psp_read32(ac + AC_PAD_PTR) + 4);
+static uint32_t player_pad(uint32_t ac) {
+    return psp_read32(psp_read32(ac + AC_PAD_PTR) + 4);
+}
+
+static int action_held(uint32_t ac, uint32_t action) {
+    r_a0 = player_pad(ac);
     r_a1 = action;
     psp_func_0005EFA0();
+    return r_v0 != 0;
+}
+
+static int action_pressed(uint32_t ac, uint32_t action) {
+    r_a0 = player_pad(ac);
+    r_a1 = action;
+    psp_func_0005EFD4();
     return r_v0 != 0;
 }
 
@@ -337,10 +422,30 @@ static void pitch_log(uint32_t ac, const char *how, int ry, int mdy) {
                      f32_read(ac + AC_PITCH_RATE), ry, mdy, how);
 }
 
+/* Action 12's branch in the original look integrator zeroes the angle and
+ * rate, then starts a short input lockout.  The branch is only reachable from
+ * the PSP analog-look path, which the common digital layout never enters.
+ * Reproduce those exact writes here so a dedicated modern-pad button works in
+ * both enhanced movement modes. */
+static void view_reset(uint32_t ac) {
+    const float delay = f32_read(LOOK_PARAMS);
+    const int rounded = (int)(delay + (delay < 0.0f ? -1.0f : 1.0f));
+    f32_write(ac + AC_PITCH, 0.0f);
+    f32_write(ac + AC_PITCH_RATE, 0.0f);
+    psp_write32(ac + AC_LOOK_COUNTER, (uint32_t)((rounded * 30) / 60));
+}
+
 void psp_func_00053234(void) {
     const uint32_t ac = r_a0;
     if (ac == PLAYER_AC) g_ac_update_poll = psp_ctrl_polls();   /* the heartbeat in_play reads */
+    if (ac == PLAYER_AC && gamepad_modern() && in_play() &&
+        action_pressed(ac, 12)) {
+        view_reset(ac);
+        pitch_log(ac, "semantic-reset", 0, 0);
+        return;
+    }
     if (input_mode() != INPUT_DUAL || ac != PLAYER_AC) {
+        r_a0 = ac;
         psp_func_00053234__orig();
         if (ac == PLAYER_AC) pitch_log(ac, "orig", 0, 0);
         return;
@@ -353,9 +458,9 @@ void psp_func_00053234(void) {
     int mdx, mdy;
     psp_ctrl_last_look(&rx, &ry, &mdx, &mdy);
 
-    /* The game's own digital look, its recentre and its lockout. */
+    /* The game's own digital look and its lockout. */
     if ((int32_t)psp_read32(ac + AC_LOOK_COUNTER) > 0 ||
-        pressed(ac, 10) || pressed(ac, 11)) {
+        action_held(ac, 10) || action_held(ac, 11)) {
         r_a0 = ac;
         psp_func_00053234__orig();
         pitch_log(ac, "orig-button", (int)ry - 128, mdy);
@@ -379,7 +484,8 @@ void psp_func_00053234(void) {
      * makes aiming miss. The filter's state is the game's own word, so a
      * replay reproduces it and a frame the buttons handled hands over
      * smoothly. The mouse is a displacement and stays raw. */
-    const float target = -max * look_curve(stick_axis(ry));
+    const stick2 look = stick_look(rx, ry);
+    const float target = -max * look.y;
     float rate = f32_read(ac + AC_PITCH_RATE);
     const int same_way = (target > 0.0f && rate > 0.0f) || (target < 0.0f && rate < 0.0f);
     if (target == 0.0f || (rate != 0.0f && !same_way) ||
@@ -460,10 +566,9 @@ void psp_func_0004F06C(void) {
     psp_ctrl_last_stick(&axb, &ayb);
     float sx, sz, m = stick_walk(axb, ayb, &sx, &sz);
     if (mode == INPUT_MODERN) {
-        /* The game's direction, the magnitude from Y alone. */
-        const float ay = fabsf((float)((int)ayb - 128));
-        m = ay <= 30.0f ? 0.0f : (ay - 30.0f) / 97.0f;
-        if (m > 1.0f) m = 1.0f;
+        /* The game's direction, the processed magnitude from Y alone. */
+        const stick2 move = stick_radial(axb, ayb, input_tune()->move_dead);
+        m = fabsf(move.y);
         if (idx > 7) m = 0.0f;
         else { sx = f32_read(PUSH_DIR_TABLE + 8 * idx); sz = f32_read(PUSH_DIR_TABLE + 8 * idx + 4); }
     }
@@ -690,13 +795,11 @@ void psp_func_000746D4(void) {
  * machine chooses its handler by them. Below the threshold the yaw integrator
  * above is not even called.
  *
- * `modern` lowers the thresholds: left/right to just above the deadzone, so
- * the turning state engages at any deliberate deflection and the integrator
- * gets to use the magnitude -- 16 rather than 0, because a straight forward
- * push leaks a little X once it clears the 30-unit circle, and that must not
- * turn -- and forward/back to 40, the same radius `dual` walks at, now that
- * the push above scales the speed by the deflection and a walk that engages
- * at a nudge is a creep rather than a march.
+ * `modern` and `dual` read the recorded raw stick rather than the already
+ * deadzoned a1/a2 here.  That is important: accepting the game's 30-unit
+ * circle and adding a profile deadzone would recreate the double-deadzone we
+ * removed from the SDL side.  A small enter/exit gap keeps the selected state
+ * from chattering when the stick rests on the radial boundary.
  *
  * `dual` re-sources the bits: turning from the right stick's X (or from mouse
  * travel, held for a few polls after the last motion so the state does not
@@ -709,8 +812,12 @@ void psp_func_000746D4(void) {
  *
  * Precedence is the original's: right before left, forward before back. */
 
-enum { MODERN_TURN_THRESHOLD = 16, MODERN_WALK_THRESHOLD = 40,
-       MOUSE_HOLD_POLLS = 4 };
+enum { MOUSE_HOLD_POLLS = 4 };
+static int g_move_gate, g_turn_gate;
+
+static int hysteresis(int held, float value, float enter, float leave) {
+    return held ? value > leave : value >= enter;
+}
 
 /* Mouse travel arrives at the mouse's rate and this runs at the guest's; a
  * bit that dropped the poll after a motion event would flicker the state
@@ -763,6 +870,140 @@ static int in_play(void) {
     return psp_ctrl_polls() - g_ac_update_poll <= 2;
 }
 
+/* ---- physical gamepad -> game actions -----------------------------------
+ *
+ * The PSP packet has no triggers or stick clicks.  present.c carries the ten
+ * modern-pad controls in button bits the game's twelve-entry PSP converter
+ * ignores; because they are still in the sceCtrl packet, recordings retain
+ * them without a live-input side channel.  This replacement removes those
+ * carrier bits and remembers their held/edge state.  In menus it turns the
+ * familiar face buttons and bumpers back into PSP buttons.  In play the two
+ * action-query helpers below answer semantic actions directly, independent of
+ * the user's PSP key-assign row.
+ *
+ * The action indices are the game's own list (confirmed against their gameplay
+ * call sites and the active row at cfg+80): 4 change weapon, 5 boost, 6 arm R,
+ * 7 arm L/event, 12 view reset, 13 extension, 14 inside, 15 OB/EO and 16
+ * disarmament.  Actions 8 and 9 are strafe left/right; confusing the PSP
+ * shoulder masks in the active row for their semantic meaning made the first
+ * modern-pad cut faithfully strafe on LB/RB.  The last
+ * three have zero masks in the PSP row, which is why merely changing a PSP
+ * button table cannot expose them. */
+static struct {
+    uint32_t poll;
+    uint32_t down;
+    uint32_t pressed;
+} g_extra_pad;
+
+static uint32_t extra_menu_buttons(uint32_t extra) {
+    uint32_t psp = 0;
+    if (extra & LR_PAD_A)  psp |= 0x004000u;       /* Cross    */
+    if (extra & LR_PAD_B)  psp |= 0x002000u;       /* Circle   */
+    if (extra & LR_PAD_X)  psp |= 0x008000u;       /* Square   */
+    if (extra & LR_PAD_Y)  psp |= 0x001000u;       /* Triangle */
+    if (extra & (LR_PAD_LB | LR_PAD_LT)) psp |= 0x000100u;
+    if (extra & (LR_PAD_RB | LR_PAD_RT)) psp |= 0x000200u;
+    return psp;
+}
+
+static uint32_t extra_for_action(uint32_t action) {
+    switch (action) {
+    case 4:  return LR_PAD_RB;       /* Change unit         */
+    case 5:  return LR_PAD_LT;       /* Boost / jump        */
+    case 6:  return LR_PAD_RT;       /* Arm unit R          */
+    case 7:  return LR_PAD_LB;       /* Arm unit L / event  */
+    case 12: return LR_PAD_B;        /* Look reset          */
+    case 13: return LR_PAD_L3;       /* Extension           */
+    case 14: return LR_PAD_A;        /* Inside              */
+    case 15: return LR_PAD_R3;       /* OB / EO              */
+    case 16: return LR_PAD_Y;        /* Disarmament modifier */
+    default: return 0;
+    }
+}
+
+static int player_pad_is(uint32_t pad) {
+    const uint32_t holder = psp_read32(PLAYER_AC + AC_PAD_PTR);
+    return holder && pad && psp_read32(holder + 4) == pad;
+}
+
+static void extra_action_log(uint32_t action, int edge) {
+    static uint32_t poll, held_seen, edge_seen;
+    const uint32_t now = psp_ctrl_polls();
+    if (now != poll) { poll = now; held_seen = edge_seen = 0; }
+    uint32_t *seen = edge ? &edge_seen : &held_seen;
+    const uint32_t bit = action < 32 ? 1u << action : 0;
+    if (!bit || (*seen & bit)) return;
+    *seen |= bit;
+    FILE *log = input_log();
+    if (log) fprintf(log, "%u action=%u semantic-%s\n", now, action,
+                     edge ? "pressed" : "held");
+}
+
+void psp_func_00279A10(void) {
+    const uint32_t state = r_a0;
+    const uint32_t raw = r_a1;
+    const uint32_t extra = raw & LR_PAD_EXTRA;
+    const uint32_t poll = psp_ctrl_polls();
+    if (poll != g_extra_pad.poll) {
+        const uint32_t old = g_extra_pad.down;
+        g_extra_pad.poll = poll;
+        g_extra_pad.down = extra;
+        g_extra_pad.pressed = extra & ~old;
+        if (gamepad_modern() && extra != old) {
+            FILE *log = input_log();
+            if (log) fprintf(log, "%u pad extra=%08X pressed=%08X play=%d\n",
+                             poll, extra, g_extra_pad.pressed, in_play());
+        }
+    } else {
+        g_extra_pad.pressed |= extra & ~g_extra_pad.down;
+        g_extra_pad.down = extra;
+    }
+
+    uint32_t psp = raw & ~LR_PAD_EXTRA;
+    if (gamepad_modern() && !in_play()) psp |= extra_menu_buttons(extra);
+    r_a0 = state;
+    r_a1 = psp;
+    psp_func_00279A10__orig();
+}
+
+void psp_func_0005EFA0(void) {
+    const uint32_t pad = r_a0, action = r_a1;
+    psp_func_0005EFA0__orig();
+    const uint32_t bit = extra_for_action(action);
+    if (gamepad_modern() && bit && in_play() && player_pad_is(pad) &&
+        (g_extra_pad.down & bit)) {
+        r_v0 = 1;
+        extra_action_log(action, 0);
+    }
+}
+
+void psp_func_0005EFD4(void) {
+    const uint32_t pad = r_a0, action = r_a1;
+    psp_func_0005EFD4__orig();
+    const uint32_t bit = extra_for_action(action);
+    if (gamepad_modern() && bit && in_play() && player_pad_is(pad) &&
+        (g_extra_pad.pressed & bit)) {
+        r_v0 = 1;
+        extra_action_log(action, 1);
+    }
+}
+
+/* The game's disarmament-modifier check is already a semantic helper, but
+ * only one PSP control layout asks action 16 directly; the default rebuilds
+ * it as the four-button chord.  Y should be the modifier regardless of the
+ * saved layout, so inject here rather than pretending four unrelated actions
+ * are held everywhere else.  The game's next check still requires the weapon,
+ * extension or left-arm button that selects which part to purge. */
+void psp_func_0005F348(void) {
+    const uint32_t pad = r_a0;
+    psp_func_0005F348__orig();
+    if (gamepad_modern() && in_play() && player_pad_is(pad) &&
+        (g_extra_pad.down & LR_PAD_Y)) {
+        r_v0 = 1;
+        extra_action_log(16, 0);
+    }
+}
+
 void psp_func_00279A50(void) {
     const int mode = input_mode();
     if (mode == INPUT_CLASSIC) { psp_func_00279A50__orig(); return; }
@@ -783,19 +1024,31 @@ void psp_func_00279A50(void) {
          * drag across the pause menu is not owed to the AC on resume. */
         g_mouse_hold.dx = 0;
         g_mouse_hold.x_left = 0;
+        g_move_gate = g_turn_gate = 0;
         psp_cpu.r[5] = (uint32_t)(uint8_t)ax;
         psp_cpu.r[6] = (uint32_t)(uint8_t)ay;
         psp_func_00279A50__orig();
         return;
     }
-    const int tx = MODERN_TURN_THRESHOLD, ty = MODERN_WALK_THRESHOLD;
+    uint8_t axb, ayb;
+    psp_ctrl_last_stick(&axb, &ayb);
+    const input_tuning *tune = input_tune();
+    const stick2 move = stick_radial(axb, ayb, tune->move_dead);
+    g_move_gate = hysteresis(g_move_gate, move.raw_m,
+                             tune->move_enter, tune->move_dead);
 
     uint32_t bits = 0;
     if (mode == INPUT_MODERN) {
-        if      (ax >  tx) bits  = 0x8000u;
-        else if (ax < -tx) bits  = 0x4000u;
-        if      (ay < -ty) bits |= 0x1000u;
-        else if (ay >  ty) bits |= 0x2000u;
+        const float horizontal = fabsf(move.x);
+        g_turn_gate = hysteresis(g_turn_gate, horizontal, 0.04f, 0.015f);
+        if (g_turn_gate) {
+            if      (move.x > 0.0f) bits  = 0x8000u;
+            else if (move.x < 0.0f) bits  = 0x4000u;
+        }
+        if (g_move_gate) {
+            if      (move.y < -0.04f) bits |= 0x1000u;
+            else if (move.y >  0.04f) bits |= 0x2000u;
+        }
         r_v0 = bits;
         return;
     }
@@ -804,12 +1057,14 @@ void psp_func_00279A50(void) {
     int mdx, mdy;
     psp_ctrl_last_look(&rxb, &ryb, &mdx, &mdy);
     mouse_hold_update(mdx);
-    const int rx = (int)rxb - 128;
-    (void)ryb; (void)mdy;                  /* the pitch integrator's, above */
+    const stick2 look = stick_look(rxb, ryb);
+    const float horizontal = fabsf(look.x);
+    g_turn_gate = hysteresis(g_turn_gate, horizontal, 0.04f, 0.015f);
+    (void)mdy;                              /* the pitch integrator's, above */
 
     /* Turn: right stick X, else recent mouse X. */
-    if      (rx >  tx) bits = 0x8000u;
-    else if (rx < -tx) bits = 0x4000u;
+    if      (g_turn_gate && look.x > 0.0f) bits = 0x8000u;
+    else if (g_turn_gate && look.x < 0.0f) bits = 0x4000u;
     else if (g_mouse_hold.x_left > 0) bits = g_mouse_hold.sx > 0 ? 0x8000u : 0x4000u;
 
     /* Movement: the left stick as eight sectors, not two axes.
@@ -826,15 +1081,15 @@ void psp_func_00279A50(void) {
      * are still the game's two-state walk and strafe; only the asking is
      * proportional to where the stick points. */
     {
-        const int r2 = ax * ax + ay * ay;
-        if (r2 >= 40 * 40) {
-            /* cos 67.5 deg = 0.383; compare squares to stay in integers:
-             * |component| > 0.383 r  <=>  component^2 > 0.1464 r^2 */
-            const int fwd = -ay, back = ay, right = ax, left = -ax;
-            if (fwd   > 0 && fwd   * fwd   * 1000 > 146 * r2) bits |= 0x1000u;
-            if (back  > 0 && back  * back  * 1000 > 146 * r2) bits |= 0x2000u;
-            if (right > 0 && right * right * 1000 > 146 * r2) bits |= 0x200u;
-            if (left  > 0 && left  * left  * 1000 > 146 * r2) bits |= 0x100u;
+        if (g_move_gate && move.m > 0.0f) {
+            /* cos 67.5 deg = 0.383; its square is 0.1464. */
+            const float r2 = move.m * move.m;
+            const float fwd = -move.y, back = move.y;
+            const float right = move.x, left = -move.x;
+            if (fwd   > 0.0f && fwd   * fwd   > 0.1464f * r2) bits |= 0x1000u;
+            if (back  > 0.0f && back  * back  > 0.1464f * r2) bits |= 0x2000u;
+            if (right > 0.0f && right * right > 0.1464f * r2) bits |= 0x200u;
+            if (left  > 0.0f && left  * left  > 0.1464f * r2) bits |= 0x100u;
         }
     }
     r_v0 = bits;

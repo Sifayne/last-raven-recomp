@@ -71,6 +71,20 @@ against a scheduler, a software GE and the HLE:
 scripts/06-boot.sh
 ```
 
+For the current dual-stick controls in a window:
+
+```bash
+PSPRECOMP_WINDOW=1 PSPRECOMP_INPUT=dual scripts/06-boot.sh
+```
+
+The modern pad layout is LT boost, RT right arm, LB left arm/event, RB change
+weapon, L3 extension, R3 OB/EO, A inside, B view reset, and Y as the purge
+modifier; X is deliberately unassigned. Start, Back and the d-pad retain their
+usual roles, and A/B/X/Y remain conventional confirm/cancel/face buttons in
+menus. Set `PSPRECOMP_GAMEPAD=classic` to use the direct PSP button mapping
+with the enhanced sticks. The response and deadzone tuning variables are
+documented in [the current findings](docs/findings/state.md#the-instruments-and-what-each-can-and-cannot-tell-you).
+
 Then a scripted run — the intro skipped, the title menu reached, and stop:
 
 ```bash

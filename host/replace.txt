@@ -49,6 +49,23 @@
 # docs/findings/state.md, controls.
 0004F248   # yaw integrator -- see host/replacements.c
 
+# The physical PSP-button converter and the held/pressed action queries form
+# the modern gamepad's semantic boundary.  SDL's triggers and stick clicks do
+# not exist in SceCtrlData, so host/present.c carries all ten modern-pad
+# controls in bits the game's twelve-entry converter ignores.  00279A10 strips
+# those carrier bits, maps face buttons/bumpers back to PSP buttons outside
+# gameplay, and records their edge state.  The two 0005EFxx helpers add the
+# corresponding gameplay action for the player's pad only: LT boost, RT right
+# arm, LB left arm/event, RB change weapon, L3 extension, R3 OB/EO, A inside,
+# B view reset and Y purge modifier.  This reaches actions 12, 15 and 16,
+# whose PSP key-assign masks are zero, and keeps menu input unchanged.  The
+# first three replacements have no interior entry thunks.  0005F348 has three
+# ordinary internal branch targets; every external caller enters at its start.
+00279A10   # PSP buttons -> game buttons, plus modern-pad carrier capture
+0005EFA0   # action held -- add semantic gamepad actions for the player
+0005EFD4   # action pressed -- add semantic gamepad edges for the player
+0005F348   # purge-modifier command -- expose it on Y in every saved layout
+
 # The stick-to-buttons converter: psp_func_00279A50(state, ax, ay), from the
 # pad adaptor psp_func_002797D4. The PSP stick, after a circular deadzone of
 # radius 30, becomes four virtual bits -- 0x8000 right, 0x4000 left, 0x1000

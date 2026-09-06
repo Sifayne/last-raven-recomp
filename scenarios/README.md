@@ -102,9 +102,11 @@ they end at the same place, and `stop` is what makes that true.
 | `title-idle.pad` | the title menu, pressing nothing — the control | 1,800 |
 | `skip-intro.pad` | the title menu via circle-skip | 2,500 |
 | `hanger.pad` | the option menu over the 3D hangar | 430 |
+| `modern-menu.pad` | the same hangar route using modern-pad A/B carriers | 430 |
 | `new-game.pad` | the sound-settings panel | 6,000 |
 | `mission-1.pad` | name entry, garage, mission select, into a sortie | 1,790 |
 | `mission-effects.pad` | same route, then combat firing and boost input | 2,210 |
+| `modern-buttons.pad` | a sortie, then every modern gameplay control and Y+RT purge | 2,280 |
 | `main-menu.pad` | the main menu with the AC behind it — M2's first frame | 748 |
 | `garage.pad` | the sortie launch, the AC alone in the hangar — M2's second frame | 925 |
 | `option.pad` | the option box, by taps rather than a recording | 3,900 |
@@ -112,6 +114,9 @@ they end at the same place, and `stop` is what makes that true.
 `hanger.pad` and `new-game.pad` reach the same scene; the short one exists
 because a run that takes fourteen seconds gets measured twenty times and one
 that takes minutes gets measured twice. Pair either with `title-idle.pad`.
+`modern-menu.pad` is the carrier-layer parity check for that short route;
+`modern-buttons.pad` is its in-play counterpart.  Run both with
+`PSPRECOMP_INPUT=dual` or `PSPRECOMP_GAMEPAD=modern`.
 
 `render-checks.json` selects six poll-stamped frames from `mission-effects.pad`
 for fixed-input software/GL regression checks. See

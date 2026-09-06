@@ -1,0 +1,23 @@
+# Modern-pad menu compatibility.  This is hanger.pad with controller B/A
+# carrier bits in place of PSP Circle/Cross.  Under
+# PSPRECOMP_GAMEPAD=modern they must remain ordinary cancel/confirm buttons
+# outside gameplay and reach the same option-menu frame.
+#
+#   scripts/09-replay.sh --decode --env PSPRECOMP_GAMEPAD=modern \
+#     scenarios/modern-menu.pad
+
+drain 60
+
+@87     state 0x00000800 128 128   # controller B -> Circle in menus
+@91     state none 128 128
+@161    state 0x00000800 128 128
+@163    state none 128 128
+@271    state start 128 128
+@273    state none 128 128
+@293    state start 128 128
+@294    state none 128 128
+@316    state 0x00000400 128 128   # controller A -> Cross in menus
+@318    state none 128 128
+
+@420    mark "modern pad reached option menu, caution box up"
+@430    stop

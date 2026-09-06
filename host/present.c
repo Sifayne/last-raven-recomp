@@ -14,6 +14,7 @@
  * first. */
 
 #include "present.h"
+#include "controls.h"
 
 #include "psprecomp/clock.h"
 #include "psprecomp/hle.h"
@@ -118,7 +119,9 @@ static void present_frame(uint32_t addr, uint32_t stride, uint32_t fmt) {
 
 /* ---- input ---------------------------------------------------------------- */
 
-static _Atomic uint32_t g_pad_buttons;
+static _Atomic uint32_t g_key_buttons;
+static _Atomic uint32_t g_mouse_buttons;
+static _Atomic uint32_t g_controller_buttons;
 static _Atomic uint8_t  g_pad_ax = 128, g_pad_ay = 128;
 
 /* SDL key -> PSP button. Headless mode holds buttons for a whole run; here a
@@ -138,6 +141,7 @@ static _Atomic uint8_t  g_pad_ax = 128, g_pad_ay = 128;
  * the classic layout. Which button does what in the game is the game's
  * key-assign, not this table's. */
 typedef struct { SDL_Keycode key; uint32_t bit; } key_bind;
+typedef struct { uint8_t sdl; uint32_t psp; } controller_bind;
 
 static const key_bind KEYS_CLASSIC[] = {
     { SDLK_RIGHT,      0x000020 }, { SDLK_LEFT,      0x000080 },
@@ -163,10 +167,13 @@ static const key_bind KEYS_WASD[] = {
 static const uint32_t MOUSE_WASD[4] = { 0, 0x008000, 0x000040, 0x000010 };
 
 static int g_keys_wasd;                     /* PSPRECOMP_KEYS=wasd */
+static int g_gamepad_modern;                /* semantic buttons in modern/dual */
+static SDL_GameController *g_controller;    /* one controller owns the pad lane */
+static SDL_JoystickID      g_controller_id = -1;
 
-static void set_bit(uint32_t bit, int down) {
-    const uint32_t b = atomic_load(&g_pad_buttons);
-    atomic_store(&g_pad_buttons, down ? (b | bit) : (b & ~bit));
+static void set_bit(_Atomic uint32_t *buttons, uint32_t bit, int down) {
+    if (down) atomic_fetch_or(buttons, bit);
+    else      atomic_fetch_and(buttons, ~bit);
 }
 
 /* The stick from the keyboard: which of W/A/S/D are down, as bits, and the
@@ -177,38 +184,53 @@ static void set_bit(uint32_t bit, int down) {
  * dead while A and D walked (5 Sep) -- the pad's centre kept overwriting
  * the keyboard's byte between key events. */
 static _Atomic uint8_t g_key_ax = 128, g_key_ay = 128;
+static _Atomic int     g_key_x_owned, g_key_y_owned;
+static uint8_t         g_key_down[SDL_NUM_SCANCODES];
 
-static void set_key_stick(SDL_Keycode k, int down) {
-    static unsigned held;                   /* 1 W, 2 S, 4 A, 8 D */
-    unsigned bit = 0;
-    switch (k) {
-    case SDLK_w: bit = 1; break;
-    case SDLK_s: bit = 2; break;
-    case SDLK_a: bit = 4; break;
-    case SDLK_d: bit = 8; break;
-    default: return;
-    }
-    held = down ? (held | bit) : (held & ~bit);
-    const int x = ((held & 8) ? 1 : 0) - ((held & 4) ? 1 : 0);
-    const int y = ((held & 2) ? 1 : 0) - ((held & 1) ? 1 : 0);
+static void rebuild_key_stick(void) {
+    const int w = g_key_down[SDL_SCANCODE_W] != 0;
+    const int s = g_key_down[SDL_SCANCODE_S] != 0;
+    const int a = g_key_down[SDL_SCANCODE_A] != 0;
+    const int d = g_key_down[SDL_SCANCODE_D] != 0;
+    const int x = d - a, y = s - w;
     atomic_store(&g_key_ax, (uint8_t)(128 + 127 * x));
     atomic_store(&g_key_ay, (uint8_t)(128 + 127 * y));
+    /* Opposite keys explicitly own a centred axis.  Without these flags,
+     * W+S handed Y back to a drifting controller instead of cancelling it. */
+    atomic_store(&g_key_x_owned, a || d);
+    atomic_store(&g_key_y_owned, w || s);
 }
 
-static void set_key(SDL_Keycode k, int down) {
+static void rebuild_key_buttons(void) {
     const key_bind *keys = g_keys_wasd ? KEYS_WASD : KEYS_CLASSIC;
     const size_t n = g_keys_wasd ? sizeof KEYS_WASD / sizeof *KEYS_WASD
                                  : sizeof KEYS_CLASSIC / sizeof *KEYS_CLASSIC;
-    if (g_keys_wasd) set_key_stick(k, down);
+    uint32_t buttons = 0;
     for (size_t i = 0; i < n; i++) {
-        if (keys[i].key != k) continue;
-        set_bit(keys[i].bit, down);
-        return;
+        const SDL_Scancode sc = SDL_GetScancodeFromKey(keys[i].key);
+        if (sc != SDL_SCANCODE_UNKNOWN && g_key_down[sc]) buttons |= keys[i].bit;
     }
+    atomic_store(&g_key_buttons, buttons);
+}
+
+static void set_key(SDL_Scancode sc, int down) {
+    if (sc <= SDL_SCANCODE_UNKNOWN || sc >= SDL_NUM_SCANCODES) return;
+    g_key_down[sc] = down != 0;
+    if (g_keys_wasd) rebuild_key_stick();
+    rebuild_key_buttons();
+}
+
+static void clear_keys(void) {
+    memset(g_key_down, 0, sizeof g_key_down);
+    atomic_store(&g_key_buttons, 0);
+    atomic_store(&g_key_ax, 128);
+    atomic_store(&g_key_ay, 128);
+    atomic_store(&g_key_x_owned, 0);
+    atomic_store(&g_key_y_owned, 0);
 }
 
 static void set_button(uint8_t b, int down) {
-    static const struct { uint8_t sdl; uint32_t psp; } MAP[] = {
+    static const controller_bind CLASSIC[] = {
         { SDL_CONTROLLER_BUTTON_DPAD_RIGHT,          0x000020 },
         { SDL_CONTROLLER_BUTTON_DPAD_LEFT,           0x000080 },
         { SDL_CONTROLLER_BUTTON_DPAD_DOWN,           0x000040 },
@@ -222,10 +244,28 @@ static void set_button(uint8_t b, int down) {
         { SDL_CONTROLLER_BUTTON_LEFTSHOULDER,        0x000100 },
         { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,       0x000200 },
     };
-    for (size_t i = 0; i < sizeof MAP / sizeof *MAP; i++) {
-        if (MAP[i].sdl != b) continue;
-        const uint32_t v = atomic_load(&g_pad_buttons);
-        atomic_store(&g_pad_buttons, down ? (v | MAP[i].psp) : (v & ~MAP[i].psp));
+    static const controller_bind MODERN[] = {
+        { SDL_CONTROLLER_BUTTON_DPAD_RIGHT,          0x000020 },
+        { SDL_CONTROLLER_BUTTON_DPAD_LEFT,           0x000080 },
+        { SDL_CONTROLLER_BUTTON_DPAD_DOWN,           0x000040 },
+        { SDL_CONTROLLER_BUTTON_DPAD_UP,             0x000010 },
+        { SDL_CONTROLLER_BUTTON_START,               0x000008 },
+        { SDL_CONTROLLER_BUTTON_BACK,                0x000001 },
+        { SDL_CONTROLLER_BUTTON_A,                   LR_PAD_A },
+        { SDL_CONTROLLER_BUTTON_B,                   LR_PAD_B },
+        { SDL_CONTROLLER_BUTTON_X,                   LR_PAD_X },
+        { SDL_CONTROLLER_BUTTON_Y,                   LR_PAD_Y },
+        { SDL_CONTROLLER_BUTTON_LEFTSHOULDER,        LR_PAD_LB },
+        { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,       LR_PAD_RB },
+        { SDL_CONTROLLER_BUTTON_LEFTSTICK,           LR_PAD_L3 },
+        { SDL_CONTROLLER_BUTTON_RIGHTSTICK,          LR_PAD_R3 },
+    };
+    const controller_bind *map = g_gamepad_modern ? MODERN : CLASSIC;
+    const size_t n = g_gamepad_modern ? sizeof MODERN / sizeof *MODERN
+                                      : sizeof CLASSIC / sizeof *CLASSIC;
+    for (size_t i = 0; i < n; i++) {
+        if (map[i].sdl != b) continue;
+        set_bit(&g_controller_buttons, map[i].psp, down);
         return;
     }
 }
@@ -239,23 +279,38 @@ static _Atomic uint8_t  g_pad_rx = 128, g_pad_ry = 128;
 static int              g_mouse_want;       /* PSPRECOMP_MOUSE=1 */
 static int              g_mouse_grabbed;
 
+static uint8_t axis_byte(int16_t value) {
+    /* Preserve the complete SDL range here.  The selected control profile
+     * applies one radial deadzone later, after recording; doing an axial 25%
+     * cut here as well made cardinal movement need roughly half a real stick
+     * and bent diagonals toward the axes. */
+    const int32_t v = value;
+    if (v >= 0) return (uint8_t)(128 + v * 127 / 32767);
+    return (uint8_t)(128 + v * 127 / 32768);
+}
+
 static void set_axis(uint8_t axis, int16_t value) {
-    /* Sticks only: the triggers rest at -32768, not 0, and would read as a
-     * stick held hard one way. */
+    if (axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ||
+        axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
+        if (!g_gamepad_modern) return;
+        const uint32_t bit = axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? LR_PAD_LT : LR_PAD_RT;
+        const int held = (atomic_load(&g_controller_buttons) & bit) != 0;
+        /* SDL's GameController layer normalises triggers to 0..32767.
+         * Separate 50%/25% press/release thresholds avoid chatter around the
+         * actuation point without making a light touch sticky. */
+        if (!held && value >= 16384) set_bit(&g_controller_buttons, bit, 1);
+        if ( held && value <=  8192) set_bit(&g_controller_buttons, bit, 0);
+        return;
+    }
     if (axis != SDL_CONTROLLER_AXIS_LEFTX  && axis != SDL_CONTROLLER_AXIS_LEFTY &&
         axis != SDL_CONTROLLER_AXIS_RIGHTX && axis != SDL_CONTROLLER_AXIS_RIGHTY)
         return;
-    /* 8192 of deadzone, then the full 0..255 range across the remaining
-     * ~24k of travel, centred on 128 like the real stick. */
-    const int dead = 8192;
-    int v = 128;
-    if (value > dead)  v = 128 + (value - dead) * 127 / (32767 - dead);
-    if (value < -dead) v = 128 + (value + dead) * 127 / (32768 - dead);
+    const uint8_t v = axis_byte(value);
     switch (axis) {
-    case SDL_CONTROLLER_AXIS_LEFTX:  atomic_store(&g_pad_ax, (uint8_t)v); break;
-    case SDL_CONTROLLER_AXIS_LEFTY:  atomic_store(&g_pad_ay, (uint8_t)v); break;
-    case SDL_CONTROLLER_AXIS_RIGHTX: atomic_store(&g_pad_rx, (uint8_t)v); break;
-    default:                         atomic_store(&g_pad_ry, (uint8_t)v); break;
+    case SDL_CONTROLLER_AXIS_LEFTX:  atomic_store(&g_pad_ax, v); break;
+    case SDL_CONTROLLER_AXIS_LEFTY:  atomic_store(&g_pad_ay, v); break;
+    case SDL_CONTROLLER_AXIS_RIGHTX: atomic_store(&g_pad_rx, v); break;
+    default:                         atomic_store(&g_pad_ry, v); break;
     }
 }
 
@@ -275,10 +330,72 @@ static void mouse_grab(int on) {
  * events of one press never sees the press half-applied. Cheap. */
 static void publish_pad(void) {
     const uint8_t kax = atomic_load(&g_key_ax), kay = atomic_load(&g_key_ay);
-    psp_ctrl_set(atomic_load(&g_pad_buttons),
-                 kax != 128 ? kax : atomic_load(&g_pad_ax),
-                 kay != 128 ? kay : atomic_load(&g_pad_ay));
+    const uint32_t buttons = atomic_load(&g_key_buttons) |
+                             atomic_load(&g_mouse_buttons) |
+                             atomic_load(&g_controller_buttons);
+    psp_ctrl_set(buttons,
+                 atomic_load(&g_key_x_owned) ? kax : atomic_load(&g_pad_ax),
+                 atomic_load(&g_key_y_owned) ? kay : atomic_load(&g_pad_ay));
     psp_ctrl_set_look(atomic_load(&g_pad_rx), atomic_load(&g_pad_ry));
+}
+
+static int gamepad_modern(void) {
+    const char *layout = getenv("PSPRECOMP_GAMEPAD");
+    if (layout && !strcmp(layout, "modern")) return 1;
+    if (layout && !strcmp(layout, "classic")) return 0;
+    const char *input = getenv("PSPRECOMP_INPUT");
+    return input && (!strcmp(input, "modern") || !strcmp(input, "dual"));
+}
+
+static void clear_controller(void) {
+    atomic_store(&g_controller_buttons, 0);
+    atomic_store(&g_pad_ax, 128);
+    atomic_store(&g_pad_ay, 128);
+    atomic_store(&g_pad_rx, 128);
+    atomic_store(&g_pad_ry, 128);
+}
+
+static void sample_controller(void) {
+    if (!g_controller) return;
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++)
+        set_button((uint8_t)b, SDL_GameControllerGetButton(
+            g_controller, (SDL_GameControllerButton)b));
+    for (int a = 0; a < SDL_CONTROLLER_AXIS_MAX; a++)
+        set_axis((uint8_t)a, SDL_GameControllerGetAxis(
+            g_controller, (SDL_GameControllerAxis)a));
+}
+
+static int open_controller(int device_index) {
+    if (g_controller || !SDL_IsGameController(device_index)) return 0;
+    SDL_GameController *c = SDL_GameControllerOpen(device_index);
+    if (!c) {
+        fprintf(stderr, "present: cannot open controller %d: %s\n",
+                device_index, SDL_GetError());
+        return 0;
+    }
+    SDL_Joystick *joy = SDL_GameControllerGetJoystick(c);
+    const SDL_JoystickID id = joy ? SDL_JoystickInstanceID(joy) : -1;
+    if (id < 0) {
+        SDL_GameControllerClose(c);
+        return 0;
+    }
+    g_controller = c;
+    g_controller_id = id;
+    clear_controller();
+    sample_controller();
+    fprintf(stderr, "present: controller \"%s\" opened as the active pad -- "
+                    "%s buttons, radial stick filtering, keyboard overrides per axis\n",
+            SDL_GameControllerName(c) ? SDL_GameControllerName(c) : "?",
+            g_gamepad_modern ? "modern" : "PSP");
+    publish_pad();
+    return 1;
+}
+
+static void open_first_controller(void) {
+    if (g_controller) return;
+    const int n = SDL_NumJoysticks();
+    for (int i = 0; i < n; i++)
+        if (open_controller(i)) return;
 }
 
 /* ---- audio ---------------------------------------------------------------- */
@@ -611,6 +728,7 @@ static void *sdl_thread(void *arg) {
         const char *k = getenv("PSPRECOMP_KEYS");
         g_keys_wasd = k && !strcmp(k, "wasd");
     }
+    g_gamepad_modern = gamepad_modern();
     if (g_keys_wasd)
         fprintf(stderr, "present: keys wasd stick | space/z cross, x circle, "
                         "c square, v triangle | q/e shoulders | enter start | "
@@ -621,6 +739,10 @@ static void *sdl_thread(void *arg) {
                         "a square, s triangle | q/e shoulders | enter start | "
                         "backspace select | PSPRECOMP_KEYS=wasd for a mouse layout | "
                         "close window to stop\n");
+    if (g_gamepad_modern)
+        fprintf(stderr, "present: gamepad LT boost | RT right arm | LB left arm | "
+                        "RB switch | L3 extension | R3 OB/EO | A inside | "
+                        "B view reset | Y purge modifier | X spare\n");
     /* Mouse-look, only when asked for. Captured from the start so a run
      * launched for it is playable at once; Escape lets go, a click retakes.
      * After the GL handoff above on purpose -- that block owns the context
@@ -630,6 +752,8 @@ static void *sdl_thread(void *arg) {
         g_mouse_want = m && *m && strcmp(m, "0") != 0;
         if (g_mouse_want) mouse_grab(1);
     }
+
+    open_first_controller();
 
     start_publish(1);
 
@@ -708,27 +832,30 @@ static void *sdl_thread(void *arg) {
                 psp_sched_stop_all("window closed");
                 return NULL;
             case SDL_CONTROLLERDEVICEADDED: {
-                /* Named, because a pad nobody remembers plugging in still
-                 * has a stick, and its drift has been mistaken for a dead
-                 * keyboard. */
-                SDL_GameController *c = SDL_GameControllerOpen(e.cdevice.which);
-                fprintf(stderr, "present: controller \"%s\" opened -- its stick and the "
-                                "keyboard's merge per axis, the keyboard winning where held\n",
-                        c ? SDL_GameControllerName(c) : "?");
+                /* One controller owns this lane.  Opening every connected pad
+                 * let an idle second device overwrite the one in the hand. */
+                open_controller(e.cdevice.which);
                 break;
             }
             case SDL_CONTROLLERDEVICEREMOVED: {
-                SDL_GameController *c = SDL_GameControllerFromInstanceID(
-                    e.cdevice.which);
-                if (c) SDL_GameControllerClose(c);
+                if (e.cdevice.which != g_controller_id) break;
+                fprintf(stderr, "present: active controller removed; input cleared\n");
+                SDL_GameControllerClose(g_controller);
+                g_controller = NULL;
+                g_controller_id = -1;
+                clear_controller();
+                open_first_controller();
+                publish_pad();
                 break;
             }
             case SDL_CONTROLLERBUTTONDOWN:
             case SDL_CONTROLLERBUTTONUP:
+                if (e.cbutton.which != g_controller_id) break;
                 set_button(e.cbutton.button, e.cbutton.state);
                 publish_pad();
                 break;
             case SDL_CONTROLLERAXISMOTION:
+                if (e.caxis.which != g_controller_id) break;
                 set_axis(e.caxis.axis, e.caxis.value);
                 publish_pad();
                 break;
@@ -743,12 +870,24 @@ static void *sdl_thread(void *arg) {
                 /* The click that captures the pointer is not also a shot. */
                 if (!g_mouse_grabbed) { if (e.type == SDL_MOUSEBUTTONDOWN) mouse_grab(1); break; }
                 if (g_keys_wasd && e.button.button < 4 && MOUSE_WASD[e.button.button]) {
-                    set_bit(MOUSE_WASD[e.button.button], e.type == SDL_MOUSEBUTTONDOWN);
+                    set_bit(&g_mouse_buttons, MOUSE_WASD[e.button.button],
+                            e.type == SDL_MOUSEBUTTONDOWN);
                     publish_pad();
                 }
                 break;
             case SDL_WINDOWEVENT:
-                if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) mouse_grab(0);
+                if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                    mouse_grab(0);
+                    clear_keys();
+                    atomic_store(&g_mouse_buttons, 0);
+                    clear_controller();
+                    publish_pad();
+                } else if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+                    /* SDL need not emit motion/button events for controls that
+                     * stayed held while another window owned focus. */
+                    sample_controller();
+                    publish_pad();
+                }
                 break;
             case SDL_KEYDOWN:
             case SDL_KEYUP:
@@ -756,7 +895,7 @@ static void *sdl_thread(void *arg) {
                     if (e.type == SDL_KEYDOWN) mouse_grab(0);
                     break;
                 }
-                set_key(e.key.keysym.sym, e.key.state == SDL_PRESSED);
+                set_key(e.key.keysym.scancode, e.key.state == SDL_PRESSED);
                 publish_pad();
                 break;
             }
