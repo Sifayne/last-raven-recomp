@@ -786,6 +786,82 @@ play, but both matter to the frame-exact comparisons this document's
 methodology rests on, so the default stays synchronous and the mode is a
 knob for someone who wants the 7% at 1080p more than exact dumps.
 
+## 22. The list execution in the stall updates
+
+Section 21 left 3.4 ms of the 1080p frame in the runtime's execution of
+list chunks during the game's stall updates. Timers in the interpreter
+(`PSPRECOMP_GE_PROFILE=1`, per section and per command) say where it goes:
+of 4.2 s spent in `run_list` over the profile run, model decode is 10%,
+the backend append 3%, the pixel-state pushes 1%, and 86% is "the rest of
+the walk" -- which the per-command split resolves at once. Every command
+costs 9-24 ns except PRIM, at 5,880 ns each over 635 thousand of them,
+and PRIM's cost is the backend's texture bind: 2.78 s per run, of which
+1.96 s is decoding and 0.12 s uploading 1,674 MiB of RGBA in 1,896
+uploads averaging 905 KB, after 1,690 dirty invalidations.
+
+The texture is the display buffer. This game samples the buffer it is
+drawing into (a 512x512 8888 texture at `0x04088000`, stride 512, over the
+2048x1080 target) for its screen effects, and in resolution mode every bind
+of it did three things: read the dirty target back into guest memory (a
+`glReadPixels`, so a GPU sync mid-frame), decode and upload the megabyte
+again because the readback had changed the bytes under the texture, and
+then blit the target into the GPU-side view over the part just uploaded.
+The upload was never seen.
+
+Now a target the view can supply is not read back on a bind, and its
+bytes are left out of the texture's write generation, so the decoded copy
+stays valid until something outside the target changes. Only the bytes of
+targets the view supplies are excluded: a target the texture overlaps that
+the view cannot show -- here the 256x128 5551 scratch surface at
+`0x04154000`, under rows 408-439 of the same 512-row texture -- is still
+read back and still invalidates, as it must.
+
+The first version of this was wrong in a way only frame dumps could show.
+With the readback gone the guest write serial no longer moved on a bind,
+and the repeated-setter skip of section 18 began skipping a second,
+identical bind of the view. That bind is not repeated state: it is what
+flushes the draws pending into the buffer and blits their result into the
+view before the next primitive samples it. 140 of the 400 dumps of the
+1080p run differed from the baseline by two units in one channel on the
+bottom one or two rows, where the effect's last quad reads what the
+previous quad wrote. A bind of a render-target view is now never skipped
+(361 of 295 thousand binds per run). A second latent hazard was closed on
+the way: the model flush re-applies GL state only when tracked state
+changed, but the stencil/alpha passes, a CPU import, a readback and a
+reallocation all borrow colour mask, blend and sampler bindings between
+two flushes; a flag now forces the re-apply after any of them. No frame
+in this game was seen to need it.
+
+| Walk run, 4,000 frames at 30 Hz, 1080p | Before | After |
+| --- | ---: | ---: |
+| Texture uploads | 1,834 | 411 |
+| Dirty invalidations | 1,628 | 205 |
+| Texture bind time (decode, upload) | 2.70 s (1.91, 0.12) | 0.30 s (0.23, 0.03) |
+| RGBA uploaded | 1,614 MiB | 191 MiB |
+| Readback time | 2.13 s | 1.87 s |
+
+| GL, uncapped, GPU transform, synchronous readback | Before | After |
+| --- | ---: | ---: |
+| 1920x1080 | 111.7 fps, 9.03 ms | 134.9 fps, 7.47 ms |
+| 1920x1080, list execution in the stall updates | 3.16 ms | 1.43 ms |
+| 1920x1080, present readback | 0.68 ms | 0.86 ms |
+| 480x272 native | 141.9 fps, 7.11 ms | 143.3 fps, 7.04 ms |
+
+The present readback grew because the GPU wait the mid-frame readback used
+to absorb now lands there. Native is unchanged, as it should be: outside
+resolution mode a target sampled as a texture is bound directly. The
+simulation columns of the tick logs (countdown, position, yaw) are identical
+between the runs; only the probe's interpolation counters differ, as they
+do for any two frame rates.
+
+Exactness: render tests 430/430 on both backends, resolution 40/40, aspect
+35/35, and 400 guest-memory dumps of the 1080p walk run, every tenth
+present, identical to two baseline runs across the whole mission. The
+dumps that differ -- the intro movie (30-42), the narration screen (122)
+and the briefing fades (126-134) -- differ between two runs of the same
+binary as well: they are paced by the wall clock, and a run that finishes
+the movie a frame earlier shows every fade a frame further on.
+
 ## Reproduction
 
 ```sh
@@ -812,6 +888,7 @@ bash reports/game-tick-review/opt/run-opt.sh     # exactness + 60/120/144/uncapp
 bash reports/game-tick-review/opt/link-probe9.sh # section profiler, boot9opt-14
 PSPRECOMP_GE_PROFILE=1 <any boot> ...            # per-vertex pipeline breakdown at the end of the run
 build/host-opt/gereplay frame.gcap gl out.ppm    # GL with the GPU transform; PSPRECOMP_GL_TRANSFORM=cpu for the old path
+PSPRECOMP_FRAMES=<prefix> PSPRECOMP_FRAMES_EVERY=10 <any boot> ...   # 400 guest-memory dumps for a frame-exact comparison
 OPT=1 scripts/04-emit-build.sh && OPT=1 BOOT_NO_RUN=1 scripts/06-boot.sh   # the optimised build, build/host-opt/
 ```
 

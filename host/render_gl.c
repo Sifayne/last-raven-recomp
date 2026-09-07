@@ -393,9 +393,16 @@ typedef struct {
      * batch survives the GE pushing the same pixel state before every
      * primitive. The texture setter may only be skipped while guest memory
      * has not been written since the bind: the cache validates against that
-     * serial and would otherwise owe a re-upload the pending batch cannot see. */
+     * serial and would otherwise owe a re-upload the pending batch cannot see.
+     * A bind of a render-target view is never skipped: the bind is what
+     * flushes the draws pending into that target and blits its current
+     * pixels into the view, and the primitive after it reads them. */
     uint64_t bound_serial, bound_clut_gen, clut_gen, setters_skipped;
-    int      tex_valid;
+    int      tex_valid, bound_is_view;
+    /* Set by every pass that borrows GL state between two flushes (the stencil
+     * and alpha passes, a CPU import, a readback, a reallocation); the next
+     * model flush then re-applies everything even if nothing tracked changed. */
+    int      disturbed;
 } model_uniforms;
 typedef struct {
     int      used, dirty, configured;
@@ -1207,6 +1214,7 @@ static void stencil_pass_state(rendertarget *r) {
 
 static void alpha_to_stencil(rendertarget *r) {
     if (r->stencil_valid || r->fmt != 3) return;
+    g.mu.disturbed = 1;
     stencil_pass_state(r);
     p_glBindTexture(GL_TEXTURE_2D, g.stencil_copy);
     if (g.stencil_copy_w != r->w || g.stencil_copy_h != r->h) {
@@ -1234,6 +1242,7 @@ static void alpha_to_stencil(rendertarget *r) {
 
 static void stencil_to_alpha(rendertarget *r) {
     if (!r->alpha_dirty) return;
+    g.mu.disturbed = 1;
     stencil_pass_state(r);
     p_glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
     p_glClearColor(0, 0, 0, 0); p_glClear(GL_COLOR_BUFFER_BIT);
@@ -1498,6 +1507,7 @@ static void rt_guest_write(uint32_t addr, uint32_t size) {
 }
 
 static int rt_allocate(rendertarget *r, int inherit) {
+    g.mu.disturbed = 1;
     p_glGenFramebuffers(1, &r->fbo);
     p_glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
     p_glGenTextures(1, &r->colour);
@@ -1574,6 +1584,7 @@ static int rt_prepare(int i) {
 
 static void rt_import(rendertarget *r) {
     if (!r->cpu_pending || !r->configured) return;
+    g.mu.disturbed = 1;
     stencil_to_alpha(r);
     uint32_t *row = malloc((size_t)r->w * 4), *values = malloc((size_t)r->stride * 4);
     if (!row || !values) {
@@ -1895,11 +1906,43 @@ static uint32_t level_bytes(const psp_tex_state *t, int level) {
     return bytes > UINT32_MAX ? UINT32_MAX : (uint32_t)bytes;
 }
 
-static uint64_t texture_generation(const psp_tex_state *t, int top) {
+/* The newest write generation under the texture's bytes. `supplied` is a
+ * bit per render target whose part of the texture texcache_get is going to
+ * blit in from the GPU: the decoded copy of those bytes is never seen, so
+ * their changes -- every frame, for a display buffer sampled as a texture
+ * -- must not invalidate the entry. Every other byte counts, including a
+ * target the texture overlaps that the view cannot supply (a 16-bit
+ * off-screen target under a 512-row display texture, say): that one is
+ * read back into guest memory and must reach the decoded copy. */
+static uint64_t range_generation_excluding_rts(uint32_t addr, uint32_t size, uint32_t supplied) {
+    if (!supplied || !g.resolution) return psp_mem_range_generation(addr, size);
+    uint64_t pieces[2 * RT_MAX + 2][2]; int n = 1;
+    pieces[0][0] = addr; pieces[0][1] = (uint64_t)addr + size;
+    for (int i = 0; i < g.n_rts; i++) {
+        rendertarget *r = &g.rts[i];
+        if (!r->configured || !(supplied & (1u << i))) continue;
+        const uint64_t ra = r->addr, rb = (uint64_t)r->addr + (uint64_t)r->stride * r->guest_h * (r->fmt == 3 ? 4 : 2);
+        for (int k = 0; k < n; k++) {
+            const uint64_t a = pieces[k][0], b = pieces[k][1];
+            if (rb <= a || ra >= b) continue;
+            /* cut [ra,rb) out of [a,b): keep the left and right remainders */
+            pieces[k][1] = ra > a ? ra : a;
+            if (rb < b && n < 2 * RT_MAX + 2) { pieces[n][0] = rb; pieces[n][1] = b; n++; }
+        }
+    }
+    uint64_t newest = 0;
+    for (int k = 0; k < n; k++) {
+        if (pieces[k][1] <= pieces[k][0]) continue;
+        const uint64_t gen = psp_mem_range_generation((uint32_t)pieces[k][0], (uint32_t)(pieces[k][1] - pieces[k][0]));
+        if (gen > newest) newest = gen;
+    }
+    return newest;
+}
+static uint64_t texture_generation(const psp_tex_state *t, int top, uint32_t supplied) {
     uint64_t newest = 0;
     for (int level = 0; level <= top; level++) {
-        const uint64_t gen = psp_mem_range_generation(level_addr(t, level),
-                                                       level_bytes(t, level));
+        const uint64_t gen = range_generation_excluding_rts(level_addr(t, level),
+                                                             level_bytes(t, level), supplied);
         if (gen > newest) newest = gen;
     }
     if (t->fmt >= 4 && t->fmt <= 7 && g.clut_addr) {
@@ -1983,7 +2026,7 @@ static void cache_record(texcache_entry *e, const psp_tex_state *t, int top,
     e->last_used = g.cache_clock;
 }
 
-static GLuint texcache_native(const psp_tex_state *t) {
+static GLuint texcache_native(const psp_tex_state *t, uint32_t supplied) {
     if (!t->addr || t->w <= 0 || t->h <= 0) return 0;
     g.tex_requests++;
     const int top = texture_top(t);
@@ -2057,7 +2100,7 @@ static GLuint texcache_native(const psp_tex_state *t) {
                 g.tex_fast_hits++;
             } else {
                 const uint64_t gen_t0 = psp_os_mono_ns();
-                const uint64_t generation = texture_generation(t, top);
+                const uint64_t generation = texture_generation(t, top, supplied);
                 g.tex_generation_ns += psp_os_mono_ns() - gen_t0;
                 if (generation != e->content_generation) {
                     g.tex_invalidations++;
@@ -2123,7 +2166,7 @@ upload: {
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, uploaded_top);
     const uint64_t gen_t0 = psp_os_mono_ns();
-    const uint64_t generation = texture_generation(t, top);
+    const uint64_t generation = texture_generation(t, top, supplied);
     g.tex_generation_ns += psp_os_mono_ns() - gen_t0;
     cache_record(e, t, top, uploaded_top, generation,
                  psp_mem_write_serial());
@@ -2140,6 +2183,7 @@ upload: {
 static GLuint texcache_get(const psp_tex_state *t) {
     g.tex_sx = g.tex_sy = 1;
     int hit = 0;
+    uint32_t supplied = 0;
     double sx = 1, sy = 1;
     const uint32_t base = t->addr & PSP_ADDR_MASK;
     const uint64_t end = (uint64_t)base + (uint64_t)t->stride * t->h * (t->fmt == 3 ? 4 : 2);
@@ -2149,19 +2193,23 @@ static GLuint texcache_get(const psp_tex_state *t) {
             const uint64_t re =
                 (uint64_t)r->addr + (uint64_t)r->stride * r->guest_h * (r->fmt == 3 ? 4 : 2);
             if (!r->configured || base >= re || end <= r->addr) continue;
-            if (r->dirty || r->cpu_pending) {
+            const int view_ok = t->fmt == 3 && r->fmt == 3 && !t->swizzled && texture_top(t) == 0 &&
+                                t->stride == r->stride &&
+                                ((int64_t)r->addr - base) % ((int64_t)t->stride * 4) == 0;
+            if (view_ok) {
+                /* The target's part comes from the GPU below; only the CPU's
+                 * pending writes into it need to reach it, and no readback. */
+                if (r->cpu_pending) rt_import(r);
+                hit = 1;
+                supplied |= 1u << i;
+                if (r->sx > sx) sx = r->sx;
+                if (r->sy > sy) sy = r->sy;
+            } else if (r->dirty || r->cpu_pending) {
                 readback_rt(i);
                 r->dirty = 0;
             }
-            if (t->fmt == 3 && r->fmt == 3 && !t->swizzled && texture_top(t) == 0 &&
-                t->stride == r->stride &&
-                ((int64_t)r->addr - base) % ((int64_t)t->stride * 4) == 0) {
-                hit = 1;
-                if (r->sx > sx) sx = r->sx;
-                if (r->sy > sy) sy = r->sy;
-            }
         }
-    GLuint native = texcache_native(t);
+    GLuint native = texcache_native(t, supplied);
     if (!hit || !native) return native;
     const int w = (int)ceil(t->w * sx), h = (int)ceil(t->h * sy);
     if (w > g.max_size || h > g.max_size || w < 1 || h < 1) return native;
@@ -2214,7 +2262,7 @@ static void gl_texture(const psp_tex_state *t) {
     if (claim() != 0) return;
     if (g.mu.tex_valid && memcmp(t, &g.tex, sizeof *t) == 0 &&
         g.mu.bound_clut_gen == g.mu.clut_gen &&
-        psp_mem_write_serial() == g.mu.bound_serial) { g.mu.setters_skipped++; return; }
+        psp_mem_write_serial() == g.mu.bound_serial && !g.mu.bound_is_view) { g.mu.setters_skipped++; return; }
     g.mu.state_gen++;
     flush();
     g.mu.tex_valid = 1; g.mu.bound_clut_gen = g.mu.clut_gen; g.mu.bound_serial = psp_mem_write_serial();
@@ -2225,6 +2273,7 @@ static void gl_texture(const psp_tex_state *t) {
     const uint64_t bind_t0 = psp_os_mono_ns();
     g.bound = g.tex_enable ? texcache_get(t) : 0;
     g.tex_bind_ns += psp_os_mono_ns() - bind_t0;
+    g.mu.bound_is_view = g.bound && g.view_tex && g.bound == g.view_tex;
     if (g.bound) {
         p_glBindTexture(GL_TEXTURE_2D, g.bound);
         p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -2804,6 +2853,7 @@ static void flush(void) {
     use_program(g.prog, &g.um);
     apply_placement(r);
     apply_state();
+    g.mu.disturbed = 0;
     p_glBindVertexArray(g.vao);
     const size_t bbytes = g.batch_n * FLOATS_PER_VERT * sizeof(float);
     const size_t boff = ring_alloc(RING_BATCH, bbytes, FLOATS_PER_VERT * sizeof(float), 0);
@@ -2925,6 +2975,7 @@ static void readback_copy(rendertarget *r, const uint8_t *pixels, int rw, int rh
 /* Bind the target's pixels for reading at guest size: the wide or scaled
  * target resolved through the stage first. Returns 0 with rw/rh set. */
 static int readback_bind(rendertarget *r, int *rw, int *rh) {
+    g.mu.disturbed = 1;
     rt_import(r);
     *rw = r->guest_w; *rh = r->guest_h;
     stencil_to_alpha(r);
@@ -3191,10 +3242,11 @@ static void flush_model(void) {
     r->dirty = 1;
     p_glViewport(0, 0, rt_scene_w(r), r->h);
     use_program(g.prog_model, &g.ug);
-    if (g.mu.applied_gen != g.mu.state_gen || g.mu.applied_rt != g.cur_rt) {
+    if (g.mu.disturbed || g.mu.applied_gen != g.mu.state_gen || g.mu.applied_rt != g.cur_rt) {
         apply_placement(r);
         apply_state();
         g.mu.applied_gen = g.mu.state_gen; g.mu.applied_rt = g.cur_rt;
+        g.mu.disturbed = 0;
     }
     const double t1 = g.mu.profile ? gl_now_us() : 0;
     /* The blocks, packed: the bound range covers XFORM_MAXB blocks past the
