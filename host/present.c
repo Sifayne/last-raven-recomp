@@ -683,15 +683,21 @@ static void *sdl_thread(void *arg) {
                             SDL_GL_CONTEXT_PROFILE_CORE);
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     }
-    /* PSPRECOMP_WINDOW_SIZE=WxH opens the window at a chosen size, so a
-     * capture at 21:9 or 16:9 is a command rather than a drag. */
+    /* Windowed mode uses the saved size; borderless fullscreen uses the
+     * current desktop resolution without switching the display mode. */
     const lr_settings *settings = lr_settings_current();
     int win_w = settings->width, win_h = settings->height;
+    int display = settings->number[LR_DISPLAY] < 0 ? 0 : (int)settings->number[LR_DISPLAY] - 1;
+    if (display >= SDL_GetNumVideoDisplays()) {
+        fprintf(stderr, "present: display %d unavailable -- using primary display\n", display + 1);
+        display = 0;
+    }
     SDL_Window *win = SDL_CreateWindow(
         "Armored Core: Last Raven -- recompiled",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        SDL_WINDOWPOS_CENTERED_DISPLAY(display), SDL_WINDOWPOS_CENTERED_DISPLAY(display),
         win_w, win_h,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
+        (settings->number[LR_WINDOW_MODE] ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) |
         (g_gl_want ? SDL_WINDOW_OPENGL : 0));
     if (!win) {
         fprintf(stderr, "present: cannot create window: %s -- running headless\n",

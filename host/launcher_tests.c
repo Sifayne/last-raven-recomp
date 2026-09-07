@@ -1,9 +1,23 @@
 /* Exercise the actual event handlers and render the real screen. This fixture
  * uses a temporary preferences directory and a harmless child in place of a
  * game, so Save & Play can be verified without guest data or user settings. */
+#include <SDL2/SDL.h>
+/* Exercise display selection and unplugging even on a single-screen runner. */
+static int fixture_displays=-1;
+static int test_display_count(void) {
+    return fixture_displays<0?SDL_GetNumVideoDisplays():fixture_displays;
+}
+static const char *test_display_name(int index) {
+    if (fixture_displays<0) return SDL_GetDisplayName(index);
+    return index==0?"Desk monitor":"Side monitor";
+}
+#define SDL_GetNumVideoDisplays test_display_count
+#define SDL_GetDisplayName test_display_name
 #define main launcher_entry
 #include "launcher.c"
 #undef main
+#undef SDL_GetNumVideoDisplays
+#undef SDL_GetDisplayName
 #include <assert.h>
 #include <pthread.h>
 #include <sys/stat.h>
@@ -46,6 +60,29 @@ int main(int argc,char **argv) {
     assert(a.window); a.renderer=SDL_CreateRenderer(a.window,-1,SDL_RENDERER_SOFTWARE); assert(a.renderer);
     SDL_RenderSetLogicalSize(a.renderer,UI_W,UI_H); assert(!fonts(&a,NULL));
     lr_presets_defaults(&a.book); shot(&a,argv[1],"graphics");
+    a.focus=a.selected_row=LR_WINDOW_MODE;
+    pad_press(&a,SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+    assert(!strcmp(editing(&a)->value[LR_WINDOW_MODE],"borderless"));
+    shot(&a,argv[1],"windowed-fullscreen");
+    /* The row cycles connected screens with mouse, keyboard and controller. */
+    fixture_displays=2;
+    a.focus=a.selected_row=LR_DISPLAY;
+    pad_press(&a,SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+    assert(editing(&a)->number[LR_DISPLAY]==1);
+    draw(&a); click(&a,700,394);
+    assert(editing(&a)->number[LR_DISPLAY]==2 && a.modal==MODAL_NONE);
+    char screen[LR_VALUE_SIZE]; display_label(editing(&a),screen,sizeof screen);
+    assert(strstr(screen,"2: Side monitor"));
+    shot(&a,argv[1],"display-selection");
+    press(&a,SDLK_RIGHT); assert(editing(&a)->number[LR_DISPLAY]==-1);
+    press(&a,SDLK_LEFT); assert(editing(&a)->number[LR_DISPLAY]==2);
+    fixture_displays=1; refresh(&a);
+    display_label(&a.effective,screen,sizeof screen);
+    assert(strstr(screen,"unavailable") && editing(&a)->number[LR_DISPLAY]==2 && a.valid);
+    shot(&a,argv[1],"display-disconnected");
+    setenv("PSPRECOMP_DISPLAY","primary",1);
+    press(&a,SDLK_LEFT); refresh(&a);
+    assert(editing(&a)->number[LR_DISPLAY]==2 && a.effective.number[LR_DISPLAY]==-1);
     /* Mouse navigation and adjustment. */
     click(&a,500,166); assert(a.page==1); draw(&a);
     a.focus=LR_MOUSE_SENS; press(&a,SDLK_RIGHT);
@@ -66,6 +103,9 @@ int main(int argc,char **argv) {
     assert(!save(&a)); lr_presets disk; char error[LR_ERROR_SIZE];
     assert(!lr_presets_load(&disk,a.path,error));
     assert(disk.presets[disk.selected].settings.number[LR_MOUSE_SENS]==saved);
+    assert(!strcmp(disk.presets[disk.selected].settings.value[LR_WINDOW_MODE],"borderless"));
+    assert(disk.presets[disk.selected].settings.number[LR_DISPLAY]==2);
+    unsetenv("PSPRECOMP_DISPLAY"); fixture_displays=-1;
     unsetenv("PSPRECOMP_MOUSE_SENS");
     activate(&a,DUPLICATE); type(&a,"My mouse setup"); press(&a,SDLK_RETURN);
     assert(a.book.count==4 && !strcmp(a.book.presets[3].name,"My mouse setup"));

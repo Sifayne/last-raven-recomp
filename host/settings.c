@@ -15,7 +15,9 @@
 const lr_option_def lr_options[LR_OPTION_COUNT] = {
     C(RESOLUTION,"Rendering resolution","Graphics","Original preserves the PSP resolution. Match window renders at the window's physical pixel size and requires OpenGL.","psp","psp|window","Original (480x272)|Match window"),
     C(ASPECT,"Aspect ratio","Graphics","Original keeps the PSP-shaped view. Match window expands the 3D view on wider windows; the HUD remains centered. Requires OpenGL.","native","native|window","Original|Match window"),
-    {"WINDOW_SIZE","PSPRECOMP_WINDOW_SIZE","Window size","Graphics","Starting size in logical pixels, WIDTHxHEIGHT. You can also resize the game window while playing.",LR_SIZE,"960x544",NULL,NULL,1,16384,0,NULL},
+    {"WINDOW_SIZE","PSPRECOMP_WINDOW_SIZE","Window size","Graphics","Starting size in logical pixels, WIDTHxHEIGHT, in Windowed mode. Windowed fullscreen uses the desktop size instead.",LR_SIZE,"960x544",NULL,NULL,1,16384,0,NULL},
+    C(WINDOW_MODE,"Window mode","Graphics","Windowed fullscreen fills the display without borders at the current desktop resolution. Rendering resolution and aspect ratio remain separate settings.","windowed","windowed|borderless","Windowed|Windowed fullscreen"),
+    {"DISPLAY","PSPRECOMP_DISPLAY","Start on display","Graphics","Choose the screen for the game in either window mode. If the saved screen is unavailable, the primary display is used. Screen numbers follow the current display order.",LR_INTEGER,"primary",NULL,NULL,1,65535,1,"primary"},
     C(INPUT,"Control scheme","Controls","Classic uses the game's controls. Modern improves one-stick response. Dual separates movement from right-stick and mouse look.","classic","classic|modern|dual","Classic|Modern one-stick|Dual stick / mouse look"),
     C(GAMEPAD,"Controller layout","Controls","Modern: LT boost, RT right weapon, LB left weapon/event, RB switch, L3 extension, R3 OB/EO, A inside, B view reset, Y purge. Menu buttons remain conventional.","auto","auto|classic|modern","Follow control scheme|Classic PSP buttons|Modern action buttons"),
     C(KEYS,"Keyboard layout","Controls","WASD moves; Space boosts; left mouse fires right weapon; right/middle fires left weapon; Q switches. Enter is Start, Backspace Select. Uses the game's default key assignment.","classic","classic|wasd","Classic|WASD"),
@@ -92,6 +94,8 @@ int lr_settings_set(lr_settings *s, int id, const char *value,
                      d->key,d->min,d->max,d->special?", or ":"",d->special?d->special:"");
             return -1;
         }
+        if (d->type==LR_INTEGER && floor(n)!=n)
+            return fail(error,d->key,"expected a whole number");
         snprintf(canonical,sizeof canonical,"%.9g",n);
     }
     strcpy(s->value[id],canonical); s->number[id]=n; s->source[id]=source;
@@ -122,7 +126,7 @@ int lr_settings_resolve(lr_settings *s, char *error) {
     if (enhanced && s->render!=2)
         return fail(error,"RENDER","Match window resolution/aspect requires OpenGL; choose Automatic or OpenGL");
     s->gamepad=s->number[LR_GAMEPAD] ? s->number[LR_GAMEPAD]==2 : s->number[LR_INPUT]!=0;
-    s->window=s->number[LR_WINDOW]!=0 || s->render==2;
+    s->window=s->number[LR_WINDOW]!=0 || s->number[LR_WINDOW_MODE]!=0 || s->render==2;
     s->realtime=s->window || s->number[LR_REALTIME]!=0;
     return 0;
 }
@@ -130,6 +134,11 @@ int lr_settings_resolve(lr_settings *s, char *error) {
 void lr_option_label(const lr_settings *s, int id, char *out, size_t size) {
     const lr_option_def *d=&lr_options[id];
     if (d->type==LR_CHOICE && token(d->labels,(int)s->number[id],out,size)) return;
+    if (id==LR_DISPLAY) {
+        if (s->number[id]<0) snprintf(out,size,"Primary display");
+        else snprintf(out,size,"Display %.0f",s->number[id]);
+        return;
+    }
     if (id==LR_MOVE_DEADZONE || id==LR_LOOK_DEADZONE || id==LR_STICK_OUTER_DEADZONE)
         snprintf(out,size,"%.0f%%",s->number[id]*100);
     else if (id==LR_MOUSE_SENS) snprintf(out,size,"%.2fx",s->number[id]);

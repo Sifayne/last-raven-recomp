@@ -73,6 +73,17 @@ static void button(launcher *a,int id,int x,int y,int w,int h,const char *s,int 
 static lr_settings *editing(launcher *a) { return &a->book.presets[a->book.selected].settings; }
 static int overridden(int id) { const char *v=getenv(lr_options[id].env); return v && *v; }
 static int unavailable(launcher *a,int id) { return id==LR_MPEG_DECODE && !a->movie_available; }
+static void display_label(const lr_settings *s,char *out,size_t size) {
+    lr_option_label(s,LR_DISPLAY,out,size);
+    int screen=(int)s->number[LR_DISPLAY];
+    if (screen<0) return;
+    if (screen>SDL_GetNumVideoDisplays()) {
+        snprintf(out,size,"Display %d (unavailable)",screen);
+        return;
+    }
+    const char *name=SDL_GetDisplayName(screen-1);
+    if (name && *name) snprintf(out,size,"%d: %s",screen,name);
+}
 static void refresh(launcher *a) {
     a->effective=*editing(a); a->validation[0]=0;
     a->valid=!lr_settings_env(&a->effective,a->validation) &&
@@ -81,10 +92,17 @@ static void refresh(launcher *a) {
         strcpy(a->validation,"Intro decoding is unavailable in this build. Turn it off or remove its environment override.");
         a->valid=0;
     }
+    if (a->effective.number[LR_WINDOW_MODE]) {
+        if (a->focus==LR_WINDOW_SIZE) a->focus=LR_WINDOW_MODE;
+        if (a->selected_row==LR_WINDOW_SIZE) a->selected_row=LR_WINDOW_MODE;
+    }
 }
 static int rows(launcher *a,int *ids) {
     const char *pages[]={"Graphics","Controls","Advanced"}; int n=0;
-    for (int i=0;i<LR_OPTION_COUNT;i++) if (!strcmp(lr_options[i].page,pages[a->page])) ids[n++]=i;
+    for (int i=0;i<LR_OPTION_COUNT;i++) {
+        if (i==LR_WINDOW_SIZE && a->effective.number[LR_WINDOW_MODE]) continue;
+        if (!strcmp(lr_options[i].page,pages[a->page])) ids[n++]=i;
+    }
     return n;
 }
 static void show_row(launcher *a,int id) {
@@ -145,6 +163,7 @@ static void draw(launcher *a) {
         label(a,a->small,310,y+29,360,locked?"Environment override":missing?
               (disabled?"Not available in this build":"Decoder unavailable; switch off"):"Applies on next launch",locked?ACCENT:MUTED);
         char value[LR_VALUE_SIZE]; lr_option_label(&a->effective,id,value,sizeof value);
+        if (id==LR_DISPLAY) display_label(&a->effective,value,sizeof value);
         SDL_Rect clip={662,y,330,50}; SDL_RenderSetClipRect(a->renderer,&clip);
         label(a,a->body,668,y+13,600,value,locked?ACCENT:TEXT);
         SDL_RenderSetClipRect(a->renderer,NULL);
@@ -169,6 +188,15 @@ static void draw(launcher *a) {
         char info[640];
         snprintf(info,sizeof info,"%s%s%s",lr_options[id].help,
                  overridden(id)?"  Locked for this run by ":"",overridden(id)?lr_options[id].env:"");
+        if (id==LR_DISPLAY) {
+            int screen=(int)a->effective.number[id];
+            if (screen<0) screen=1;
+            const char *name=screen<=SDL_GetNumVideoDisplays()?SDL_GetDisplayName(screen-1):NULL;
+            if (name) {
+                size_t used=strlen(info);
+                snprintf(info+used,sizeof info-used,"\nDisplay %d: %s",screen,name);
+            }
+        }
         label(a,a->small,310,594,762,info,MUTED);
     }
     const char *status=a->load_failed?a->status:!a->valid?a->validation:*a->status?a->status:
@@ -235,7 +263,15 @@ static void adjust(launcher *a,int id,int direction) {
         if (s->number[id] && !lr_settings_set(s,id,"0",LR_PRESET,a->status)) changed(a);
         return;
     }
-    if (d->type==LR_CHOICE) {
+    if (id==LR_DISPLAY) {
+        int count=SDL_GetNumVideoDisplays();
+        if (count<0) count=0;
+        int pick=(int)s->number[id];
+        if (pick<0 || pick>count) pick=0; /* Primary or disconnected. */
+        pick=(pick+direction+count+1)%(count+1);
+        if (!pick) snprintf(value,sizeof value,"primary");
+        else snprintf(value,sizeof value,"%d",pick);
+    } else if (d->type==LR_CHOICE) {
         int count=1; for (const char *v=d->choices;*v;v++) if (*v=='|') count++;
         if (id==LR_RENDER) count--; /* Null is useful in files/CLI, not for play. */
         int pick=((int)s->number[id]+direction+count)%count;
@@ -339,7 +375,7 @@ static void activate(launcher *a,int id) {
     if (id>=0 && id<LR_OPTION_COUNT) {
         a->selected_row=a->focus=id;
         if (overridden(id) || (unavailable(a,id) && !editing(a)->number[id])) return;
-        if (lr_options[id].type==LR_CHOICE) adjust(a,id,1);
+        if (lr_options[id].type==LR_CHOICE || id==LR_DISPLAY) adjust(a,id,1);
         else { a->edit_id=id; open_modal(a,MODAL_VALUE,editing(a)->value[id]); }
         return;
     }

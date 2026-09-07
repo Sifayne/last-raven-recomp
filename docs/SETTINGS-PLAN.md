@@ -55,15 +55,22 @@ or environment overrides; the settings guide documents the new parser rules.
 and a window implies real-time pacing. These should be resolved by the launch
 mode rather than asking a player to configure three coupled switches.
 
-Fullscreen, host volume/mute, arbitrary button rebinding, fixed resolution
-scales and a working high-framerate mode are **new features**, not existing
-environment options waiting to be exposed. Keep them as separate follow-ups.
-The game's own sound settings remain available in the meantime.
+Windowed fullscreen was added as a follow-up: Graphics now includes a saved
+`WINDOW_MODE=windowed|borderless` choice. Borderless uses the desktop size,
+independently of rendering resolution and aspect ratio. Host volume/mute,
+arbitrary button rebinding, fixed resolution scales and a working
+high-framerate mode remain separate follow-ups. The game's own sound
+settings remain available in the meantime.
+
+Graphics also includes a saved startup display selection (`DISPLAY=primary`
+or a screen number starting at 1), with connected display names in the
+launcher and a primary-display fallback when the selection is unavailable.
 
 ## Configuration comes first
 
 Implemented in `host/settings.h` and `host/settings.c`, with no SDL dependency.
-The registry covers the 17 options above and the two launch controls.
+The registry covers the 17 options above, window mode, display selection and
+the two launch controls.
 Runtime diagnostic options can migrate incrementally without blocking the screen.
 
 Each registered option needs a stable key, type, default, allowed values or

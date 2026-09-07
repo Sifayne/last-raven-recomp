@@ -27,6 +27,20 @@ runtime supports it. Resolution and aspect are separate settings: **Match
 window** resolution makes the image sharper, while **Match window** aspect
 expands the 3D view to fit wider windows. Enhanced modes require OpenGL.
 
+On Graphics, set **Window mode → Windowed fullscreen** to fill the display
+with a borderless game window at the current desktop resolution. This choice
+is saved with each preset. **Window size** is hidden in windowed fullscreen;
+its saved value returns when you switch back to Windowed. Rendering
+resolution and aspect ratio still follow their own settings.
+Existing presets default to Windowed until you change them.
+
+**Start on display** selects the game screen for both window modes. Cycle
+through **Primary display** and the connected screens, listed by number and
+name. Each preset saves its own choice; existing presets use Primary display.
+If a saved screen number is unavailable, the game uses the primary display
+without changing the preset. Screen numbers follow SDL's current display
+order, so check the selection after rearranging or reconnecting monitors.
+
 The Controls page includes sensitivity, movement/look deadzones, the outer
 stick deadzone, look response curve and camera smoothing. Scroll to see its
 lower rows. Advanced contains renderer selection, audio buffering and intro
@@ -34,7 +48,7 @@ decoding. The explanatory panel describes the focused option and the current
 controller/keyboard layouts. The game's own key assignment still determines
 the meaning of classic PSP buttons.
 
-Fullscreen, host volume/mute, arbitrary rebinding and high-framerate gameplay
+Host volume/mute, arbitrary rebinding and high-framerate gameplay
 are not implemented by this screen. Settings take effect on the next launch;
 the launcher does not open over a running game.
 
@@ -96,6 +110,12 @@ values and malformed dimensions are reported rather than silently clamped
 or ignored. `GAMEPAD=auto` follows the control scheme, `CAMERA_LAG=game`
 preserves the game's smoothing, and audio `auto` preserves its existing
 buffer defaults. The other diagnostic variables retain their current readers.
+
+`PSPRECOMP_WINDOW_MODE=borderless` selects windowed fullscreen;
+`PSPRECOMP_WINDOW_MODE=windowed` selects the ordinary resizable window.
+Borderless mode also enables a window and real-time pacing for direct boot.
+`PSPRECOMP_DISPLAY=2` starts on the second listed display;
+`PSPRECOMP_DISPLAY=primary` uses the primary display (the default).
 
 Direct boot, fixed-frame replay, oracle and regression tools never discover
 the user's preferences file automatically. Inspect defaults and environment

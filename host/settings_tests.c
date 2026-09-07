@@ -14,6 +14,17 @@ int main(void) {
     lr_settings s; assert(!lr_settings_load(&s,NULL,NULL,error));
     assert(s.render==1 && !s.window && !s.gamepad);
     assert(s.width==960 && s.height==544 && s.number[LR_CAMERA_LAG]==-1);
+    assert(!strcmp(s.value[LR_WINDOW_MODE],"windowed"));
+    assert(!strcmp(s.value[LR_DISPLAY],"primary"));
+    assert(lr_settings_set(&s,LR_DISPLAY,"1.5",LR_PRESET,error));
+    assert(lr_settings_set(&s,LR_DISPLAY,"0",LR_PRESET,error));
+    assert(lr_settings_set(&s,LR_DISPLAY,"65536",LR_PRESET,error));
+    assert(!lr_settings_set(&s,LR_WINDOW_MODE,"borderless",LR_PRESET,error));
+    assert(!lr_settings_resolve(&s,error));
+    assert(s.window && s.realtime && s.render==1);
+    assert(!s.number[LR_RESOLUTION] && !s.number[LR_ASPECT]);
+    assert(lr_settings_set(&s,LR_WINDOW_MODE,"typo",LR_PRESET,error));
+    assert(!lr_settings_set(&s,LR_WINDOW_MODE,"windowed",LR_PRESET,error));
     assert(!lr_settings_set(&s,LR_INPUT,"dual",LR_PRESET,error));
     assert(!lr_settings_set(&s,LR_RESOLUTION,"window",LR_PRESET,error));
     assert(!lr_settings_resolve(&s,error)); assert(s.render==2 && s.window && s.gamepad);
@@ -32,10 +43,23 @@ int main(void) {
     char dir[]="/tmp/lr-settings-test-XXXXXX"; assert(mkdtemp(dir));
     char path[256]; snprintf(path,sizeof path,"%s/settings.ini",dir);
     lr_presets p, loaded; lr_presets_defaults(&p);
+    assert(!lr_settings_set(&p.presets[1].settings,LR_WINDOW_MODE,"borderless",LR_PRESET,error));
+    assert(!lr_settings_set(&p.presets[1].settings,LR_DISPLAY,"2",LR_PRESET,error));
     assert(!lr_presets_save(&p,path,error)); assert(!lr_presets_load(&loaded,path,error));
     assert(loaded.count==3 && loaded.selected==1);
     for (int i=0;i<3;i++) for (int k=0;k<LR_OPTION_COUNT;k++)
         assert(!strcmp(p.presets[i].settings.value[k],loaded.presets[i].settings.value[k]));
+    setenv("PSPRECOMP_WINDOW_MODE","windowed",1);
+    assert(!lr_settings_load(&s,path,"Controller",error));
+    assert(!s.number[LR_WINDOW_MODE] && s.source[LR_WINDOW_MODE]==LR_ENV);
+    unsetenv("PSPRECOMP_WINDOW_MODE");
+    assert(!lr_settings_load(&s,path,"Controller",error));
+    assert(s.number[LR_WINDOW_MODE]==1 && s.source[LR_WINDOW_MODE]==LR_PRESET);
+    assert(s.number[LR_DISPLAY]==2);
+    setenv("PSPRECOMP_DISPLAY","primary",1);
+    assert(!lr_settings_load(&s,path,"Controller",error));
+    assert(s.number[LR_DISPLAY]==-1 && s.source[LR_DISPLAY]==LR_ENV);
+    unsetenv("PSPRECOMP_DISPLAY");
     assert(!lr_settings_load(&s,path,"Mouse & Keyboard",error));
     assert(s.number[LR_INPUT]==2 && s.number[LR_MOUSE]==1 && s.number[LR_KEYS]==1);
     assert(lr_settings_load(&s,path,"Missing",error));
@@ -65,6 +89,11 @@ int main(void) {
     strcpy(p.presets[0].settings.value[LR_WINDOW_SIZE],"broken");
     assert(lr_presets_save(&p,path,error));
     assert(!lr_presets_load(&loaded,path,error)); assert(loaded.count==4);
+    /* Presets saved before window mode existed keep their windowed behavior. */
+    putfile(path,"version=1\nselected=Old\n[preset Old]\nWINDOW_SIZE=1280x720\n");
+    assert(!lr_settings_load(&s,path,"Old",error));
+    assert(!strcmp(s.value[LR_WINDOW_MODE],"windowed") && s.width==1280 && s.height==720);
+    assert(!strcmp(s.value[LR_DISPLAY],"primary"));
     const char *invalid[]={
         "version=2\nselected=A\n[preset A]\n",
         "version=1\nselected=Missing\n[preset A]\n",
