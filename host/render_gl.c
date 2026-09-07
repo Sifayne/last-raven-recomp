@@ -386,7 +386,8 @@ typedef struct {
     int      pend_count[XFORM_MAXB], pend_base[XFORM_MAXB], pend_prim[XFORM_MAXB];
     int      npend, pend_verts;
     uint64_t batches;
-    double   t_append, t_state, t_ubo, t_ebo, t_draw;   /* PSPRECOMP_GL_PROFILE */
+    double   t_append, t_state, t_ubo, t_ebo, t_draw, t_readback;   /* PSPRECOMP_GL_PROFILE */
+    uint64_t readbacks;
     int      profile;
     /* Setters called with the state they already set are skipped, so a
      * batch survives the GE pushing the same pixel state before every
@@ -533,7 +534,14 @@ enum { FLOATS_PER_VERT = 13 };  /* x,y,z, r,g,b,a, u,v, fog, 1/w, texture q, lod
 
 static void flush(void);
 static int  claim(void);
+enum { RB_SLOTS = 3, RB_SLOT_BYTES = 1024 * 1024 };
+static struct {
+    int async; GLuint pbo; uint8_t *map; int next;
+    struct { GLsync sync; int rt, rw, rh; size_t off; int valid; } pend[RB_SLOTS];
+    unsigned issued, completed; double wait_us;
+} g_rb;
 static void readback_rt(int i);
+static void readback_complete(int i);
 static void stencil_to_alpha(rendertarget *r);
 static void rt_import(rendertarget *r);
 
@@ -1471,6 +1479,11 @@ static void rt_guest_write(uint32_t addr, uint32_t size) {
         const unsigned bpp = r->fmt == 3 ? 4 : 2;
         const uint64_t end = (uint64_t)r->addr + (uint64_t)r->stride * r->guest_h * bpp;
         if ((uint64_t)addr + size <= r->addr || addr >= end) continue;
+        /* A deferred readback of this target must land before the CPU's
+         * write, or its completion would overwrite what the guest is about
+         * to put here -- the intro movie decodes straight into a display
+         * buffer. The wait is on a frame's fence, short. */
+        if (g_rb.async) readback_complete(i);
         const uint64_t first = addr > r->addr ? addr - r->addr : 0;
         const uint64_t last =
             (uint64_t)addr + size < end ? (uint64_t)addr + size - r->addr : end - r->addr;
@@ -1735,6 +1748,18 @@ static int claim(void) {
             g.mu.ebo_head = 0;
             g.mu.profile = getenv("PSPRECOMP_GL_PROFILE") != NULL;
             p_glBindVertexArray(0);
+            {
+                const char *rb = getenv("PSPRECOMP_GL_READBACK");
+                if (rb && strcmp(rb, "async") == 0 && g_rings.persistent) {
+                    const GLbitfield flags = GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+                    p_glGenBuffers(1, &g_rb.pbo);
+                    p_glBindBuffer(GL_PIXEL_PACK_BUFFER, g_rb.pbo);
+                    p_glBufferStorage(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)(RB_SLOTS * RB_SLOT_BYTES), NULL, flags);
+                    g_rb.map = (uint8_t *)p_glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)(RB_SLOTS * RB_SLOT_BYTES), flags);
+                    p_glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+                    g_rb.async = g_rb.map != NULL;
+                }
+            }
         }
     }
 
@@ -1804,6 +1829,7 @@ static int gl_init(int w, int h) {
 }
 
 static void gl_shutdown(void) {
+    if (g_rb.async) readback_complete(-1);
     if (g.resolution) psp_mem_set_write_observer(NULL);
 }
 
@@ -2848,47 +2874,24 @@ static int stage_prepare(int w, int h) {
  * forced 272 GPU/CPU synchronisation points at every flip, which made complex
  * mission frames disproportionately slow.  Rows are flipped and packed on the
  * CPU after that single transfer. */
-static void readback_rt(int i) {
-    rendertarget *r = &g.rts[i];
-    if (!r->configured || !r->addr || !r->stride) return;
-    rt_import(r);
+/* ---- the readback ----------------------------------------------------------
+ *
+ * Every presented frame is read back into the guest framebuffer, because the
+ * guest and the runtime's instruments read that memory. Synchronously that is
+ * a glReadPixels per frame, which waits for the frame's GPU work and copies
+ * it: 0.26 ms a frame at native, 0.69 ms at 1080p, measured. With
+ * PSPRECOMP_GL_READBACK=async the pixels go into a persistently mapped
+ * pixel-pack ring behind a fence and are copied into guest memory at the
+ * next present, when the fence has long signalled; guest memory then holds
+ * the previous frame between presents, which the instruments in display.c
+ * see as a one-frame lag. A synchronous readback of a target -- a render
+ * target about to be sampled as a texture, or shutdown -- completes what is
+ * pending for it first, so an older frame never lands after a newer one. */
+static void readback_copy(rendertarget *r, const uint8_t *pixels, int rw, int rh, int i) {
     const int bpp = r->fmt == 3 ? 4 : 2;
     const size_t bytes = (size_t)r->stride * (size_t)r->guest_h * (size_t)bpp;
     void *dst = psp_mem_ptr(r->addr, bytes);
     if (!dst) return;
-
-    static uint8_t *pixels;
-    static size_t capacity;
-    const int rw = r->guest_w;
-    const int rh = r->guest_h;
-    const size_t need = (size_t)rw * (size_t)r->guest_h * 4u;
-    if (need > capacity) {
-        uint8_t *larger = realloc(pixels, need);
-        if (!larger) return;
-        pixels = larger;
-        capacity = need;
-    }
-
-    const uint64_t readback_t0 = psp_os_mono_ns();
-    stencil_to_alpha(r);
-    if (r->w != rw || r->h != rh) {
-        /* Guest memory keeps its 480x272 picture: the wide attachment is
-         * resolved to guest width first. Nearest, because the alpha byte is
-         * the stencil and the bytes are re-read as palette indices; and the
-         * HUD comes out narrower here, which is the guest's view of it. */
-        if (stage_prepare(rw, rh) != 0) return;
-        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
-        p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g.stage_fbo);
-        p_glDisable(GL_SCISSOR_TEST);
-        p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        p_glBlitFramebuffer(0, 0, rt_scene_w(r), r->h, 0, 0, rw, rh,
-                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
-        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g.stage_fbo);
-    } else {
-        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
-    }
-    p_glReadPixels(0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-
     uint8_t *out = (uint8_t *)dst;
     const int copy_w = rw < (int)r->stride ? rw : (int)r->stride;
     for (int y = 0; y < rh; y++) {
@@ -2914,13 +2917,78 @@ static void readback_rt(int i) {
                                       ((blue >> 4) << 8) | ((alpha >> 4) << 12));
         }
     }
-    /* The raw pointer deliberately avoids one mark per output pixel. One range
-     * mark after conversion gives every texture overlapping this target the
-     * same precise invalidation signal. */
     g.exporting = i+1;
     psp_mem_mark_write(r->addr, (uint32_t)bytes);
     g.exporting = 0;
     g.readbacks++;
+}
+/* Bind the target's pixels for reading at guest size: the wide or scaled
+ * target resolved through the stage first. Returns 0 with rw/rh set. */
+static int readback_bind(rendertarget *r, int *rw, int *rh) {
+    rt_import(r);
+    *rw = r->guest_w; *rh = r->guest_h;
+    stencil_to_alpha(r);
+    if (r->w != *rw || r->h != *rh) {
+        if (stage_prepare(*rw, *rh) != 0) return -1;
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
+        p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g.stage_fbo);
+        p_glDisable(GL_SCISSOR_TEST);
+        p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        p_glBlitFramebuffer(0, 0, rt_scene_w(r), r->h, 0, 0, *rw, *rh,
+                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g.stage_fbo);
+    } else {
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
+    }
+    return 0;
+}
+/* Complete every pending asynchronous readback of target i (or all, i < 0). */
+static void readback_complete(int i) {
+    for (int k = 0; k < RB_SLOTS; k++) {
+        if (!g_rb.pend[k].valid || (i >= 0 && g_rb.pend[k].rt != i)) continue;
+        const double t0 = rings_now_us();
+        p_glClientWaitSync(g_rb.pend[k].sync, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+        g_rb.wait_us += rings_now_us() - t0;
+        p_glDeleteSync(g_rb.pend[k].sync);
+        readback_copy(&g.rts[g_rb.pend[k].rt], g_rb.map + g_rb.pend[k].off, g_rb.pend[k].rw, g_rb.pend[k].rh, g_rb.pend[k].rt);
+        g_rb.pend[k].valid = 0; g_rb.completed++;
+    }
+}
+/* Start an asynchronous readback of target i into the next ring slot. */
+static void readback_issue(int i) {
+    rendertarget *r = &g.rts[i];
+    if (!r->configured || !r->addr || !r->stride) return;
+    int rw, rh;
+    if (readback_bind(r, &rw, &rh) != 0) return;
+    if ((size_t)rw * (size_t)rh * 4u > RB_SLOT_BYTES) { readback_rt(i); return; }
+    const int k = g_rb.next++ % RB_SLOTS;
+    if (g_rb.pend[k].valid) readback_complete(g_rb.pend[k].rt);
+    p_glBindBuffer(GL_PIXEL_PACK_BUFFER, g_rb.pbo);
+    p_glReadPixels(0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, (void *)(uintptr_t)((size_t)k * RB_SLOT_BYTES));
+    p_glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    g_rb.pend[k].sync = p_glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    g_rb.pend[k].rt = i; g_rb.pend[k].rw = rw; g_rb.pend[k].rh = rh;
+    g_rb.pend[k].off = (size_t)k * RB_SLOT_BYTES; g_rb.pend[k].valid = 1;
+    g_rb.issued++;
+}
+static void readback_rt(int i) {
+    rendertarget *r = &g.rts[i];
+    if (!r->configured || !r->addr || !r->stride) return;
+    if (g_rb.async) readback_complete(i);
+    static uint8_t *pixels;
+    static size_t capacity;
+    int rw, rh;
+    const uint64_t readback_t0 = psp_os_mono_ns();
+    if (readback_bind(r, &rw, &rh) != 0) return;
+    const size_t need = (size_t)rw * (size_t)rh * 4u;
+    if (need > capacity) {
+        uint8_t *larger = realloc(pixels, need);
+        if (!larger) return;
+        pixels = larger;
+        capacity = need;
+    }
+    p_glReadPixels(0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    readback_copy(r, pixels, rw, rh, i);
     g.readback_ns += psp_os_mono_ns() - readback_t0;
 }
 
@@ -3043,12 +3111,15 @@ static void gl_present(void) {
      * buffer they read is not this backend's to know -- so all of them are
      * made true rather than guessing at one. */
     int rendered = 0;
+    const double rb_t0 = g.mu.profile ? rings_now_us() : 0;
     for (int i = 0; i < g.n_rts; i++) {
         if (!g.rts[i].dirty && !g.rts[i].cpu_pending) continue;
-        readback_rt(i);
+        if (g_rb.async) { readback_complete(i); readback_issue(i); }
+        else readback_rt(i);
         g.rts[i].dirty = 0;
-        rendered = 1;
+        rendered = 1; g.mu.readbacks++;
     }
+    if (g.mu.profile) g.mu.t_readback += rings_now_us() - rb_t0;
     gpu_query_poll();
 
     resolution_size();
@@ -3263,6 +3334,12 @@ void render_gl_report(FILE *out) {
     if (g.mu.profile)
         fprintf(out, "\n          model path time: append %.1f ms, state %.1f ms, blocks %.1f ms, indices %.1f ms, draw calls %.1f ms",
                 g.mu.t_append / 1e3, g.mu.t_state / 1e3, g.mu.t_ubo / 1e3, g.mu.t_ebo / 1e3, g.mu.t_draw / 1e3);
+    fprintf(out, "\n          readback: %s%s", g_rb.async ? "asynchronous, one frame behind" : "synchronous",
+            g_rb.async ? "" : "");
+    if (g_rb.async) fprintf(out, ", %u issued, %u completed, fence waits %.1f ms", g_rb.issued, g_rb.completed, g_rb.wait_us / 1e3);
+    if (g.mu.profile)
+        fprintf(out, "\n          present readback: %llu target(s) in %.1f ms (%.2f ms each)",
+                (unsigned long long)g.mu.readbacks, g.mu.t_readback / 1e3, g.mu.readbacks ? g.mu.t_readback / 1e3 / (double)g.mu.readbacks : 0.0);
     fprintf(out, "\n          targets: %d%s", g.n_rts,
             g.rt_overflow ? " (more than the table holds)" : "");
     for (int i = 0; i < g.n_rts; i++)

@@ -744,6 +744,48 @@ The window title now shows the frame rate once a second, counted from
 frames actually rendered by either backend rather than from the game's two
 frame-buffer flips per frame.
 
+## 21. The per-frame readback, measured and made optional
+
+Every presented frame is read back into the guest framebuffer, because the
+guest and the runtime's instruments read that memory. Measured with the
+profile's new counter, it is smaller than section 20 guessed: 0.68 ms a
+frame at 1080p and 0.25 ms at native, most of it the wait for the frame's
+remaining GPU work. Where the frame actually goes now, per frame at 1080p
+on the GPU path, uncapped: 2.7 ms in the game's own tail, 5.0 ms after the
+flip of which 3.4 ms is the runtime executing list chunks in the game's
+stall updates, 1.2 ms in the flip itself including the readback, and about
+1.5 ms in the frame top, ticks, layers and the post-tail. At native the same
+shape adds up to 7.2 ms.
+
+`PSPRECOMP_GL_READBACK=async` moves the readback onto a persistently mapped
+pixel-pack ring behind a fence, completed at the next present when the
+fence has long signalled, drained on demand by any synchronous consumer (a
+target about to be sampled as a texture, shutdown) and, because the intro
+movie is decoded by the CPU straight into a display buffer, by the write
+observer before a CPU write into a target lands.
+
+| GL, uncapped, GPU transform | Synchronous | Asynchronous |
+| --- | ---: | ---: |
+| 1920x1080 | 106.9 fps, 9.43 ms; readback 0.68 ms | 114.8 fps, 8.78 ms; readback 0.04 ms |
+| 480x272 native | 139.4 fps, 7.24 ms; readback 0.25 ms | 146.9 fps, 6.86 ms; readback 0.04 ms |
+
+Fence waits over a 2,221-frame run total 27 ms at 1080p and 1.5 ms at
+native. Render and resolution tests pass either way, and the mission run
+reports no CPU uploads at all, so the drain never fires in play.
+
+It is off by default, for two reasons found by dumping every presented
+frame of the first four hundred in both modes. The display is double
+buffered and the game flips twice per rendered frame, so the guest copy of
+the buffer being presented is what was drawn into it the previous time,
+which the instruments in display.c see as a lag of three presents rather
+than one. And during the intro movie, where the CPU writes every frame into
+the buffer, the asynchronous dumps match no synchronous frame exactly: a
+faint whole-frame residual of about two thousand pixels, the buffer seen at
+a different moment relative to the decoder's writes. Neither matters to
+play, but both matter to the frame-exact comparisons this document's
+methodology rests on, so the default stays synchronous and the mode is a
+knob for someone who wants the 7% at 1080p more than exact dumps.
+
 ## Reproduction
 
 ```sh
