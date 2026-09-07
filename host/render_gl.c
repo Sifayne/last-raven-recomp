@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 int render_gl_resolution_mode(void) {
     const char *s = getenv("PSPRECOMP_RESOLUTION");
@@ -162,6 +163,7 @@ typedef void (APIENTRY *PFN_glCopyTexSubImage2D)(GLenum, GLint, GLint, GLint,
     X(PFNGLUNIFORMBLOCKBINDINGPROC,     glUniformBlockBinding) \
     X(PFNGLBINDBUFFERRANGEPROC,         glBindBufferRange) \
     X(PFNGLDRAWELEMENTSBASEVERTEXPROC,  glDrawElementsBaseVertex) \
+    X(PFNGLMULTIDRAWELEMENTSBASEVERTEXPROC, glMultiDrawElementsBaseVertex) \
     X(PFNGLENABLEVERTEXATTRIBARRAYPROC, glEnableVertexAttribArray) \
     X(PFNGLGENFRAMEBUFFERSPROC,         glGenFramebuffers) \
     X(PFNGLBINDFRAMEBUFFERPROC,         glBindFramebuffer) \
@@ -249,12 +251,28 @@ typedef struct {
     int32_t lodi[4];
     float   guard_slope[4];
 } xform_block;
-enum { XFORM_RING_SLOTS = 256, MODEL_RING_VERTS = 65536 };
+enum { XFORM_MAXB = 16, XFORM_RING_SLOTS = 256, MODEL_RING_VERTS = 65536 };
+static void flush_model(void);
 typedef struct {
     GLuint   ubo; GLint ubo_align; int ubo_slot, ubo_slot_bytes;
-    int      vbo_head;                 /* vertices written so far in the current ring pass */
+    GLuint   vbo_draw, ebo_ring;       /* per-vertex draw index; the batch's triangle indices */
+    int      vbo_head, ebo_head;       /* ring positions, in vertices and in indices */
     uint64_t state_gen, applied_gen;   /* set_* calls bump state_gen; the model path re-applies when behind */
     int      applied_rt;
+    /* Consecutive model draws under one GL state, drawn as one multi-draw. */
+    xform_block pend_xb[XFORM_MAXB];
+    int      pend_count[XFORM_MAXB], pend_base[XFORM_MAXB], pend_prim[XFORM_MAXB];
+    int      npend, pend_verts;
+    uint64_t batches;
+    double   t_append, t_state, t_ubo, t_ebo, t_draw;   /* PSPRECOMP_GL_PROFILE */
+    int      profile;
+    /* Setters called with the state they already set are skipped, so a
+     * batch survives the GE pushing the same pixel state before every
+     * primitive. The texture setter may only be skipped while guest memory
+     * has not been written since the bind: the cache validates against that
+     * serial and would otherwise owe a re-upload the pending batch cannot see. */
+    uint64_t bound_serial, bound_clut_gen, clut_gen, setters_skipped;
+    int      tex_valid;
 } model_uniforms;
 typedef struct {
     int      used, dirty, configured;
@@ -532,7 +550,8 @@ static const char *VS_MODEL_SRC =
     "layout(location=1) in vec3 a_nrm;\n"
     "layout(location=2) in uint a_rgba;\n"
     "layout(location=3) in vec2 a_uv;\n"
-    "layout(std140) uniform Xform {\n"
+    "layout(location=4) in uint a_draw;\n"
+    "struct XformBlock {\n"
     "    mat4  world; mat4 view; mat4 proj; mat4 tgen;\n"
     "    ivec4 lmeta[4];\n"
     "    vec4  lpos[4]; vec4 ldir[4]; vec4 latten[4]; vec4 lexpcut[4]; vec4 lamb[4]; vec4 ldif[4]; vec4 lspec[4];\n"
@@ -546,7 +565,9 @@ static const char *VS_MODEL_SRC =
     "    ivec4 lodi;\n"
     "    vec4  guard_slope;\n"
     "};\n"
-    "out VData { vec4 clip; vec4 col; vec2 uv; float texq; float fog; } o;\n"
+    "layout(std140) uniform Xform { XformBlock xb[16]; };\n"
+    "#define X xb[int(a_draw)]\n"
+    "out VData { vec4 clip; vec4 col; vec2 uv; float texq; float fog; flat int draw; } o;\n"
     "/* The GE's 4x3 and 4x4 products as ge.c writes them, term by term; a 4x3 sits\n"
     " * in a mat4 as three columns of three and the translation in the fourth.\n"
     " * precise keeps the compiler from fusing or reordering, so the sums round as\n"
@@ -575,54 +596,54 @@ static const char *VS_MODEL_SRC =
     "/* light_vertex, ge.c. */\n"
     "uint light_colour(vec3 wp, vec3 wn, uint rgba) {\n"
     "    vec3 vc = vec3(float(rgba & 0xFFu) / 255.0, float((rgba >> 8) & 0xFFu) / 255.0, float((rgba >> 16) & 0xFFu) / 255.0);\n"
-    "    int matupdate = flags.y;\n"
-    "    vec3 m_amb = (matupdate & 1) != 0 ? vc : mamb.xyz;\n"
-    "    vec3 m_dif = (matupdate & 2) != 0 ? vc : mdif.xyz;\n"
-    "    vec3 m_spc = (matupdate & 4) != 0 ? vc : mspec.xyz;\n"
-    "    precise vec3 outc = memis.xyz + gamb.xyz * m_amb;\n"
+    "    int matupdate = X.flags.y;\n"
+    "    vec3 m_amb = (matupdate & 1) != 0 ? vc : X.mamb.xyz;\n"
+    "    vec3 m_dif = (matupdate & 2) != 0 ? vc : X.mdif.xyz;\n"
+    "    vec3 m_spc = (matupdate & 4) != 0 ? vc : X.mspec.xyz;\n"
+    "    precise vec3 outc = X.memis.xyz + X.gamb.xyz * m_amb;\n"
     "    vec3 n = wn;\n"
-    "    bool any = lmeta[0].x != 0 || lmeta[1].x != 0 || lmeta[2].x != 0 || lmeta[3].x != 0;\n"
+    "    bool any = X.lmeta[0].x != 0 || X.lmeta[1].x != 0 || X.lmeta[2].x != 0 || X.lmeta[3].x != 0;\n"
     "    if (any) {\n"
     "        float nlen = len3(n);\n"
     "        if (nlen > 1e-20) n = vec3(n.x / nlen, n.y / nlen, n.z / nlen);\n"
     "        for (int i = 0; i < 4; i++) {\n"
-    "            if (lmeta[i].x == 0) continue;\n"
+    "            if (X.lmeta[i].x == 0) continue;\n"
     "            vec3 L; float att = 1.0;\n"
-    "            if (lmeta[i].y == 0) {\n"
-    "                L = lpos[i].xyz;\n"
+    "            if (X.lmeta[i].y == 0) {\n"
+    "                L = X.lpos[i].xyz;\n"
     "            } else {\n"
-    "                L = vec3(lpos[i].x - wp.x, lpos[i].y - wp.y, lpos[i].z - wp.z);\n"
+    "                L = vec3(X.lpos[i].x - wp.x, X.lpos[i].y - wp.y, X.lpos[i].z - wp.z);\n"
     "                float d = len3(L);\n"
-    "                precise float a = latten[i].x + latten[i].y * d + latten[i].z * d * d;\n"
+    "                precise float a = X.latten[i].x + X.latten[i].y * d + X.latten[i].z * d * d;\n"
     "                att = (a != 0.0) ? 1.0 / a : 1.0;\n"
     "            }\n"
     "            float llen = len3(L);\n"
     "            if (llen > 1e-20) L = vec3(L.x / llen, L.y / llen, L.z / llen);\n"
-    "            if (lmeta[i].y == 2) {\n"
-    "                vec3 D = ldir[i].xyz;\n"
+    "            if (X.lmeta[i].y == 2) {\n"
+    "                vec3 D = X.ldir[i].xyz;\n"
     "                float dlen = len3(D);\n"
     "                if (dlen > 1e-20) D = vec3(D.x / dlen, D.y / dlen, D.z / dlen);\n"
     "                float sdot = dot3(L, D);\n"
-    "                if (!(sdot >= lexpcut[i].y)) att = 0.0;\n"
-    "                else att *= pow(sdot, lexpcut[i].x);\n"
+    "                if (!(sdot >= X.lexpcut[i].y)) att = 0.0;\n"
+    "                else att *= pow(sdot, X.lexpcut[i].x);\n"
     "            }\n"
     "            if (att == 0.0) continue;\n"
     "            float ndl = dot3(n, L);\n"
     "            float dfac = ndl > 0.0 ? ndl : 0.0;\n"
-    "            if (lmeta[i].z == 2 && dfac > 0.0) dfac = pow(dfac, coef_fog.x);\n"
+    "            if (X.lmeta[i].z == 2 && dfac > 0.0) dfac = pow(dfac, X.coef_fog.x);\n"
     "            float sfac = 0.0;\n"
-    "            if (lmeta[i].z == 1 && ndl >= 0.0) {\n"
+    "            if (X.lmeta[i].z == 1 && ndl >= 0.0) {\n"
     "                vec3 H = vec3(L.x, L.y, L.z + 1.0);\n"
     "                float hlen = len3(H);\n"
     "                if (hlen > 1e-20) H = vec3(H.x / hlen, H.y / hlen, H.z / hlen);\n"
     "                float ndh = dot3(n, H);\n"
-    "                sfac = (ndh > 0.0) ? pow(ndh, coef_fog.x) : 0.0;\n"
+    "                sfac = (ndh > 0.0) ? pow(ndh, X.coef_fog.x) : 0.0;\n"
     "            }\n"
     "            for (int k = 0; k < 3; k++)\n"
-    "                outc[k] += att * (lamb[i][k] * m_amb[k] + ldif[i][k] * m_dif[k] * dfac + lspec[i][k] * m_spc[k] * sfac);\n"
+    "                outc[k] += att * (X.lamb[i][k] * m_amb[k] + X.ldif[i][k] * m_dif[k] * dfac + X.lspec[i][k] * m_spc[k] * sfac);\n"
     "        }\n"
     "    }\n"
-    "    uint c = (matupdate & 1) != 0 ? (rgba & 0xFF000000u) : (uint(flags.z & 0xFF) << 24);\n"
+    "    uint c = (matupdate & 1) != 0 ? (rgba & 0xFF000000u) : (uint(X.flags.z & 0xFF) << 24);\n"
     "    for (int k = 0; k < 3; k++) {\n"
     "        float f = outc[k];\n"
     "        if (f < 0.0) f = 0.0;\n"
@@ -633,33 +654,33 @@ static const char *VS_MODEL_SRC =
     "    return c;\n"
     "}\n"
     "void main() {\n"
-    "    vec3 wpos = mul43(world, a_pos);\n"
-    "    vec3 eye = mul43(view, wpos);\n"
-    "    vec4 clip = mul44(proj, eye);\n"
+    "    vec3 wpos = mul43(X.world, a_pos);\n"
+    "    vec3 eye = mul43(X.view, wpos);\n"
+    "    vec4 clip = mul44(X.proj, eye);\n"
     "    uint rgba = a_rgba;\n"
     "    int fog = 255;\n"
-    "    if (flags.w != 0) {\n"
-    "        precise float f = (coef_fog.y + eye.z) * coef_fog.z;\n"
+    "    if (X.flags.w != 0) {\n"
+    "        precise float f = (X.coef_fog.y + eye.z) * X.coef_fog.z;\n"
     "        if (isnan(f) || isinf(f) || f <= 0.0) fog = 0;\n"
     "        else if (f < 1.0) fog = int(f * 255.0 + 0.5);\n"
     "    }\n"
-    "    if (flags.x != 0) {\n"
-    "        vec3 ne = mul33(view, mul33(world, a_nrm));\n"
+    "    if (X.flags.x != 0) {\n"
+    "        vec3 ne = mul33(X.view, mul33(X.world, a_nrm));\n"
     "        rgba = light_colour(eye, ne, rgba);\n"
     "    }\n"
     "    float u = a_uv.x, v = a_uv.y, texq = 1.0;\n"
-    "    if (texmap_vp.x == 1) {\n"
+    "    if (X.texmap_vp.x == 1) {\n"
     "        vec3 src;\n"
-    "        if (texmap_vp.y == 1) {\n"
-    "            float tw = texsize_off.x != 0.0 ? texsize_off.x : 1.0;\n"
-    "            float th = texsize_off.y != 0.0 ? texsize_off.y : 1.0;\n"
+    "        if (X.texmap_vp.y == 1) {\n"
+    "            float tw = X.texsize_off.x != 0.0 ? X.texsize_off.x : 1.0;\n"
+    "            float th = X.texsize_off.y != 0.0 ? X.texsize_off.y : 1.0;\n"
     "            src = vec3(u / tw, v / th, 0.0);\n"
     "        } else {\n"
     "            src = a_pos;\n"
     "        }\n"
-    "        vec3 gen = mul43(tgen, src);\n"
-    "        u = gen.x * texsize_off.x;\n"
-    "        v = gen.y * texsize_off.y;\n"
+    "        vec3 gen = mul43(X.tgen, src);\n"
+    "        u = gen.x * X.texsize_off.x;\n"
+    "        v = gen.y * X.texsize_off.y;\n"
     "        texq = gen.z;\n"
     "    }\n"
     "    o.clip = clip;\n"
@@ -667,14 +688,15 @@ static const char *VS_MODEL_SRC =
     "    o.uv = vec2(u, v);\n"
     "    o.texq = texq;\n"
     "    o.fog = float(fog) / 255.0;\n"
+    "    o.draw = int(a_draw);\n"
     "    gl_Position = clip;\n"
     "}\n";
 static const char *GS_MODEL_SRC =
     "#version 400 core\n"
     "layout(triangles) in;\n"
     "layout(triangle_strip, max_vertices = 6) out;\n"
-    "in VData { vec4 clip; vec4 col; vec2 uv; float texq; float fog; } v[];\n"
-    "layout(std140) uniform Xform {\n"
+    "in VData { vec4 clip; vec4 col; vec2 uv; float texq; float fog; flat int draw; } v[];\n"
+    "struct XformBlock {\n"
     "    mat4  world; mat4 view; mat4 proj; mat4 tgen;\n"
     "    ivec4 lmeta[4];\n"
     "    vec4  lpos[4]; vec4 ldir[4]; vec4 latten[4]; vec4 lexpcut[4]; vec4 lamb[4]; vec4 ldif[4]; vec4 lspec[4];\n"
@@ -688,6 +710,8 @@ static const char *GS_MODEL_SRC =
     "    ivec4 lodi;\n"
     "    vec4  guard_slope;\n"
     "};\n"
+    "layout(std140) uniform Xform { XformBlock xb[16]; };\n"
+    "#define X xb[v[0].draw]\n"
     "uniform int u_texenable;\n"
     "uniform vec2 u_viewport; uniform vec3 u_placement; uniform float u_ybias;\n"
     "out vec4 v_col;\n"
@@ -713,16 +737,16 @@ static const char *GS_MODEL_SRC =
     "    precise float ny = a.c.y * inv;\n"
     "    precise float nz = a.c.z * inv;\n"
     "    precise float sx, sy, sz;\n"
-    "    if (texmap_vp.z != 0) {\n"
-    "        sx = nx * vps.x + vpc.x - texsize_off.z;\n"
-    "        sy = ny * vps.y + vpc.y - texsize_off.w;\n"
+    "    if (X.texmap_vp.z != 0) {\n"
+    "        sx = nx * X.vps.x + X.vpc.x - X.texsize_off.z;\n"
+    "        sy = ny * X.vps.y + X.vpc.y - X.texsize_off.w;\n"
     "    } else {\n"
     "        sx = nx * 240.0 + 240.0;\n"
     "        sy = ny * -136.0 + 136.0;\n"
     "    }\n"
-    "    if (vps.z != 0.0) sz = nz * vps.z + vpc.z;\n"
+    "    if (X.vps.z != 0.0) sz = nz * X.vps.z + X.vpc.z;\n"
     "    else              sz = (nz * 0.5 + 0.5) * 65535.0;\n"
-    "    if (texmap_vp.w != 0) {\n"
+    "    if (X.texmap_vp.w != 0) {\n"
     "        if (sz < 0.0) sz = 0.0;\n"
     "        if (sz > 65535.0) sz = 65535.0;\n"
     "    }\n"
@@ -753,13 +777,13 @@ static const char *GS_MODEL_SRC =
     "    float rx = sqrt(rx2), ry = sqrt(ry2);\n"
     "    float rho = rx > ry ? rx : ry;\n"
     "    int lod;\n"
-    "    if (lodi.x == 0)      lod = (rho > 0.0) ? int(floor(log2(rho) * 16.0)) : -4096;\n"
-    "    else if (lodi.x == 2) lod = int(floor(guard_slope.z * 16.0));\n"
+    "    if (X.lodi.x == 0)      lod = (rho > 0.0) ? int(floor(log2(rho) * 16.0)) : -4096;\n"
+    "    else if (X.lodi.x == 2) lod = int(floor(X.guard_slope.z * 16.0));\n"
     "    else                  lod = 0;\n"
-    "    return lod + lodi.y;\n"
+    "    return lod + X.lodi.y;\n"
     "}\n"
     "void emit(SV s, int lod) {\n"
-    "    vec2 pos = (cull_strip.w != 0) ? vec2(s.sx, s.sy) : vec2(float(s.x16) / 16.0, float(s.y16) / 16.0);\n"
+    "    vec2 pos = (X.cull_strip.w != 0) ? vec2(s.sx, s.sy) : vec2(float(s.x16) / 16.0, float(s.y16) / 16.0);\n"
     "    vec2 p = pos * u_placement.xy + vec2(u_placement.z, 0);\n"
     "    vec2 ndc = vec2((p.x / u_viewport.x) * 2.0 - 1.0, 1.0 - ((p.y - u_ybias) / u_viewport.y) * 2.0);\n"
     "    gl_Position = vec4(ndc, (s.sz / 65535.0) * 2.0 - 1.0, 1.0);\n"
@@ -776,7 +800,7 @@ static const char *GS_MODEL_SRC =
     "    for (int i = 0; i < 3; i++) if (tri[i].c.w <= 0.0) behind++;\n"
     "    if (behind == 3) return;\n"
     "    CV poly[4]; int n = 3;\n"
-    "    if (texmap_vp.w == 0) {\n"
+    "    if (X.texmap_vp.w == 0) {\n"
     "        for (int i = 0; i < 3; i++) {\n"
     "            if (tri[i].c.w == 0.0) return;\n"
     "            float nz = tri[i].c.z / tri[i].c.w;\n"
@@ -797,14 +821,14 @@ static const char *GS_MODEL_SRC =
     "    SV sv[4]; bool anyout = false;\n"
     "    for (int i = 0; i < n; i++) {\n"
     "        if (!screen_of(poly[i], sv[i])) return;\n"
-    "        if (sv[i].sx < -guard_slope.x || sv[i].sx >= 4096.0 - guard_slope.x || sv[i].sy < -guard_slope.y || sv[i].sy >= 4096.0 - guard_slope.y) anyout = true;\n"
+    "        if (sv[i].sx < -X.guard_slope.x || sv[i].sx >= 4096.0 - X.guard_slope.x || sv[i].sy < -X.guard_slope.y || sv[i].sy >= 4096.0 - X.guard_slope.y) anyout = true;\n"
     "    }\n"
     "    if (anyout) return;\n"
     "    double ax = double(sv[1].x16 - sv[0].x16), ay = double(sv[1].y16 - sv[0].y16);\n"
     "    double bx = double(sv[2].x16 - sv[0].x16), by = double(sv[2].y16 - sv[0].y16);\n"
     "    double area = ax * by - ay * bx;\n"
-    "    if (cull_strip.z != 0 && (gl_PrimitiveIDIn & 1) != 0) area = -area;\n"
-    "    if (cull_strip.x != 0 && area != 0.0 && ((area < 0.0) == (cull_strip.y != 0))) return;\n"
+    "    if (X.cull_strip.z != 0 && (gl_PrimitiveIDIn & 1) != 0) area = -area;\n"
+    "    if (X.cull_strip.x != 0 && area != 0.0 && ((area < 0.0) == (X.cull_strip.y != 0))) return;\n"
     "    for (int i = 1; i + 1 < n; i++) {\n"
     "        int lod = lod16_of(sv[0], sv[i], sv[i + 1]);\n"
     "        emit(sv[0], lod); emit(sv[i], lod); emit(sv[i + 1], lod);\n"
@@ -1555,7 +1579,7 @@ static int claim(void) {
             g.mu.vbo_head = 0;
             p_glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &g.mu.ubo_align);
             if (g.mu.ubo_align < 16) g.mu.ubo_align = 16;
-            g.mu.ubo_slot_bytes = (int)((sizeof(xform_block) + g.mu.ubo_align - 1) / g.mu.ubo_align * g.mu.ubo_align);
+            g.mu.ubo_slot_bytes = (int)((XFORM_MAXB * sizeof(xform_block) + g.mu.ubo_align - 1) / g.mu.ubo_align * g.mu.ubo_align);
             p_glGenBuffers(1, &g.mu.ubo);
             p_glBindBuffer(GL_UNIFORM_BUFFER, g.mu.ubo);
             p_glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)(g.mu.ubo_slot_bytes * XFORM_RING_SLOTS), NULL, GL_STREAM_DRAW);
@@ -1568,16 +1592,16 @@ static int claim(void) {
             p_glEnableVertexAttribArray(2);
             p_glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(psp_model_vertex), (void *)offsetof(psp_model_vertex, u));
             p_glEnableVertexAttribArray(3);
-            /* Strips and fans as triangle lists in the PSP's vertex order. */
-            static GLushort idx[(MODEL_MAX_VERTS - 2) * 3];
-            for (int t = 0; t + 2 < MODEL_MAX_VERTS; t++) { idx[t*3] = (GLushort)t; idx[t*3+1] = (GLushort)(t+1); idx[t*3+2] = (GLushort)(t+2); }
-            p_glGenBuffers(1, &g.ebo_strip);
-            p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ebo_strip);
-            p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)sizeof idx, idx, GL_STATIC_DRAW);
-            for (int t = 0; t + 2 < MODEL_MAX_VERTS; t++) { idx[t*3] = 0; idx[t*3+1] = (GLushort)(t+1); idx[t*3+2] = (GLushort)(t+2); }
-            p_glGenBuffers(1, &g.ebo_fan);
-            p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ebo_fan);
-            p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)sizeof idx, idx, GL_STATIC_DRAW);
+            p_glGenBuffers(1, &g.mu.vbo_draw);
+            p_glBindBuffer(GL_ARRAY_BUFFER, g.mu.vbo_draw);
+            p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * sizeof(GLuint)), NULL, GL_STREAM_DRAW);
+            p_glVertexAttribIPointer(4, 1, GL_UNSIGNED_INT, sizeof(GLuint), (void *)0);
+            p_glEnableVertexAttribArray(4);
+            p_glGenBuffers(1, &g.mu.ebo_ring);
+            p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.mu.ebo_ring);
+            p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * 3 * sizeof(GLushort)), NULL, GL_STREAM_DRAW);
+            g.mu.ebo_head = 0;
+            g.mu.profile = getenv("PSPRECOMP_GL_PROFILE") != NULL;
             p_glBindVertexArray(0);
         }
     }
@@ -1670,8 +1694,9 @@ static void gl_target(uint32_t addr, uint32_t stride, int fmt) {
  * applies from the next primitive onward; without the flush it would apply
  * retroactively to geometry already sitting in the batch. */
 static void gl_scissor(int x0, int y0, int x1, int y1) {
-    g.mu.state_gen++;
     if (claim() != 0) return;
+    if (g.sc_valid && g.sc_x0 == x0 && g.sc_y0 == y0 && g.sc_x1 == x1 && g.sc_y1 == y1) { g.mu.setters_skipped++; return; }
+    g.mu.state_gen++;
     flush();
     g.sc_x0 = x0; g.sc_y0 = y0; g.sc_x1 = x1; g.sc_y1 = y1; g.sc_valid = 1;
 }
@@ -2031,9 +2056,13 @@ static GLuint texcache_get(const psp_tex_state *t) {
 }
 
 static void gl_texture(const psp_tex_state *t) {
-    g.mu.state_gen++;
     if (claim() != 0) return;
+    if (g.mu.tex_valid && memcmp(t, &g.tex, sizeof *t) == 0 &&
+        g.mu.bound_clut_gen == g.mu.clut_gen &&
+        psp_mem_write_serial() == g.mu.bound_serial) { g.mu.setters_skipped++; return; }
+    g.mu.state_gen++;
     flush();
+    g.mu.tex_valid = 1; g.mu.bound_clut_gen = g.mu.clut_gen; g.mu.bound_serial = psp_mem_write_serial();
     g.tex = *t;
     g.tex_enable = t->addr != 0;
     g.bound_top = 0;
@@ -2052,8 +2081,9 @@ static void gl_texture(const psp_tex_state *t) {
     }
 }
 static void gl_clut(uint32_t a, int f, int sh, int m, int st) {
-    g.mu.state_gen++;
     if (claim() != 0) return;
+    if (g.clut_addr == a && g.clut_fmt == f && g.clut_shift == sh && g.clut_mask == m && g.clut_start == st) { g.mu.setters_skipped++; return; }
+    g.mu.state_gen++; g.mu.clut_gen++;
     flush();
     /* Part of the cache key rather than state of its own: the palette is what
      * a CLUT texture's texels decode through, so a new palette is a new
@@ -2062,21 +2092,24 @@ static void gl_clut(uint32_t a, int f, int sh, int m, int st) {
     g.clut_shift = sh; g.clut_mask = m; g.clut_start = st;
 }
 static void gl_depth(int test, int func, int write) {
-    g.mu.state_gen++;
     if (claim() != 0) return;
+    if (g.z_test == test && g.z_func == func && g.z_write == write) { g.mu.setters_skipped++; return; }
+    g.mu.state_gen++;
     flush();
     g.z_test = test; g.z_func = func; g.z_write = write;
 }
 
 static void gl_blend(const psp_blend_state *b) {
-    g.mu.state_gen++;
     if (claim() != 0) return;
+    if (memcmp(b, &g.bs, sizeof *b) == 0) { g.mu.setters_skipped++; return; }
+    g.mu.state_gen++;
     flush();
     g.bs = *b;
 }
 static void gl_fog(int enable, uint32_t colour) {
-    g.mu.state_gen++;
     if (claim() != 0) return;
+    if (g.fog_enable == enable && g.fog_colour == colour) { g.mu.setters_skipped++; return; }
+    g.mu.state_gen++;
     flush();
     g.fog_enable = enable;
     g.fog_colour = colour;
@@ -2248,6 +2281,7 @@ static int bitmap_glyph_draw(int prim, const psp_vertex *v, int count) {
 
 static void gl_draw(int prim, const psp_vertex *v, int count) {
     if (claim() != 0) return;
+    if (g.mu.npend) flush_model();
     g.draws++;
     g.verts += (uint64_t)count;
     if (g.bs.stencil_test) {
@@ -2563,6 +2597,7 @@ static void apply_placement(const rendertarget *r) {
 }
 
 static void flush(void) {
+    if (g.ready && g.mu.npend) flush_model();
     if (!g.ready || g.batch_n == 0) return;
     if (rt_prepare(g.cur_rt) != 0) { g.batch_n = 0; return; }
     rendertarget *r = &g.rts[g.cur_rt];
@@ -2936,20 +2971,16 @@ static int gl_model_ok(void) {
     if (stencil_writes && uses_dest_alpha()) return 0;
     return 1;
 }
-static void gl_draw_model(int prim, const psp_model_vertex *v, int count, const psp_xform_state *xs) {
-    if (claim() != 0) return;
-    if (count < 3 || count > MODEL_MAX_VERTS) return;
-    if (rt_prepare(g.cur_rt) != 0) return;
-    /* The same ordering rules as gl_draw: a class or glyph change flushes the
-     * pending batch first, and so does this draw itself, since it bypasses
-     * the batch. Model draws are always scene geometry. */
-    if (g.batch_glyph) { flush(); g.batch_glyph = 0; }
-    if (g.adaptive_aspect) {
-        if (CLASS_SCENE != g.batch_class) { flush(); g.batch_class = CLASS_SCENE; }
-        g.class_scene++;
-    }
-    flush();
+static double gl_now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3; }
+/* Draw the pending model draws as one multi-draw: their blocks go into one
+ * UBO slot, their triangles into the index ring in the PSP's vertex order,
+ * and each draw's base vertex points at its records in the vertex ring. GL
+ * state is the one they were appended under, applied once. */
+static void flush_model(void) {
+    if (g.mu.npend == 0) return;
+    const int nb = g.mu.npend; g.mu.npend = 0;
     rendertarget *r = &g.rts[g.cur_rt];
+    const double t0 = g.mu.profile ? gl_now_us() : 0;
     gpu_query_begin_frame();
     rt_import(r);
     if (g.bs.write_alpha || uses_dest_alpha()) stencil_to_alpha(r);
@@ -2958,74 +2989,124 @@ static void gl_draw_model(int prim, const psp_model_vertex *v, int count, const 
     r->dirty = 1;
     p_glViewport(0, 0, rt_scene_w(r), r->h);
     use_program(g.prog_model, &g.ug);
-    /* State and placement only when a setter or the target moved since the
-     * last model draw: the batched path pays these once per flush, this path
-     * would otherwise pay them per primitive. */
     if (g.mu.applied_gen != g.mu.state_gen || g.mu.applied_rt != g.cur_rt) {
         apply_placement(r);
         apply_state();
         g.mu.applied_gen = g.mu.state_gen; g.mu.applied_rt = g.cur_rt;
     }
-    /* The transform state, one block per draw into a ring of aligned slots. */
-    xform_block xb;
-    memset(&xb, 0, sizeof xb);
-    for (int c = 0; c < 3; c++) for (int r3 = 0; r3 < 3; r3++) {
-        xb.world[c*4+r3] = xs->world[c*3+r3]; xb.view[c*4+r3] = xs->view[c*3+r3]; xb.tgen[c*4+r3] = xs->tgen[c*3+r3];
-    }
-    for (int r3 = 0; r3 < 3; r3++) { xb.world[12+r3] = xs->world[9+r3]; xb.view[12+r3] = xs->view[9+r3]; xb.tgen[12+r3] = xs->tgen[9+r3]; }
-    xb.world[15] = xb.view[15] = xb.tgen[15] = 1.0f;
-    memcpy(xb.proj, xs->proj, sizeof xb.proj);
-    for (int i = 0; i < 4; i++) {
-        xb.lmeta[i*4] = xs->light[i].enable; xb.lmeta[i*4+1] = xs->light[i].type; xb.lmeta[i*4+2] = xs->light[i].kind;
-        memcpy(xb.lpos + i*4, xs->light[i].pos, 12); memcpy(xb.ldir + i*4, xs->light[i].dir, 12);
-        memcpy(xb.latten + i*4, xs->light[i].atten, 12);
-        xb.lexpcut[i*4] = xs->light[i].exponent; xb.lexpcut[i*4+1] = xs->light[i].cutoff;
-        memcpy(xb.lamb + i*4, xs->light[i].amb, 12); memcpy(xb.ldif + i*4, xs->light[i].dif, 12); memcpy(xb.lspec + i*4, xs->light[i].spec, 12);
-    }
-    memcpy(xb.memis, xs->mat_emissive, 12); memcpy(xb.mamb, xs->mat_ambient, 12);
-    memcpy(xb.mdif, xs->mat_diffuse, 12); memcpy(xb.mspec, xs->mat_specular, 12); memcpy(xb.gamb, xs->global_amb, 12);
-    xb.coef_fog[0] = xs->mat_spec_coef; xb.coef_fog[1] = xs->fog_end; xb.coef_fog[2] = xs->fog_range;
-    xb.flags[0] = xs->lighting; xb.flags[1] = xs->mat_update; xb.flags[2] = xs->mat_alpha; xb.flags[3] = xs->fog_enable;
-    xb.texmap_vp[0] = xs->tex_map_mode; xb.texmap_vp[1] = xs->tex_proj_mode; xb.texmap_vp[2] = xs->vp_set; xb.texmap_vp[3] = xs->depth_clamp;
-    xb.texsize_off[0] = (float)xs->tex_w; xb.texsize_off[1] = (float)xs->tex_h; xb.texsize_off[2] = xs->off_x; xb.texsize_off[3] = xs->off_y;
-    xb.vps[0] = xs->vp_xs; xb.vps[1] = xs->vp_ys; xb.vps[2] = xs->vp_zs;
-    xb.vpc[0] = xs->vp_xc; xb.vpc[1] = xs->vp_yc; xb.vpc[2] = xs->vp_zc;
-    xb.cull_strip[0] = xs->cull_enable; xb.cull_strip[1] = xs->cull_ccw; xb.cull_strip[2] = prim == PSP_PRIM_TRIANGLE_STRIP; xb.cull_strip[3] = g.resolution && r->display;
-    xb.lodi[0] = g.tex.lod_mode; xb.lodi[1] = g.tex.lod_bias16;
-    xb.guard_slope[0] = xs->vp_set ? xs->off_x : 1808.0f; xb.guard_slope[1] = xs->vp_set ? xs->off_y : 1912.0f; xb.guard_slope[2] = g.tex.lod_slope;
+    const double t1 = g.mu.profile ? gl_now_us() : 0;
     p_glBindBuffer(GL_UNIFORM_BUFFER, g.mu.ubo);
     if (g.mu.ubo_slot >= XFORM_RING_SLOTS) {
         p_glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)(g.mu.ubo_slot_bytes * XFORM_RING_SLOTS), NULL, GL_STREAM_DRAW);
         g.mu.ubo_slot = 0;
     }
     const GLintptr uoff = (GLintptr)g.mu.ubo_slot * g.mu.ubo_slot_bytes;
-    p_glBufferSubData(GL_UNIFORM_BUFFER, uoff, (GLsizeiptr)sizeof xb, &xb);
-    p_glBindBufferRange(GL_UNIFORM_BUFFER, 1, g.mu.ubo, uoff, (GLsizeiptr)sizeof xb);
+    p_glBufferSubData(GL_UNIFORM_BUFFER, uoff, (GLsizeiptr)(nb * sizeof(xform_block)), g.mu.pend_xb);
+    p_glBindBufferRange(GL_UNIFORM_BUFFER, 1, g.mu.ubo, uoff, (GLsizeiptr)(XFORM_MAXB * sizeof(xform_block)));
     g.mu.ubo_slot++;
-    /* The vertices, appended to a ring so no upload waits on a draw still
-     * reading the previous one; orphan when it wraps. */
+    const double t2 = g.mu.profile ? gl_now_us() : 0;
+    /* The triangles, in the PSP's order: strips as (t, t+1, t+2), fans as
+     * (0, t+1, t+2), lists as they are. Indices are relative to each draw's
+     * base vertex, so they stay under 256. */
+    static GLushort idx[XFORM_MAXB * MODEL_MAX_VERTS * 3];
+    GLsizei counts[XFORM_MAXB]; const void *offs[XFORM_MAXB]; GLint bases[XFORM_MAXB];
+    int total = 0;
+    for (int d = 0; d < nb; d++) {
+        const int n = g.mu.pend_count[d], prim = g.mu.pend_prim[d];
+        int k = 0;
+        if (prim == PSP_PRIM_TRIANGLES) { for (int t = 0; t + 2 < n; t += 3) { idx[total+k] = (GLushort)t; idx[total+k+1] = (GLushort)(t+1); idx[total+k+2] = (GLushort)(t+2); k += 3; } }
+        else if (prim == PSP_PRIM_TRIANGLE_STRIP) { for (int t = 0; t + 2 < n; t++) { idx[total+k] = (GLushort)t; idx[total+k+1] = (GLushort)(t+1); idx[total+k+2] = (GLushort)(t+2); k += 3; } }
+        else { for (int t = 0; t + 2 < n; t++) { idx[total+k] = 0; idx[total+k+1] = (GLushort)(t+1); idx[total+k+2] = (GLushort)(t+2); k += 3; } }
+        counts[d] = k; bases[d] = g.mu.pend_base[d];
+        offs[d] = (const void *)(uintptr_t)((size_t)(g.mu.ebo_head + total) * sizeof(GLushort));
+        total += k;
+    }
     p_glBindVertexArray(g.vao_model);
-    p_glBindBuffer(GL_ARRAY_BUFFER, g.vbo_model);
-    if (g.mu.vbo_head + count > MODEL_RING_VERTS) {
-        p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * sizeof(psp_model_vertex)), NULL, GL_STREAM_DRAW);
-        g.mu.vbo_head = 0;
+    p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.mu.ebo_ring);
+    if (g.mu.ebo_head + total > MODEL_RING_VERTS * 3) {
+        p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * 3 * sizeof(GLushort)), NULL, GL_STREAM_DRAW);
+        g.mu.ebo_head = 0;
+        for (int d = 0, acc = 0; d < nb; d++) { offs[d] = (const void *)(uintptr_t)((size_t)acc * sizeof(GLushort)); acc += counts[d]; }
     }
-    const int base = g.mu.vbo_head;
-    p_glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)(base * sizeof(psp_model_vertex)), (GLsizeiptr)(count * sizeof(psp_model_vertex)), v);
-    g.mu.vbo_head += count;
-    if (prim == PSP_PRIM_TRIANGLES) {
-        p_glDrawArrays(GL_TRIANGLES, base, (GLsizei)(count - count % 3));
-    } else {
-        p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, prim == PSP_PRIM_TRIANGLE_STRIP ? g.ebo_strip : g.ebo_fan);
-        p_glDrawElementsBaseVertex(GL_TRIANGLES, (GLsizei)((count - 2) * 3), GL_UNSIGNED_SHORT, (void *)0, base);
-    }
+    p_glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)((size_t)g.mu.ebo_head * sizeof(GLushort)), (GLsizeiptr)((size_t)total * sizeof(GLushort)), idx);
+    g.mu.ebo_head += total;
+    const double t3 = g.mu.profile ? gl_now_us() : 0;
+    p_glMultiDrawElementsBaseVertex(GL_TRIANGLES, counts, GL_UNSIGNED_SHORT, offs, nb, bases);
     p_glBindVertexArray(0);
     const int stencil_writes = g.bs.stencil_test && r->fmt == 3 &&
                               (g.bs.op_sfail || g.bs.op_zfail || g.bs.op_zpass);
     if (stencil_writes) r->alpha_dirty = 1;
     if (g.bs.write_alpha) { r->stencil_valid = 0; r->alpha_dirty = 0; }
+    g.mu.batches++;
+    if (g.mu.profile) { const double t4 = gl_now_us(); g.mu.t_state += t1 - t0; g.mu.t_ubo += t2 - t1; g.mu.t_ebo += t3 - t2; g.mu.t_draw += t4 - t3; }
+}
+/* One display-list primitive of transformed triangles: appended to the
+ * pending batch under the current GL state. The batch is drawn by
+ * flush_model, which every state change, CPU-path draw, finish and present
+ * reaches through flush(), so the order of drawing is the display list's. */
+static void gl_draw_model(int prim, const psp_model_vertex *v, int count, const psp_xform_state *xs) {
+    if (claim() != 0) return;
+    if (count < 3 || count > MODEL_MAX_VERTS) return;
+    if (rt_prepare(g.cur_rt) != 0) return;
+    if (g.batch_glyph) { flush(); g.batch_glyph = 0; }
+    if (g.adaptive_aspect) {
+        if (CLASS_SCENE != g.batch_class) { flush(); g.batch_class = CLASS_SCENE; }
+        g.class_scene++;
+    }
+    if (g.batch_n) flush();
+    if (g.mu.npend == XFORM_MAXB || g.mu.vbo_head + count > MODEL_RING_VERTS) flush_model();
+    const double t0 = g.mu.profile ? gl_now_us() : 0;
+    rendertarget *r = &g.rts[g.cur_rt];
+    xform_block *xb = &g.mu.pend_xb[g.mu.npend];
+    memset(xb, 0, sizeof *xb);
+    for (int c = 0; c < 3; c++) for (int r3 = 0; r3 < 3; r3++) {
+        xb->world[c*4+r3] = xs->world[c*3+r3]; xb->view[c*4+r3] = xs->view[c*3+r3]; xb->tgen[c*4+r3] = xs->tgen[c*3+r3];
+    }
+    for (int r3 = 0; r3 < 3; r3++) { xb->world[12+r3] = xs->world[9+r3]; xb->view[12+r3] = xs->view[9+r3]; xb->tgen[12+r3] = xs->tgen[9+r3]; }
+    xb->world[15] = xb->view[15] = xb->tgen[15] = 1.0f;
+    memcpy(xb->proj, xs->proj, sizeof xb->proj);
+    for (int i = 0; i < 4; i++) {
+        xb->lmeta[i*4] = xs->light[i].enable; xb->lmeta[i*4+1] = xs->light[i].type; xb->lmeta[i*4+2] = xs->light[i].kind;
+        memcpy(xb->lpos + i*4, xs->light[i].pos, 12); memcpy(xb->ldir + i*4, xs->light[i].dir, 12);
+        memcpy(xb->latten + i*4, xs->light[i].atten, 12);
+        xb->lexpcut[i*4] = xs->light[i].exponent; xb->lexpcut[i*4+1] = xs->light[i].cutoff;
+        memcpy(xb->lamb + i*4, xs->light[i].amb, 12); memcpy(xb->ldif + i*4, xs->light[i].dif, 12); memcpy(xb->lspec + i*4, xs->light[i].spec, 12);
+    }
+    memcpy(xb->memis, xs->mat_emissive, 12); memcpy(xb->mamb, xs->mat_ambient, 12);
+    memcpy(xb->mdif, xs->mat_diffuse, 12); memcpy(xb->mspec, xs->mat_specular, 12); memcpy(xb->gamb, xs->global_amb, 12);
+    xb->coef_fog[0] = xs->mat_spec_coef; xb->coef_fog[1] = xs->fog_end; xb->coef_fog[2] = xs->fog_range;
+    xb->flags[0] = xs->lighting; xb->flags[1] = xs->mat_update; xb->flags[2] = xs->mat_alpha; xb->flags[3] = xs->fog_enable;
+    xb->texmap_vp[0] = xs->tex_map_mode; xb->texmap_vp[1] = xs->tex_proj_mode; xb->texmap_vp[2] = xs->vp_set; xb->texmap_vp[3] = xs->depth_clamp;
+    xb->texsize_off[0] = (float)xs->tex_w; xb->texsize_off[1] = (float)xs->tex_h; xb->texsize_off[2] = xs->off_x; xb->texsize_off[3] = xs->off_y;
+    xb->vps[0] = xs->vp_xs; xb->vps[1] = xs->vp_ys; xb->vps[2] = xs->vp_zs;
+    xb->vpc[0] = xs->vp_xc; xb->vpc[1] = xs->vp_yc; xb->vpc[2] = xs->vp_zc;
+    xb->cull_strip[0] = xs->cull_enable; xb->cull_strip[1] = xs->cull_ccw; xb->cull_strip[2] = prim == PSP_PRIM_TRIANGLE_STRIP; xb->cull_strip[3] = g.resolution && r->display;
+    xb->lodi[0] = g.tex.lod_mode; xb->lodi[1] = g.tex.lod_bias16;
+    xb->guard_slope[0] = xs->vp_set ? xs->off_x : 1808.0f; xb->guard_slope[1] = xs->vp_set ? xs->off_y : 1912.0f; xb->guard_slope[2] = g.tex.lod_slope;
+    /* The vertices and their draw index, appended to the rings; orphan when
+     * a ring wraps (the pending batch was flushed above if it would). */
+    p_glBindVertexArray(g.vao_model);
+    p_glBindBuffer(GL_ARRAY_BUFFER, g.vbo_model);
+    if (g.mu.vbo_head + count > MODEL_RING_VERTS) {
+        p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * sizeof(psp_model_vertex)), NULL, GL_STREAM_DRAW);
+        p_glBindBuffer(GL_ARRAY_BUFFER, g.mu.vbo_draw);
+        p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * sizeof(GLuint)), NULL, GL_STREAM_DRAW);
+        p_glBindBuffer(GL_ARRAY_BUFFER, g.vbo_model);
+        g.mu.vbo_head = 0;
+    }
+    const int base = g.mu.vbo_head;
+    p_glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)(base * sizeof(psp_model_vertex)), (GLsizeiptr)(count * sizeof(psp_model_vertex)), v);
+    static GLuint dix[MODEL_MAX_VERTS];
+    for (int i = 0; i < count; i++) dix[i] = (GLuint)g.mu.npend;
+    p_glBindBuffer(GL_ARRAY_BUFFER, g.mu.vbo_draw);
+    p_glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)(base * sizeof(GLuint)), (GLsizeiptr)(count * sizeof(GLuint)), dix);
+    p_glBindVertexArray(0);
+    g.mu.vbo_head += count;
+    g.mu.pend_count[g.mu.npend] = count; g.mu.pend_base[g.mu.npend] = base; g.mu.pend_prim[g.mu.npend] = prim;
+    g.mu.npend++;
     g.draws++; g.verts += (uint64_t)count;
     g.model_draws++; g.model_verts += (uint64_t)count;
+    if (g.mu.profile) g.mu.t_append += gl_now_us() - t0;
 }
 
 static const psp_render_backend gl_backend = {
@@ -3055,8 +3136,11 @@ void render_gl_report(FILE *out) {
         fprintf(out, " -- %llu draw(s), %llu vertices, %llu readback(s)",
                 (unsigned long long)g.draws, (unsigned long long)g.verts,
                 (unsigned long long)g.readbacks);
-    fprintf(out, "\n          transform: %s, %llu model draw(s), %llu vertices",
-            g.model_unavailable ? "CPU" : "GPU", (unsigned long long)g.model_draws, (unsigned long long)g.model_verts);
+    fprintf(out, "\n          transform: %s, %llu model draw(s) in %llu batch(es), %llu vertices; %llu repeated setter(s) skipped",
+            g.model_unavailable ? "CPU" : "GPU", (unsigned long long)g.model_draws, (unsigned long long)g.mu.batches, (unsigned long long)g.model_verts, (unsigned long long)g.mu.setters_skipped);
+    if (g.mu.profile)
+        fprintf(out, "\n          model path time: append %.1f ms, state %.1f ms, blocks %.1f ms, indices %.1f ms, draw calls %.1f ms",
+                g.mu.t_append / 1e3, g.mu.t_state / 1e3, g.mu.t_ubo / 1e3, g.mu.t_ebo / 1e3, g.mu.t_draw / 1e3);
     fprintf(out, "\n          targets: %d%s", g.n_rts,
             g.rt_overflow ? " (more than the table holds)" : "");
     for (int i = 0; i < g.n_rts; i++)

@@ -616,6 +616,56 @@ index, which the block-on-a-ring layout already suits. Two fidelity notes:
 byte can differ at exact boundaries, and none of the three frames showed it;
 and `PSPRECOMP_GL_TRANSFORM=cpu` keeps the old path for comparison.
 
+## 18. Batching the model draws, and what the GE does before every primitive
+
+The first multi-draw attempt merged nothing: 683 draws became 646 batches.
+The reason is in `ge.c`'s `push_pixel_state`, which pushes clut, texture,
+blend, depth and fog to the backend before *every* primitive whether or not
+they changed, and every GL setter flushed and bumped the state generation.
+Neither path could ever batch across a primitive.
+
+The setters now skip a call that sets what is already set. Blend, depth,
+fog, scissor and clut are pure GL state and compare their arguments. The
+texture setter is the one with a memory dependence: the cache validates its
+entries against the guest-memory write serial and re-uploads in place when
+the contents changed, which the pending batch cannot see, so an identical
+texture call is skipped only while `psp_mem_write_serial()` still equals the
+value at the bind and no clut parameter changed. About 3,000 setter calls a
+frame are skipped that way, and the CPU-transform path's own output is
+unchanged pixel for pixel, since a skipped flush only lets more triangles
+share a draw.
+
+With that, consecutive model draws under one GL state accumulate into a
+multi-draw: each vertex carries its draw's index into an array of sixteen
+transform blocks in one uniform slot, the triangles of strips, fans and
+lists go into an index ring in the PSP's vertex order with a base vertex per
+draw, and `glMultiDrawElementsBaseVertex` issues the batch. Primitive IDs
+restart per sub-draw, so the geometry stage still takes the strip's winding
+flip from parity. The mission frame's 683 draws become 376 batches, 1.8 per
+batch; the display list changes texture about 330 times a frame, which is
+the ceiling.
+
+| GL backend, uncapped, optimised game code, interpolation on | Transform on the CPU | Transform on the GPU |
+| --- | ---: | ---: |
+| 1920x1080: frame rate, frame time mean (min) | 71.4 fps, 14.12 ms (11.20) | 80.2 fps, 12.57 ms (7.13) |
+| 1920x1080: GPU draw+blit per frame, mean | 1.21 ms | 2.92 ms |
+| 480x272 native: frame rate, frame time mean (min) | 88.0 fps, 11.46 ms (10.16) | 138.5 fps, 7.28 ms (6.19) |
+| 480x272 native: GPU draw+blit per frame, mean | 0.56 ms | 2.19 ms |
+
+Still pixel-identical to the CPU-transform renders on the three captures,
+render tests 430/430 on each backend, zero bad memory accesses. The model
+path's own CPU time is now negligible, about 0.3 s over a 50 s run.
+
+Two things the numbers say. At native resolution the GPU transform reaches
+138 fps: the CPU side is no longer the limit, and 120 Hz is reachable on the
+GL backend. At 1080p both paths are bound by fill and the blit, and the
+geometry stage costs about 1.6 ms of GPU time a frame at either resolution:
+the exact `emit_tri` port with its doubles and six-vertex output is not free
+on the GPU. The next steps there are on the GPU side, not the CPU: a cheaper
+geometry stage (the exact area in split 32-bit integers instead of doubles,
+fewer varyings), or a non-exact mode that leaves clipping and culling to GL
+for displays where 1080p at 120 Hz matters more than PSP-exact edges.
+
 ## Reproduction
 
 ```sh
