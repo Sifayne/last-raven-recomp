@@ -10,7 +10,7 @@ read -r -a SDL_FLAGS <<< "$(pkg-config --cflags sdl2)"
 read -r -a SDL_LIBS <<< "$(pkg-config --libs sdl2)"
 cc -O2 -Wall -Wextra -std=gnu11 -DHAVE_SDL2 "${SDL_FLAGS[@]}" \
     -I "$ROOT/tools/psprecomp/include" \
-    "$ROOT/host/resolution_tests.c" "$ROOT/host/render_gl.c" "$ROOT/host/present.c" \
+    "$ROOT/host/settings.c" "$ROOT/host/resolution_tests.c" "$ROOT/host/render_gl.c" "$ROOT/host/present.c" \
     "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${SDL_LIBS[@]}" $HOST_LIBS \
     -o "$OUT/resolution-tests"
 for aspect in native window; do

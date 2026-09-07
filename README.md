@@ -71,7 +71,20 @@ against a scheduler, a software GE and the HLE:
 scripts/06-boot.sh
 ```
 
-For the current dual-stick controls in a window:
+For normal play, open the **settings launcher**:
+
+```bash
+scripts/15-settings.sh
+```
+
+Choose **Classic**, **Controller**, or **Mouse & Keyboard**, adjust graphics
+and controls, then **Save & Play**. You can create your own named presets.
+The launcher needs SDL2 and SDL2_ttf; existing command-line and headless
+tools continue to work without the launcher. Settings apply on the next
+launch. See [the settings guide](docs/SETTINGS.md) for navigation, file
+locations, environment overrides and headless inspection.
+
+For the current dual-stick controls directly in a window:
 
 ```bash
 PSPRECOMP_WINDOW=1 PSPRECOMP_INPUT=dual scripts/06-boot.sh
@@ -111,6 +124,12 @@ usual roles, and A/B/X/Y remain conventional confirm/cancel/face buttons in
 menus. Set `PSPRECOMP_GAMEPAD=classic` to use the direct PSP button mapping
 with the enhanced sticks. The response and deadzone tuning variables are
 documented in [the current findings](docs/findings/state.md#the-instruments-and-what-each-can-and-cannot-tell-you).
+
+For mouse and keyboard, use `PSPRECOMP_KEYS=wasd PSPRECOMP_MOUSE=1`
+with `PSPRECOMP_INPUT=dual`. With the default in-game key assignment,
+left click fires the right weapon, right click fires the left weapon,
+and Q switches the right weapon. Middle click also fires the left weapon.
+WASD moves, Space boosts, and Escape releases the mouse.
 
 Then a scripted run — the intro skipped, the title menu reached, and stop:
 

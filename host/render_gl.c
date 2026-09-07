@@ -26,6 +26,7 @@
 
 #include "present.h"
 #include "render_gl.h"
+#include "settings.h"
 #include "psprecomp/render.h"
 #include "psprecomp/mem.h"
 #include "psprecomp/os.h"
@@ -37,11 +38,7 @@
 #include <time.h>
 
 int render_gl_resolution_mode(void) {
-    const char *s = getenv("PSPRECOMP_RESOLUTION");
-    if (!s || !*s || !strcmp(s, "psp")) return 0;
-    if (!strcmp(s, "window")) return 1;
-    fprintf(stderr, "unknown resolution mode \"%s\"; expected psp or window\n", s);
-    return -1;
+    return (int)lr_settings_current()->number[LR_RESOLUTION];
 }
 
 #ifdef HAVE_SDL2

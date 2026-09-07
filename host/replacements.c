@@ -70,6 +70,7 @@
 #include "psprecomp/hle.h"
 #include "aclr_funcs.h"        /* psp_func_*, the __orig originals, r_* aliases */
 #include "controls.h"
+#include "settings.h"
 #include "present.h"
 
 /* ---- configuration ------------------------------------------------------ */
@@ -79,10 +80,7 @@ enum { INPUT_CLASSIC = 0, INPUT_MODERN = 1, INPUT_DUAL = 2 };
 static int input_mode(void) {
     static int mode = -1;
     if (mode < 0) {
-        const char *e = getenv("PSPRECOMP_INPUT");
-        mode = INPUT_CLASSIC;
-        if (e && !strcmp(e, "modern")) mode = INPUT_MODERN;
-        if (e && !strcmp(e, "dual"))   mode = INPUT_DUAL;
+        mode = (int)lr_settings_current()->number[LR_INPUT];
         if (mode == INPUT_MODERN)
             printf("      input     modern -- yaw rate proportional to the stick; "
                    "PSPRECOMP_INPUT=classic for the game's own\n");
@@ -99,10 +97,7 @@ static int input_mode(void) {
 static int gamepad_modern(void) {
     static int modern = -1;
     if (modern < 0) {
-        const char *e = getenv("PSPRECOMP_GAMEPAD");
-        if (e && !strcmp(e, "modern")) modern = 1;
-        else if (e && !strcmp(e, "classic")) modern = 0;
-        else modern = input_mode() != INPUT_CLASSIC;
+        modern = lr_settings_current()->gamepad;
         if (modern)
             printf("      gamepad   modern -- triggers, bumpers and stick clicks are gameplay actions\n");
     }
@@ -114,9 +109,7 @@ static int gamepad_modern(void) {
 static float mouse_sens(void) {
     static float k = -1.0f;
     if (k < 0.0f) {
-        const char *e = getenv("PSPRECOMP_MOUSE_SENS");
-        const float m = (e && *e) ? (float)atof(e) : 1.0f;
-        k = 0.001f * (m > 0.0f ? m : 1.0f);
+        k = 0.001f * (float)lr_settings_current()->number[LR_MOUSE_SENS];
     }
     return k;
 }
@@ -230,23 +223,14 @@ typedef struct {
     float look_dead, outer_dead, look_expo;
 } input_tuning;
 
-static float env_range(const char *name, float dflt, float lo, float hi) {
-    const char *s = getenv(name);
-    if (!s || !*s) return dflt;
-    char *end = NULL;
-    const float v = strtof(s, &end);
-    if (end == s || *end || !isfinite(v)) return dflt;
-    return v < lo ? lo : v > hi ? hi : v;
-}
-
 static const input_tuning *input_tune(void) {
     static input_tuning t;
     if (!t.init) {
-        t.move_dead = env_range("PSPRECOMP_MOVE_DEADZONE", 0.10f, 0.0f, 0.50f);
+        t.move_dead = (float)lr_settings_current()->number[LR_MOVE_DEADZONE];
         t.move_enter = fminf(t.move_dead + 0.03f, 0.55f);
-        t.look_dead = env_range("PSPRECOMP_LOOK_DEADZONE", 0.08f, 0.0f, 0.50f);
-        t.outer_dead = env_range("PSPRECOMP_STICK_OUTER_DEADZONE", 0.02f, 0.0f, 0.20f);
-        t.look_expo = env_range("PSPRECOMP_LOOK_EXPO", 0.60f, 0.0f, 1.0f);
+        t.look_dead = (float)lr_settings_current()->number[LR_LOOK_DEADZONE];
+        t.outer_dead = (float)lr_settings_current()->number[LR_STICK_OUTER_DEADZONE];
+        t.look_expo = (float)lr_settings_current()->number[LR_LOOK_EXPO];
         t.init = 1;
         if (input_mode() != INPUT_CLASSIC)
             printf("      sticks    radial -- move %.0f/%.0f%% exit/enter, "
@@ -815,8 +799,7 @@ enum { CAMERA0 = 0x0043C080u, CAM_EYE = 16, CAM_TARGET = 48, CAM_PITCH = 32, CAM
 static float camera_lag(void) {
     static float r = -2.0f;
     if (r < -1.5f) {
-        const char *e = getenv("PSPRECOMP_CAMERA_LAG");
-        r = (e && *e) ? (float)atof(e) : -1.0f;
+        r = (float)lr_settings_current()->number[LR_CAMERA_LAG];
         if (r >= 0.0f) {
             if (r > 0.99f) r = 0.99f;
             printf("      camera    lag %.2f per frame (the game keeps 0.83); "

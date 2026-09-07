@@ -15,6 +15,7 @@
 
 #include "present.h"
 #include "controls.h"
+#include "settings.h"
 
 #include "psprecomp/clock.h"
 #include "psprecomp/hle.h"
@@ -135,8 +136,8 @@ static _Atomic uint8_t  g_pad_ax = 128, g_pad_ay = 128;
  * (digital, so a diagonal is a full push at 45 degrees; under
  * PSPRECOMP_INPUT=dual that is the walk and the strafe), Space is cross
  * (boost, and confirm in menus), the mouse buttons are the fire buttons --
- * left is square, the right arm's weapon on the game's default assign; right
- * is d-pad up and middle d-pad down, the d-pad actions -- and the letters
+ * left is square (right arm), right and middle are d-pad down (left arm),
+ * and Q is d-pad up (change weapon) on the game's default assign. The letters
  * the stick took are moved: square to c, triangle to v. Everything else is
  * the classic layout. Which button does what in the game is the game's
  * key-assign, not this table's. */
@@ -159,12 +160,13 @@ static const key_bind KEYS_WASD[] = {
     { SDLK_z,          0x004000 }, { SDLK_SPACE,     0x004000 },
     { SDLK_x,          0x002000 },
     { SDLK_c,          0x008000 }, { SDLK_v,         0x001000 },
-    { SDLK_q,          0x000100 }, { SDLK_e,         0x000200 },
+    { SDLK_q,          0x000010 }, { SDLK_e,         0x000200 },
 };
 
 /* Mouse button -> PSP button, `wasd` only: SDL_BUTTON_LEFT/MIDDLE/RIGHT are
  * 1/2/3. */
-static const uint32_t MOUSE_WASD[4] = { 0, 0x008000, 0x000040, 0x000010 };
+static const uint32_t MOUSE_WASD[4] = { 0, 0x008000, 0x000040, 0x000040 };
+static uint32_t g_mouse_down;               /* physical buttons, SDL thread */
 
 static int g_keys_wasd;                     /* PSPRECOMP_KEYS=wasd */
 static int g_gamepad_modern;                /* semantic buttons in modern/dual */
@@ -174,6 +176,17 @@ static SDL_JoystickID      g_controller_id = -1;
 static void set_bit(_Atomic uint32_t *buttons, uint32_t bit, int down) {
     if (down) atomic_fetch_or(buttons, bit);
     else      atomic_fetch_and(buttons, ~bit);
+}
+
+static void set_mouse_button(uint8_t button, int down) {
+    if (down) g_mouse_down |= SDL_BUTTON(button);
+    else      g_mouse_down &= ~SDL_BUTTON(button);
+    /* Right and middle share left-arm fire. Releasing either must not cancel
+     * the other while it is still held. */
+    uint32_t buttons = 0;
+    for (int b = 1; b < 4; b++)
+        if (g_mouse_down & SDL_BUTTON(b)) buttons |= MOUSE_WASD[b];
+    atomic_store(&g_mouse_buttons, buttons);
 }
 
 /* The stick from the keyboard: which of W/A/S/D are down, as bits, and the
@@ -340,11 +353,7 @@ static void publish_pad(void) {
 }
 
 static int gamepad_modern(void) {
-    const char *layout = getenv("PSPRECOMP_GAMEPAD");
-    if (layout && !strcmp(layout, "modern")) return 1;
-    if (layout && !strcmp(layout, "classic")) return 0;
-    const char *input = getenv("PSPRECOMP_INPUT");
-    return input && (!strcmp(input, "modern") || !strcmp(input, "dual"));
+    return lr_settings_current()->gamepad;
 }
 
 static void clear_controller(void) {
@@ -454,12 +463,10 @@ static uint32_t g_audio_target_frames  = 0;      /* 0: two of the channel's buff
 static uint32_t g_audio_preroll_frames = 4096;
 static int      g_audio_warned_fmt;
 
-static uint32_t env_ms_frames(const char *name, uint32_t dflt_frames) {
-    const char *v = getenv(name);
-    if (!v || !*v) return dflt_frames;
-    const long ms = strtol(v, NULL, 10);
+static uint32_t settings_ms_frames(int id, uint32_t dflt_frames) {
+    const double ms = lr_settings_current()->number[id];
     if (ms < 0) return dflt_frames;
-    uint64_t f = (uint64_t)ms * 44100u / 1000u;
+    uint64_t f = (uint64_t)(ms * 44100.0 / 1000.0);
     if (f >= MIX_RING_FRAMES / 2) f = MIX_RING_FRAMES / 2;
     return (uint32_t)f;
 }
@@ -633,8 +640,7 @@ void present_request_window_size(int w, int h) {
 }
 
 int present_adaptive_aspect(void) {
-    const char *mode = getenv("PSPRECOMP_ASPECT");
-    return mode && strcmp(mode, "window") == 0;
+    return lr_settings_current()->number[LR_ASPECT] != 0;
 }
 
 int present_aspect_wide_width(void) {
@@ -677,14 +683,8 @@ static void *sdl_thread(void *arg) {
     }
     /* PSPRECOMP_WINDOW_SIZE=WxH opens the window at a chosen size, so a
      * capture at 21:9 or 16:9 is a command rather than a drag. */
-    int win_w = SCREEN_W * 2, win_h = SCREEN_H * 2;
-    {
-        const char *sz = getenv("PSPRECOMP_WINDOW_SIZE");
-        int ww = 0, wh = 0;
-        if (sz && sscanf(sz, "%dx%d", &ww, &wh) == 2 && ww > 0 && wh > 0) {
-            win_w = ww; win_h = wh;
-        }
-    }
+    const lr_settings *settings = lr_settings_current();
+    int win_w = settings->width, win_h = settings->height;
     SDL_Window *win = SDL_CreateWindow(
         "Armored Core: Last Raven -- recompiled",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -760,22 +760,19 @@ static void *sdl_thread(void *arg) {
     want.samples  = 1024;
     want.callback = audio_callback;
     SDL_AudioSpec have;
-    g_audio_target_frames  = env_ms_frames("PSPRECOMP_AUDIO_LEAD_MS",    g_audio_target_frames);
-    g_audio_preroll_frames = env_ms_frames("PSPRECOMP_AUDIO_PREROLL_MS", g_audio_preroll_frames);
+    g_audio_target_frames  = settings_ms_frames(LR_AUDIO_LEAD_MS,    g_audio_target_frames);
+    g_audio_preroll_frames = settings_ms_frames(LR_AUDIO_PREROLL_MS, g_audio_preroll_frames);
     g_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (g_audio_dev) SDL_PauseAudioDevice(g_audio_dev, 0);
     else fprintf(stderr, "present: no audio device: %s\n", SDL_GetError());
 
-    {
-        const char *k = getenv("PSPRECOMP_KEYS");
-        g_keys_wasd = k && !strcmp(k, "wasd");
-    }
+    g_keys_wasd = settings->number[LR_KEYS] != 0;
     g_gamepad_modern = gamepad_modern();
     if (g_keys_wasd)
         fprintf(stderr, "present: keys wasd stick | space/z cross, x circle, "
-                        "c square, v triangle | q/e shoulders | enter start | "
-                        "backspace select | mouse: left square, right dpad up, "
-                        "middle dpad down | close window to stop\n");
+                        "c square, v triangle | q change weapon, e R shoulder | enter start | "
+                        "backspace select | mouse: left = right weapon, right/middle = left weapon "
+                        "(default key assign) | close window to stop\n");
     else
         fprintf(stderr, "present: keys arrows dpad | z cross, x circle, "
                         "a square, s triangle | q/e shoulders | enter start | "
@@ -790,8 +787,7 @@ static void *sdl_thread(void *arg) {
      * After the GL handoff above on purpose -- that block owns the context
      * juggling and does not need company. */
     {
-        const char *m = getenv("PSPRECOMP_MOUSE");
-        g_mouse_want = m && *m && strcmp(m, "0") != 0;
+        g_mouse_want = settings->number[LR_MOUSE] != 0;
         if (g_mouse_want) mouse_grab(1);
     }
 
@@ -934,8 +930,7 @@ static void *sdl_thread(void *arg) {
                 /* The click that captures the pointer is not also a shot. */
                 if (!g_mouse_grabbed) { if (e.type == SDL_MOUSEBUTTONDOWN) mouse_grab(1); break; }
                 if (g_keys_wasd && e.button.button < 4 && MOUSE_WASD[e.button.button]) {
-                    set_bit(&g_mouse_buttons, MOUSE_WASD[e.button.button],
-                            e.type == SDL_MOUSEBUTTONDOWN);
+                    set_mouse_button(e.button.button, e.type == SDL_MOUSEBUTTONDOWN);
                     publish_pad();
                 }
                 break;
@@ -943,6 +938,7 @@ static void *sdl_thread(void *arg) {
                 if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
                     mouse_grab(0);
                     clear_keys();
+                    g_mouse_down = 0;
                     atomic_store(&g_mouse_buttons, 0);
                     clear_controller();
                     publish_pad();

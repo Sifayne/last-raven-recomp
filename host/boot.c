@@ -25,6 +25,7 @@
 #include "container.h"
 #include "present.h"
 #include "render_gl.h"
+#include "settings.h"
 
 #include "decode.h"          /* PSP_RA_INDEX */
 #include "psprecomp/clock.h"
@@ -758,19 +759,53 @@ static int report_cplinit(const psp_blob *b, const elf_info *e) {
 /* ---- entry ----------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr, "boot <module.elf> [disc.iso]\n"
-                        "\n"
-                        "The disc image backs the raw UMD device. A PSP title\n"
-                        "opens `umd1:` by bare name to read its own sectors, and\n"
-                        "without an image that open fails and the game retries\n"
-                        "forever.\n");
+    const char *module = NULL, *iso = NULL, *config = NULL, *preset = NULL;
+    int inspect = 0, force_window = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--config") || !strcmp(argv[i], "--preset")) {
+            int is_config = !strcmp(argv[i], "--config");
+            if (++i == argc) { fprintf(stderr, "missing option value\n"); return 2; }
+            if (is_config) config = argv[i]; else preset = argv[i];
+        } else if (!strcmp(argv[i], "--print-settings")) inspect = 1;
+        else if (!strcmp(argv[i], "--window")) force_window = 1;
+        else if (!strcmp(argv[i], "--help")) {
+            puts("boot [module.elf] [disc.iso] [--config FILE] [--preset NAME] [--print-settings] [--window]");
+            return 0;
+        } else if (argv[i][0] == '-') { fprintf(stderr,"unknown option: %s\n",argv[i]); return 2; }
+        else if (!module) module = argv[i];
+        else if (!iso) iso = argv[i];
+        else { fprintf(stderr,"unexpected argument: %s\n",argv[i]); return 2; }
+    }
+    lr_settings settings;
+    char settings_error[LR_ERROR_SIZE];
+    if (lr_settings_load(&settings, config, preset, settings_error)) {
+        fprintf(stderr, "settings: %s\n", settings_error); return 2;
+    }
+    /* The interactive launcher supplies --window; direct boot stays headless
+     * by default. This is launch policy, not a saved temporary override. */
+    if (force_window) {
+        lr_settings_set(&settings, LR_WINDOW, "1", LR_COMMAND_LINE, settings_error);
+        lr_settings_resolve(&settings, settings_error);
+    }
+    if (inspect) { lr_settings_print(&settings, stdout); return 0; }
+    if (!module) {
+        fprintf(stderr, "boot <module.elf> [disc.iso] [--config FILE] [--preset NAME]\n");
         return 2;
     }
-    const char *iso = (argc > 2) ? argv[2] : NULL;
+    lr_settings_use(&settings);
+    lr_settings_print(&settings, stdout);
+    if (psp_mpeg_set_decoding((int)settings.number[LR_MPEG_DECODE])) {
+        fprintf(stderr,"settings: intro decoding requires a runtime built with OpenH264\n");
+        return 2;
+    }
+#ifndef HAVE_SDL2
+    if (settings.window) {
+        fprintf(stderr,"settings: windowed play requires a host built with SDL2\n"); return 2;
+    }
+#endif
 
     psp_blob b;
-    if (psp_blob_read(argv[1], &b) != 0) { fprintf(stderr, "cannot read %s\n", argv[1]); return 1; }
+    if (psp_blob_read(module, &b) != 0) { fprintf(stderr, "cannot read %s\n", module); return 1; }
     elf_info e;
     if (elf_parse(b.data, b.size, &e) != 0) { fprintf(stderr, "not an ELF/PRX\n"); return 1; }
     if (psp_mem_init() != 0) { fprintf(stderr, "no guest memory\n"); return 1; }
@@ -778,7 +813,7 @@ int main(int argc, char **argv) {
     install_handlers();
     psp_set_miss_handler(on_miss);
 
-    printf("module:   %s\n", argv[1]);
+    printf("module:   %s\n", module);
 
     /* 1 — load and relocate. */
     psp_load_info li;
@@ -816,24 +851,9 @@ int main(int argc, char **argv) {
      * the wrong backend. That is the shape of failure this project keeps
      * finding: a call that quietly answers something other than what was
      * asked. */
-    const char *render_env = getenv("PSPRECOMP_RENDER");
-    if (render_env && !*render_env) render_env = NULL; /* set-but-empty means
-                                                         * unset */
-    const char *aspect = getenv("PSPRECOMP_ASPECT");
-    if (aspect && !*aspect) aspect = NULL;
-    if (aspect && strcmp(aspect, "native") != 0 &&
-                  strcmp(aspect, "window") != 0) {
-        fprintf(stderr, "unknown aspect mode \"%s\"; expected native or window\n",
-                aspect);
-        return 2;
-    }
-    const int adaptive_aspect = aspect && strcmp(aspect, "window") == 0;
-    const int resolution = render_gl_resolution_mode();
-    if (resolution < 0) return 2;
-    /* The aspect path needs the GL backend's split between projected scene and
-     * screen-space HUD geometry. Make the one feature switch sufficient when
-     * no backend was named, while still respecting an explicit selection. */
-    const char *render = render_env ? render_env : (adaptive_aspect || resolution) ? "gl" : NULL;
+    const int adaptive_aspect = settings.number[LR_ASPECT] != 0;
+    const int resolution = (int)settings.number[LR_RESOLUTION];
+    const char *render = settings.render == 2 ? "gl" : settings.render == 3 ? "null" : "software";
 
     /* Backends the runtime cannot carry are registered before anything can
      * select one. "gl" is absent from the list on a host built without SDL2,
@@ -858,10 +878,7 @@ int main(int argc, char **argv) {
                 psp_render_current()->name);
         return 1;
     }
-    printf("      render    %s%s\n", psp_render_current()->name,
-           render_env ? " (PSPRECOMP_RENDER)" :
-           adaptive_aspect ? " (PSPRECOMP_ASPECT)" :
-           resolution ? " (PSPRECOMP_RESOLUTION)" : " (default)");
+    printf("      render    %s (resolved settings)\n", psp_render_current()->name);
 
     /* A GL backend needs somewhere to put a context, so it brings the window
      * with it whether or not PSPRECOMP_WINDOW was asked for -- and if there is
@@ -885,7 +902,7 @@ int main(int argc, char **argv) {
     }
 
     int windowed = 0;
-    if (getenv("PSPRECOMP_WINDOW") || want_gl) {
+    if (settings.window) {
         if (want_gl) present_want_gl();
         if (present_start() == 0) {
             windowed = 1;
@@ -900,7 +917,7 @@ int main(int argc, char **argv) {
         } else {
             printf("      window    unavailable -- running headless\n");
         }
-    } else if (getenv("PSPRECOMP_REALTIME")) {
+    } else if (settings.realtime) {
         psp_clock_realtime(1);
         printf("      pacing    real-time (headless)\n");
     }

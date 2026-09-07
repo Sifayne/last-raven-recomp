@@ -52,6 +52,7 @@ else
 fi
 
 info "compiling boot host"
+cc -O2 -std=gnu11 -c "$ROOT/host/settings.c" -o "$OUT/settings.o"
 # The loader is part of the recompiler tool, not the runtime library, so its
 # sources are compiled in here rather than linked from an archive.
 cc -O2 -std=gnu11 $SDL_DEF \
@@ -106,11 +107,11 @@ cc -O2 -std=gnu11 $SDL_DEF ${SDL_DEF:+$(pkg-config --cflags sdl2)} \
    -c "$ROOT/host/gereplay.c" -o "$OUT/gereplay.o"
 
 info "linking"
-cc "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT \
+cc "$OUT/settings.o" "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT \
    "$OUT/aclr_funcs.o" "$OUT/aclr_imports.o" "$OUT/replacements.o" "$LIB" \
    -o "$OUT/boot" -lm -lpthread $HOST_LIBS
 
-cc "$OUT/gereplay.o" $PRESENT "$LIB" \
+cc "$OUT/settings.o" "$OUT/gereplay.o" $PRESENT "$LIB" \
    -o "$OUT/gereplay" -lm -lpthread $HOST_LIBS
 
 # Build without running, so 09-replay.sh reuses this recipe instead of copying
@@ -124,8 +125,13 @@ fi
 info "booting"
 # The ISO is optional: without it the raw UMD device has nothing behind it and
 # reads fail, which is worth being able to run deliberately.
+EXTRA=()
+if [[ "${1:-}" == --* ]]; then
+    EXTRA=("$@")
+    set --
+fi
 ELF="${1:-$ROOT/game/extracted/ACLR_App.elf}"
 ISO="${2:-$(ls "$ROOT"/game/*.iso 2>/dev/null | head -1 || true)}"
 [ -f "$ELF" ] || die "no module at $ELF"
 
-exec "$OUT/boot" "$ELF" ${ISO:+"$ISO"}
+exec "$OUT/boot" "$ELF" ${ISO:+"$ISO"} "${@:3}" "${EXTRA[@]}"

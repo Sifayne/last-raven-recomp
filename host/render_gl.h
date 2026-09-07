@@ -18,7 +18,7 @@
 
 const psp_render_backend *render_gl_backend(void);
 
-/* Validate PSPRECOMP_RESOLUTION. 0 is PSP, 1 is window, -1 is invalid. */
+/* Read the validated startup settings snapshot: 0 is PSP, 1 is window. */
 int render_gl_resolution_mode(void);
 
 /* Read a target's physical RGBA pixels, top-left first, for renderer checks

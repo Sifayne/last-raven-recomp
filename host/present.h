@@ -43,9 +43,8 @@ int   present_gl_make_current(void);
 void  present_gl_drawable_size(int *w, int *h);
 /* Queue a window resize on the SDL thread; useful for settings and checks. */
 void  present_request_window_size(int w, int h);
-/* PSPRECOMP_ASPECT=window is deliberately owned by the window layer: both the
- * game-camera replacement and the final GL blit ask the same question, rather
- * than growing two parsers which can disagree. */
+/* The resolved aspect choice from shared startup settings. The game-camera
+ * replacement and final GL blit use this same value. */
 int   present_adaptive_aspect(void);
 /* The virtual PSP width the window's shape asks for: 480 unless
  * PSPRECOMP_ASPECT=window and the drawable is known, else

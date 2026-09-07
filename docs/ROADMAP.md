@@ -571,55 +571,50 @@ scenario frame dumps).
 
 ## M7 — The PC port's own settings
 
-Sif's aspiration, recorded 3 Sep: a settings screen for the things a
-recompilation can offer that the hardware never could — internal resolution
-above 480x272, frame rates above the panel's, and whatever else earns a row.
-Nothing here is scheduled. It is written down because three of its
-consequences are cheap to allow for now and expensive to retrofit, and one of
-them lands inside M5.
+**First delivery implemented 6 Sep: settings before launch, with saved presets.**
+The immediate need is to stop remembering environment-variable recipes for
+normal play. The [settings plan](SETTINGS-PLAN.md) inventories the existing
+options, records their defaults and describes the implementation and checks.
+Open `scripts/15-settings.sh`; [the settings guide](SETTINGS.md) covers presets,
+navigation, storage and overrides. Validation is recorded in the settings plan.
 
-**The vertex interface is the software rasterizer's shape.** `psp_vertex`
-carries **12.4 fixed-point screen-space** positions: `ge.c` has already done
-model, view, projection and the viewport, and quantized to a sixteenth of a
-PSP pixel. Scaling those to 4x gives geometry at quarter-of-a-target-pixel
-precision — PSP-precision geometry enlarged, not higher-resolution geometry.
-A real internal-resolution path wants the transform done in float by the
-backend, from untransformed vertices and the matrices, which is a *second*
-input path rather than a change to this one. Through-mode geometry is already
-in screen space on hardware and stays as it is; transformed 3D is what
-benefits. Decide it when M5's 1x backend works and is exact, not before.
+- [x] **Shared configuration and saved presets.** One typed definition of
+  each player option, consistent validation and effective-value reporting.
+  Resolve defaults, the selected preset and explicit environment overrides
+  in that order; do not save temporary overrides into the preset. Migrate
+  graphics and controls consumers first, preserving direct boot defaults.
+- [x] **Pre-launch screen.** Preset selection and management, Graphics,
+  Controls and Advanced pages, reset defaults, Save & Play, Save and Cancel.
+  Provide Classic, Controller and Mouse & Keyboard starting presets. The
+  launcher passes an explicit config path and preset to the boot executable;
+  replay and regression tools do not automatically load personal settings.
+- [ ] **In-game access and live changes, later.** Input ownership, safe
+  cross-thread updates and host redraw while paused need their own work.
+  Existing settings cache values at startup; a widget alone cannot change
+  them safely during play. Initially apply settings on the next launch.
 
-**Framebuffer aliasing is what actually makes high resolution hard.** The
-guest's framebuffer must stay 480x272 whatever the GPU renders at, because the
-game reads and writes it: movie frames are decoded into it, the 2D layer is
-drawn into it, and the stencil *is* its alpha byte. Every readback and every
-CPU write has to reconcile with a scaled GPU-side buffer.
+**The environment inventory had grown.** The 6 Sep pre-migration audit found 74
+distinct runtime `PSPRECOMP_*` option names in 14 host/runtime C files,
+including the six options passed through named parsing helpers. Most are
+diagnostics and need no ordinary menu row. New player options should use the
+shared configuration layer; migrate diagnostic readers
+incrementally rather than making all 74 a prerequisite for the screen.
 
-**Measured 3 Sep (findings item 50), and the answer is favourable.** Across
-six scenarios the game draws into its two display buffers and into exactly one
-other surface: `0x04154000`, stride 256, format 5551, entered at most twice a
-run and never taking more than 552 primitives -- 0.12% of the mission's
-drawing. It appears only in the scenes that show an AC. So scaling has one
-auxiliary target to think about rather than an open-ended set, which is the
-difference between this and a general emulator.
+**Window-resolution rendering is already available, independently of the
+screen.** `PSPRECOMP_RESOLUTION=window` enables physical-resolution GL
+rasterization, and `PSPRECOMP_ASPECT=window` independently enables the wider
+view. Guest framebuffer layout remains PSP-compatible, including CPU writes,
+readback and alpha/stencil semantics. The [resolution plan](NATIVE-RESOLUTION-PLAN.md)
+and [validation results](RENDER-CHECKS.md#window-resolution-rendering) record
+the implementation and remaining limitations. Expose these existing modes;
+fixed scale factors and supersampling can follow separately.
 
-**A higher frame rate is not a faster present.** The game paces itself against
-elapsed time and its own loop; presenting more often does not make it simulate
-more often, and a fixed-timestep game misbehaves if its tick is changed. The
-tractable near-term piece is making sure nothing assumes 60 and that present
-rate and emulation rate are separable. Anything beyond that is interpolation
-or unlocking the game's loop, which is research, not a milestone step.
-
-**A settings screen implies a configuration layer, and that is cheap now.**
-Configuration today is 41 distinct `PSPRECOMP_*` environment variables read by
-`getenv` at 11 call sites across the host and the runtime, each with its own
-parsing and its own idea of what an empty value means. A settings screen needs
-one place that holds defaults, validates, and reports what is in force — with
-environment variables as one source that populates it rather than as the
-mechanism itself. Introducing that structure and migrating call sites
-opportunistically costs little; retrofitting it across 41 scattered reads
-later costs a lot. **The rule from here: a new option goes through the
-configuration layer, not into a new `getenv`.**
+**Higher frame rates remain research, not a ready settings row.**
+The [framerate investigation](HIGH-FRAMERATE-RESEARCH.md) finds a faster loop
+mode that also speeds up gameplay, and the [tick map](GAME-TICK-MAP.md)
+investigates separating simulation from rendering. A correct enhancement
+needs game-time validation beyond a faster present or a matching poll-based
+replay. This work does not block saved settings or the launcher.
 
 ## The autotests policy
 

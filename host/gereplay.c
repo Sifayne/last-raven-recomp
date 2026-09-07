@@ -23,6 +23,7 @@
 
 #include "present.h"
 #include "render_gl.h"
+#include "settings.h"
 
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
@@ -103,6 +104,15 @@ int main(int argc, char **argv) {
         return 2;
     }
     const char *path = argv[1], *backend = argv[2], *out = argv[3];
+    /* The explicit backend argument wins over an inherited RENDER variable,
+     * before checking its compatibility with resolution/aspect settings. */
+    lr_settings settings;
+    char error[LR_ERROR_SIZE];
+    lr_settings_defaults(&settings);
+    if (lr_settings_env(&settings, error) ||
+        lr_settings_set(&settings, LR_RENDER, backend, LR_COMMAND_LINE, error) ||
+        lr_settings_resolve(&settings, error)) return die(error);
+    lr_settings_use(&settings);
     const int resolution = render_gl_resolution_mode();
     if (resolution < 0) return 2;
     if (resolution && strcmp(backend, "gl"))

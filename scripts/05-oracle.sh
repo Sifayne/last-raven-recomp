@@ -69,9 +69,15 @@ cc -c -O1 -I "$ROOT/tools/psprecomp/include" \
 # so a *replaced* function differs by construction rather than by codegen fault.
 # Exclude replaced addresses from a sweep instead of reading the differ as a
 # bug -- see host/replace.txt.
+cc -O2 -std=gnu11 -c "$ROOT/host/settings.c" -o "$GEN_OBJ/settings.o"
+# The boot host builds replacements with SDL enabled. The oracle has no
+# presentation layer, so give it its own object instead of depending on which
+# build script most recently wrote replacements.o.
+cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -I "$GEN" \
+    -c "$ROOT/host/replacements.c" -o "$GEN_OBJ/oracle_replacements.o"
 cc -o "$BIN" "$GEN_OBJ/oracle_diff.o" \
        "$GEN_OBJ/aclr_funcs.o" "$GEN_OBJ/aclr_imports.o" \
-       "$GEN_OBJ/replacements.o" \
+       "$GEN_OBJ/oracle_replacements.o" "$GEN_OBJ/settings.o" \
        "$ROOT/build/psprecomp/tools/allegrexrecomp/liballegrex_core.a" \
        "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread $HOST_LIBS
 
