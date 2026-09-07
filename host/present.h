@@ -17,6 +17,10 @@
  * -1 if SDL could not start (the run continues headless either way). */
 #ifdef HAVE_SDL2
 int present_start(void);
+/* One rendered frame reached the window: the backend that drew it says so
+ * (render_gl.c on a dirty target; the SDL thread on a published software
+ * frame), and the window title shows the rate once a second. */
+void present_note_frame(void);
 #else
 /* No SDL2 when this was built, so present.c was never compiled and there is
  * nothing to link against. The declaration becomes a stub rather than the call
@@ -66,6 +70,7 @@ static inline int   present_adaptive_aspect(void) { return 0; }
 static inline void  present_request_window_size(int w, int h) { (void)w; (void)h; }
 static inline int   present_aspect_wide_width(void) { return 480; }
 static inline void  present_gl_swap(void) { }
+static inline void  present_note_frame(void) { }
 static inline void *present_gl_proc(const char *name) { (void)name; return 0; }
 #endif
 

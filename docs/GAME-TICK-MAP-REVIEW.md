@@ -708,6 +708,42 @@ the frame's draws; and, to recover the stage's 0.5 ms, a geometry-stage-free
 exact path that draws each triangle as an instance fetching its three
 vertices from a buffer texture, which is a larger rewrite.
 
+## 20. Persistently mapped rings
+
+Every vertex, draw index, triangle index, transform block and CPU-path
+batch the backend hands the GPU now goes through one of five rings, each
+one persistently and coherently mapped buffer (`glBufferStorage`,
+ARB_buffer_storage): the CPU writes into memory the GPU reads from, with no
+`glBufferSubData`, no driver staging copy and no implicit wait on a buffer
+still in use. What replaces the driver's protection is a fence per
+presented frame: an allocation that would overwrite a range a pending frame
+wrote waits on that frame's fence, and a ring that wraps fences what the
+current frame has written before reusing anything. The rings hold four or
+more frames, so the wait retires long-signalled fences rather than stalling:
+2,547 waits over a 2,556-frame run total 22.7 ms, 9 µs each. Without
+`buffer_storage`, or with `PSPRECOMP_GL_PERSISTENT=0`, the same allocator
+falls back to `glBufferSubData` with an orphaning `glBufferData` on wrap,
+which is what the backend did before.
+
+| GL backend, uncapped, optimised game code, interpolation on | Before | After |
+| --- | ---: | ---: |
+| GPU transform, 1920x1080 | 79.9 fps, 12.62 ms; GPU 2.91 ms | 109.3 fps, 9.23 ms; GPU 0.89 ms |
+| CPU transform, 1920x1080 | 71.4 fps, 14.12 ms; GPU 1.21 ms | 75.0 fps, 13.45 ms; GPU 0.84 ms |
+| GPU transform, 480x272 native | 138.6 fps, 7.20 ms; GPU 2.21 ms | 140.0 fps, 7.20 ms; GPU 0.19 ms |
+| CPU transform, 480x272 native | 88.0 fps, 11.46 ms; GPU 0.56 ms | 92.6 fps, 10.89 ms; GPU 0.13 ms |
+
+Both paths still match their earlier renders on the three captures; the
+render, resolution, aspect and settings tests all pass. The "GPU time" the
+previous sections chased was mostly the driver's copies for the buffer
+updates, counted inside the frame's timer query: with the rings it drops
+by an order of magnitude on both paths, and the GPU path at 1080p gains
+almost 30 fps. At native resolution the frame is CPU-bound at about 7 ms and
+does not move; what remains there is the GE list and the game itself.
+
+The window title now shows the frame rate once a second, counted from
+frames actually rendered by either backend rather than from the game's two
+frame-buffer flips per frame.
+
 ## Reproduction
 
 ```sh

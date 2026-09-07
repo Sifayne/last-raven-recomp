@@ -191,6 +191,131 @@ static int gl_load(void) {
     return missing ? -1 : 0;
 }
 
+/* ---- the streaming rings ------------------------------------------------
+ *
+ * Every vertex, draw index, triangle index, transform block and CPU-path
+ * batch the backend hands the GPU goes through one of five rings. With
+ * ARB_buffer_storage (GL 4.4, and any Mesa or vendor driver of the last
+ * decade) each ring is one persistently and coherently mapped buffer: the
+ * CPU writes into memory the GPU reads from, no glBufferSubData, no driver
+ * staging copy, no implicit wait on a buffer still in use. What replaces the
+ * driver's protection is a fence per presented frame: an allocation that
+ * would overwrite a range a pending frame wrote waits on that frame's fence,
+ * and a ring that wraps fences what the current frame has written so far
+ * before reusing anything. The rings hold several frames, so the wait is a
+ * safety net rather than the steady state. Without buffer_storage, or with
+ * PSPRECOMP_GL_PERSISTENT=0, the same allocator falls back to the previous
+ * behaviour, glBufferSubData with an orphaning glBufferData on wrap. */
+static PFNGLBUFFERSTORAGEPROC  p_glBufferStorage;
+static PFNGLMAPBUFFERRANGEPROC p_glMapBufferRange;
+static PFNGLFENCESYNCPROC      p_glFenceSync;
+static PFNGLCLIENTWAITSYNCPROC p_glClientWaitSync;
+static PFNGLDELETESYNCPROC     p_glDeleteSync;
+enum { RING_VBO, RING_DRAW, RING_EBO, RING_UBO, RING_BATCH, RING_COUNT, RING_FRAMES = 8 };
+typedef struct { GLuint buf; GLenum target; size_t size, head; uint8_t *map; int wrapped; } gl_ring;
+static struct {
+    int persistent, decided;
+    gl_ring r[RING_COUNT];
+    size_t frame_start[RING_COUNT];       /* where the current frame's writes began */
+    struct { GLsync sync; size_t start[RING_COUNT], end[RING_COUNT]; } fq[RING_FRAMES];
+    int fq_n;
+    unsigned fences, waits;
+    double wait_us;                        /* time actually spent in glClientWaitSync */
+} g_rings;
+static double rings_now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3; }
+static void rings_decide(void) {
+    if (g_rings.decided) return;
+    g_rings.decided = 1;
+    p_glBufferStorage  = (PFNGLBUFFERSTORAGEPROC)present_gl_proc("glBufferStorage");
+    p_glMapBufferRange = (PFNGLMAPBUFFERRANGEPROC)present_gl_proc("glMapBufferRange");
+    p_glFenceSync      = (PFNGLFENCESYNCPROC)present_gl_proc("glFenceSync");
+    p_glClientWaitSync = (PFNGLCLIENTWAITSYNCPROC)present_gl_proc("glClientWaitSync");
+    p_glDeleteSync     = (PFNGLDELETESYNCPROC)present_gl_proc("glDeleteSync");
+    const char *e = getenv("PSPRECOMP_GL_PERSISTENT");
+    g_rings.persistent = p_glBufferStorage && p_glMapBufferRange && p_glFenceSync && p_glClientWaitSync && p_glDeleteSync &&
+                         !(e && *e == '0');
+}
+/* Create ring i on the currently bound target; leaves it bound. */
+static void ring_create(int i, GLenum target, size_t size) {
+    rings_decide();
+    gl_ring *r = &g_rings.r[i];
+    r->target = target; r->size = size; r->head = 0; r->map = NULL;
+    p_glGenBuffers(1, &r->buf);
+    p_glBindBuffer(target, r->buf);
+    if (g_rings.persistent) {
+        const GLbitfield flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+        p_glBufferStorage(target, (GLsizeiptr)size, NULL, flags);
+        r->map = (uint8_t *)p_glMapBufferRange(target, 0, (GLsizeiptr)size, flags);
+        if (!r->map) { fprintf(stderr, "gl: persistent map of ring %d failed, falling back\n", i); g_rings.persistent = 0; }
+    }
+    if (!g_rings.persistent) p_glBufferData(target, (GLsizeiptr)size, NULL, GL_STREAM_DRAW);
+}
+/* Does [a0,a1) overlap a frame's [s,e), which wraps when e < s? */
+static int span_overlaps(size_t a0, size_t a1, size_t s, size_t e, size_t size) {
+    if (s == e) return 0;
+    if (s < e) return a0 < e && s < a1;
+    return (a0 < e) || (s < a1) || (a0 < size && a1 > s);
+}
+/* Fence everything written since the last fence. Called once per presented
+ * frame and by a ring about to wrap. */
+static void rings_fence(void) {
+    if (!g_rings.persistent) return;
+    int wrote = 0;
+    for (int i = 0; i < RING_COUNT; i++) if (g_rings.r[i].head != g_rings.frame_start[i] || g_rings.r[i].wrapped) wrote = 1;
+    if (!wrote) return;
+    if (g_rings.fq_n == RING_FRAMES) {
+        const double t0 = rings_now_us();
+        p_glClientWaitSync(g_rings.fq[0].sync, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+        g_rings.wait_us += rings_now_us() - t0;
+        p_glDeleteSync(g_rings.fq[0].sync);
+        memmove(&g_rings.fq[0], &g_rings.fq[1], sizeof g_rings.fq[0] * (RING_FRAMES - 1));
+        g_rings.fq_n--; g_rings.waits++;
+    }
+    for (int i = 0; i < RING_COUNT; i++) {
+        g_rings.fq[g_rings.fq_n].start[i] = g_rings.frame_start[i];
+        g_rings.fq[g_rings.fq_n].end[i] = g_rings.r[i].head;
+        g_rings.frame_start[i] = g_rings.r[i].head;
+        g_rings.r[i].wrapped = 0;
+    }
+    g_rings.fq[g_rings.fq_n].sync = p_glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    g_rings.fq_n++; g_rings.fences++;
+}
+/* Wait until no pending frame still reads [a0,a1) of ring i. Fences are in
+ * order, so waiting on frame k retires every older one with it. */
+static void ring_wait(int i, size_t a0, size_t a1) {
+    int retire = -1;
+    for (int k = 0; k < g_rings.fq_n; k++)
+        if (span_overlaps(a0, a1, g_rings.fq[k].start[i], g_rings.fq[k].end[i], g_rings.r[i].size)) retire = k;
+    if (retire < 0) return;
+    const double t0 = rings_now_us();
+    p_glClientWaitSync(g_rings.fq[retire].sync, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+    g_rings.wait_us += rings_now_us() - t0;
+    for (int k = 0; k <= retire; k++) p_glDeleteSync(g_rings.fq[k].sync);
+    memmove(&g_rings.fq[0], &g_rings.fq[retire + 1], sizeof g_rings.fq[0] * (size_t)(g_rings.fq_n - retire - 1));
+    g_rings.fq_n -= retire + 1; g_rings.waits++;
+}
+/* Take `bytes` from ring i at an offset aligned to `align`, with `reserve`
+ * bytes guaranteed to lie within the buffer after the offset (a uniform
+ * range bound past the blocks actually written). Returns the offset. */
+static size_t ring_alloc(int i, size_t bytes, size_t align, size_t reserve) {
+    gl_ring *r = &g_rings.r[i];
+    if (reserve < bytes) reserve = bytes;
+    size_t off = (r->head + align - 1) / align * align;
+    if (off + reserve > r->size) {
+        if (g_rings.persistent) { rings_fence(); r->wrapped = 1; }
+        else { p_glBindBuffer(r->target, r->buf); p_glBufferData(r->target, (GLsizeiptr)r->size, NULL, GL_STREAM_DRAW); }
+        off = 0;
+    }
+    if (g_rings.persistent) ring_wait(i, off, off + reserve);
+    r->head = off + bytes;
+    return off;
+}
+static void ring_write(int i, size_t off, const void *data, size_t bytes) {
+    gl_ring *r = &g_rings.r[i];
+    if (r->map) memcpy(r->map + off, data, bytes);
+    else { p_glBindBuffer(r->target, r->buf); p_glBufferSubData(r->target, (GLintptr)off, (GLsizeiptr)bytes, data); }
+}
+
 /* ---- the texture cache ------------------------------------------------------
  *
  * Keyed on everything that changes the decoded texels: where they live, how
@@ -1583,17 +1708,16 @@ static int claim(void) {
         else {
             p_glGenVertexArrays(1, &g.vao_model);
             p_glBindVertexArray(g.vao_model);
-            p_glGenBuffers(1, &g.vbo_model);
-            p_glBindBuffer(GL_ARRAY_BUFFER, g.vbo_model);
-            p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * sizeof(psp_model_vertex)), NULL, GL_STREAM_DRAW);
+            ring_create(RING_VBO, GL_ARRAY_BUFFER, (size_t)4 * MODEL_RING_VERTS * sizeof(psp_model_vertex));
+            g.vbo_model = g_rings.r[RING_VBO].buf;
             g.mu.vbo_head = 0;
             p_glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &g.mu.ubo_align);
             if (g.mu.ubo_align < 16) g.mu.ubo_align = 16;
             g.mu.ubo_slot_bytes = (int)((XFORM_MAXB * sizeof(xform_block) + g.mu.ubo_align - 1) / g.mu.ubo_align * g.mu.ubo_align);
-            p_glGenBuffers(1, &g.mu.ubo);
-            p_glBindBuffer(GL_UNIFORM_BUFFER, g.mu.ubo);
-            p_glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)(g.mu.ubo_slot_bytes * XFORM_RING_SLOTS), NULL, GL_STREAM_DRAW);
+            ring_create(RING_UBO, GL_UNIFORM_BUFFER, (size_t)4 * 1024 * 1024);
+            g.mu.ubo = g_rings.r[RING_UBO].buf;
             g.mu.ubo_slot = 0;
+            p_glBindBuffer(GL_ARRAY_BUFFER, g.vbo_model);
             p_glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(psp_model_vertex), (void *)offsetof(psp_model_vertex, pos));
             p_glEnableVertexAttribArray(0);
             p_glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(psp_model_vertex), (void *)offsetof(psp_model_vertex, nrm));
@@ -1602,14 +1726,12 @@ static int claim(void) {
             p_glEnableVertexAttribArray(2);
             p_glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(psp_model_vertex), (void *)offsetof(psp_model_vertex, u));
             p_glEnableVertexAttribArray(3);
-            p_glGenBuffers(1, &g.mu.vbo_draw);
-            p_glBindBuffer(GL_ARRAY_BUFFER, g.mu.vbo_draw);
-            p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * sizeof(GLuint)), NULL, GL_STREAM_DRAW);
+            ring_create(RING_DRAW, GL_ARRAY_BUFFER, (size_t)4 * MODEL_RING_VERTS * sizeof(GLuint));
+            g.mu.vbo_draw = g_rings.r[RING_DRAW].buf;
             p_glVertexAttribIPointer(4, 1, GL_UNSIGNED_INT, sizeof(GLuint), (void *)0);
             p_glEnableVertexAttribArray(4);
-            p_glGenBuffers(1, &g.mu.ebo_ring);
-            p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.mu.ebo_ring);
-            p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * 3 * sizeof(GLushort)), NULL, GL_STREAM_DRAW);
+            ring_create(RING_EBO, GL_ELEMENT_ARRAY_BUFFER, (size_t)4 * MODEL_RING_VERTS * 3 * sizeof(GLushort));
+            g.mu.ebo_ring = g_rings.r[RING_EBO].buf;
             g.mu.ebo_head = 0;
             g.mu.profile = getenv("PSPRECOMP_GL_PROFILE") != NULL;
             p_glBindVertexArray(0);
@@ -1623,11 +1745,8 @@ static int claim(void) {
 
     p_glGenVertexArrays(1, &g.vao);
     p_glBindVertexArray(g.vao);
-    p_glGenBuffers(1, &g.vbo);
-    p_glBindBuffer(GL_ARRAY_BUFFER, g.vbo);
-    p_glBufferData(GL_ARRAY_BUFFER,
-                   (GLsizeiptr)(GL_MAX_VERTS * FLOATS_PER_VERT * sizeof(float)),
-                   NULL, GL_STREAM_DRAW);
+    ring_create(RING_BATCH, GL_ARRAY_BUFFER, (size_t)4 * GL_MAX_VERTS * FLOATS_PER_VERT * sizeof(float));
+    g.vbo = g_rings.r[RING_BATCH].buf;
     p_glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
                             FLOATS_PER_VERT * sizeof(float), (void *)0);
     p_glEnableVertexAttribArray(0);
@@ -2660,10 +2779,10 @@ static void flush(void) {
     apply_placement(r);
     apply_state();
     p_glBindVertexArray(g.vao);
-    p_glBindBuffer(GL_ARRAY_BUFFER, g.vbo);
-    p_glBufferSubData(GL_ARRAY_BUFFER, 0,
-                      (GLsizeiptr)(g.batch_n * FLOATS_PER_VERT * sizeof(float)),
-                      g.batch);
+    const size_t bbytes = g.batch_n * FLOATS_PER_VERT * sizeof(float);
+    const size_t boff = ring_alloc(RING_BATCH, bbytes, FLOATS_PER_VERT * sizeof(float), 0);
+    ring_write(RING_BATCH, boff, g.batch, bbytes);
+    const GLint bfirst = (GLint)(boff / (FLOATS_PER_VERT * sizeof(float)));
     const int stencil_writes = g.bs.stencil_test && r->fmt == 3 &&
                               (g.bs.op_sfail || g.bs.op_zfail || g.bs.op_zpass);
     if (stencil_writes && uses_dest_alpha()) {
@@ -2676,11 +2795,11 @@ static void flush(void) {
                 apply_placement(r);
                 apply_state();
             }
-            p_glDrawArrays(GL_TRIANGLES, (GLint)i, 3);
+            p_glDrawArrays(GL_TRIANGLES, bfirst + (GLint)i, 3);
             r->alpha_dirty = 1;
         }
     } else {
-        p_glDrawArrays(GL_TRIANGLES, 0, (GLsizei)g.batch_n);
+        p_glDrawArrays(GL_TRIANGLES, bfirst, (GLsizei)g.batch_n);
         if (stencil_writes) r->alpha_dirty = 1;
     }
     if (g.bs.write_alpha) { r->stencil_valid = 0; r->alpha_dirty = 0; }
@@ -2818,6 +2937,7 @@ static void note_frame_time(void) {
     }
     g.frame_prev_ns = g.frame_last_ns = now;
     g.frames++;
+    present_note_frame();
 }
 
 /* PSPRECOMP_GL_SHOT=<prefix> writes every Nth presented *window* image as
@@ -2916,6 +3036,7 @@ static void gl_present(void) {
     gl_shot(draw_w, draw_h);
     gpu_query_end_frame();
     present_gl_swap();
+    rings_fence();
 
     /* Read every target that has been drawn into since the last flip. The
      * instruments in display.c and boot.c all read guest memory, and which
@@ -3005,15 +3126,11 @@ static void flush_model(void) {
         g.mu.applied_gen = g.mu.state_gen; g.mu.applied_rt = g.cur_rt;
     }
     const double t1 = g.mu.profile ? gl_now_us() : 0;
-    p_glBindBuffer(GL_UNIFORM_BUFFER, g.mu.ubo);
-    if (g.mu.ubo_slot >= XFORM_RING_SLOTS) {
-        p_glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)(g.mu.ubo_slot_bytes * XFORM_RING_SLOTS), NULL, GL_STREAM_DRAW);
-        g.mu.ubo_slot = 0;
-    }
-    const GLintptr uoff = (GLintptr)g.mu.ubo_slot * g.mu.ubo_slot_bytes;
-    p_glBufferSubData(GL_UNIFORM_BUFFER, uoff, (GLsizeiptr)(nb * sizeof(xform_block)), g.mu.pend_xb);
-    p_glBindBufferRange(GL_UNIFORM_BUFFER, 1, g.mu.ubo, uoff, (GLsizeiptr)(XFORM_MAXB * sizeof(xform_block)));
-    g.mu.ubo_slot++;
+    /* The blocks, packed: the bound range covers XFORM_MAXB blocks past the
+     * offset, so that much is reserved even when fewer were written. */
+    const size_t uoff = ring_alloc(RING_UBO, (size_t)nb * sizeof(xform_block), (size_t)g.mu.ubo_align, (size_t)XFORM_MAXB * sizeof(xform_block));
+    ring_write(RING_UBO, uoff, g.mu.pend_xb, (size_t)nb * sizeof(xform_block));
+    p_glBindBufferRange(GL_UNIFORM_BUFFER, 1, g.mu.ubo, (GLintptr)uoff, (GLsizeiptr)(XFORM_MAXB * sizeof(xform_block)));
     const double t2 = g.mu.profile ? gl_now_us() : 0;
     /* The triangles, in the PSP's order: strips as (t, t+1, t+2), fans as
      * (0, t+1, t+2), lists as they are. Indices are relative to each draw's
@@ -3028,18 +3145,14 @@ static void flush_model(void) {
         else if (prim == PSP_PRIM_TRIANGLE_STRIP) { for (int t = 0; t + 2 < n; t++) { idx[total+k] = (GLushort)t; idx[total+k+1] = (GLushort)(t+1); idx[total+k+2] = (GLushort)(t+2); k += 3; } }
         else { for (int t = 0; t + 2 < n; t++) { idx[total+k] = 0; idx[total+k+1] = (GLushort)(t+1); idx[total+k+2] = (GLushort)(t+2); k += 3; } }
         counts[d] = k; bases[d] = g.mu.pend_base[d];
-        offs[d] = (const void *)(uintptr_t)((size_t)(g.mu.ebo_head + total) * sizeof(GLushort));
+        offs[d] = (const void *)(uintptr_t)((size_t)total * sizeof(GLushort));   /* relative for now */
         total += k;
     }
+    const size_t eoff = ring_alloc(RING_EBO, (size_t)total * sizeof(GLushort), sizeof(GLushort), 0);
+    ring_write(RING_EBO, eoff, idx, (size_t)total * sizeof(GLushort));
+    for (int d = 0; d < nb; d++) offs[d] = (const void *)(uintptr_t)(eoff + (size_t)(uintptr_t)offs[d]);
     p_glBindVertexArray(g.vao_model);
     p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.mu.ebo_ring);
-    if (g.mu.ebo_head + total > MODEL_RING_VERTS * 3) {
-        p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * 3 * sizeof(GLushort)), NULL, GL_STREAM_DRAW);
-        g.mu.ebo_head = 0;
-        for (int d = 0, acc = 0; d < nb; d++) { offs[d] = (const void *)(uintptr_t)((size_t)acc * sizeof(GLushort)); acc += counts[d]; }
-    }
-    p_glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)((size_t)g.mu.ebo_head * sizeof(GLushort)), (GLsizeiptr)((size_t)total * sizeof(GLushort)), idx);
-    g.mu.ebo_head += total;
     const double t3 = g.mu.profile ? gl_now_us() : 0;
     p_glMultiDrawElementsBaseVertex(GL_TRIANGLES, counts, GL_UNSIGNED_SHORT, offs, nb, bases);
     p_glBindVertexArray(0);
@@ -3098,25 +3211,17 @@ static void gl_draw_model(int prim, const psp_model_vertex *v, int count, const 
      * the derivative work. */
     xb->lodi[2] = !g.tex_enable || (((g.tex.min_filter & 1) == (g.tex.mag_filter & 1)) && (g.tex.min_filter < 4 || g.bound_top <= 0));
     xb->guard_slope[0] = xs->vp_set ? xs->off_x : 1808.0f; xb->guard_slope[1] = xs->vp_set ? xs->off_y : 1912.0f; xb->guard_slope[2] = g.tex.lod_slope;
-    /* The vertices and their draw index, appended to the rings; orphan when
-     * a ring wraps (the pending batch was flushed above if it would). */
-    p_glBindVertexArray(g.vao_model);
-    p_glBindBuffer(GL_ARRAY_BUFFER, g.vbo_model);
-    if (g.mu.vbo_head + count > MODEL_RING_VERTS) {
-        p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * sizeof(psp_model_vertex)), NULL, GL_STREAM_DRAW);
-        p_glBindBuffer(GL_ARRAY_BUFFER, g.mu.vbo_draw);
-        p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(MODEL_RING_VERTS * sizeof(GLuint)), NULL, GL_STREAM_DRAW);
-        p_glBindBuffer(GL_ARRAY_BUFFER, g.vbo_model);
-        g.mu.vbo_head = 0;
-    }
-    const int base = g.mu.vbo_head;
-    p_glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)(base * sizeof(psp_model_vertex)), (GLsizeiptr)(count * sizeof(psp_model_vertex)), v);
+    /* The vertices and their draw index, into the vertex and draw-index
+     * rings in lockstep: one base vertex addresses both. */
+    if (!g_rings.persistent && g.mu.vbo_head + count > MODEL_RING_VERTS * 4) flush_model();   /* an orphaning wrap must not split a batch */
+    const size_t voff = ring_alloc(RING_VBO, (size_t)count * sizeof(psp_model_vertex), sizeof(psp_model_vertex), 0);
+    const int base = (int)(voff / sizeof(psp_model_vertex));
+    ring_write(RING_VBO, voff, v, (size_t)count * sizeof(psp_model_vertex));
     static GLuint dix[MODEL_MAX_VERTS];
     for (int i = 0; i < count; i++) dix[i] = (GLuint)g.mu.npend;
-    p_glBindBuffer(GL_ARRAY_BUFFER, g.mu.vbo_draw);
-    p_glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)(base * sizeof(GLuint)), (GLsizeiptr)(count * sizeof(GLuint)), dix);
-    p_glBindVertexArray(0);
-    g.mu.vbo_head += count;
+    g_rings.r[RING_DRAW].head = (size_t)(base + count) * sizeof(GLuint);
+    ring_write(RING_DRAW, (size_t)base * sizeof(GLuint), dix, (size_t)count * sizeof(GLuint));
+    g.mu.vbo_head = base + count;
     g.mu.pend_count[g.mu.npend] = count; g.mu.pend_base[g.mu.npend] = base; g.mu.pend_prim[g.mu.npend] = prim;
     g.mu.npend++;
     g.draws++; g.verts += (uint64_t)count;
@@ -3153,6 +3258,8 @@ void render_gl_report(FILE *out) {
                 (unsigned long long)g.readbacks);
     fprintf(out, "\n          transform: %s, %llu model draw(s) in %llu batch(es), %llu vertices; %llu repeated setter(s) skipped",
             g.model_unavailable ? "CPU" : "GPU", (unsigned long long)g.model_draws, (unsigned long long)g.mu.batches, (unsigned long long)g.model_verts, (unsigned long long)g.mu.setters_skipped);
+    fprintf(out, "\n          rings: %s, %u frame fence(s), %u wait(s) totalling %.1f ms",
+            g_rings.persistent ? "persistently mapped" : "glBufferSubData with orphaning", g_rings.fences, g_rings.waits, g_rings.wait_us / 1e3);
     if (g.mu.profile)
         fprintf(out, "\n          model path time: append %.1f ms, state %.1f ms, blocks %.1f ms, indices %.1f ms, draw calls %.1f ms",
                 g.mu.t_append / 1e3, g.mu.t_state / 1e3, g.mu.t_ubo / 1e3, g.mu.t_ebo / 1e3, g.mu.t_draw / 1e3);

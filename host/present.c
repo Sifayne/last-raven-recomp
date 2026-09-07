@@ -624,6 +624,8 @@ int present_gl_make_current(void) {
 }
 
 void present_gl_swap(void) { if (g_gl_win) SDL_GL_SwapWindow(g_gl_win); }
+static _Atomic uint64_t g_frames_rendered;
+void present_note_frame(void) { atomic_fetch_add(&g_frames_rendered, 1); }
 
 /* SDL owns window queries on its presentation thread.  Publish the physical
  * drawable size through atomics so the GE thread can scale its final blit
@@ -854,6 +856,23 @@ static void *sdl_thread(void *arg) {
          * point of the bounded wait. */
         if (tex && fresh)
             SDL_UpdateTexture(tex, NULL, g_frame_present, SCREEN_W * 4);
+        if (fresh && !g_gl_want) present_note_frame();
+        /* The frame rate in the title, once a second: rendered frames over
+         * wall time, whichever backend rendered them. Set from this thread,
+         * which owns the window. */
+        {
+            static uint32_t title_t0; static uint64_t title_frames; static char last[96];
+            const uint32_t now = SDL_GetTicks();
+            if (!title_t0) { title_t0 = now; title_frames = atomic_load(&g_frames_rendered); }
+            else if (now - title_t0 >= 1000 && win) {
+                const uint64_t frames = atomic_load(&g_frames_rendered);
+                const double fps = (double)(frames - title_frames) * 1000.0 / (double)(now - title_t0);
+                char title[96];
+                snprintf(title, sizeof title, "Armored Core: Last Raven -- recompiled  |  %.0f fps", fps);
+                if (strcmp(title, last) != 0) { SDL_SetWindowTitle(win, title); snprintf(last, sizeof last, "%s", title); }
+                title_t0 = now; title_frames = frames;
+            }
+        }
 
         if (tex) {
             SDL_RenderCopy(ren, tex, NULL, NULL);
