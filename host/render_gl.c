@@ -545,8 +545,9 @@ enum { RB_SLOTS = 3, RB_SLOT_BYTES = 1024 * 1024 };
 static struct {
     int async; GLuint pbo; uint8_t *map; int next;
     struct { GLsync sync; int rt, rw, rh; size_t off; int valid; } pend[RB_SLOTS];
-    unsigned issued, completed; double wait_us;
+    unsigned issued, completed, demanded; double wait_us;
 } g_rb;
+static void readback_watch(void);
 static void readback_rt(int i);
 static void readback_complete(int i);
 static void stencil_to_alpha(rendertarget *r);
@@ -1488,11 +1489,8 @@ static void rt_guest_write(uint32_t addr, uint32_t size) {
         const unsigned bpp = r->fmt == 3 ? 4 : 2;
         const uint64_t end = (uint64_t)r->addr + (uint64_t)r->stride * r->guest_h * bpp;
         if ((uint64_t)addr + size <= r->addr || addr >= end) continue;
-        /* A deferred readback of this target must land before the CPU's
-         * write, or its completion would overwrite what the guest is about
-         * to put here -- the intro movie decodes straight into a display
-         * buffer. The wait is on a frame's fence, short. */
-        if (g_rb.async) readback_complete(i);
+        /* A readback of this target still in flight has already landed: the
+         * access observer ran before the write, from the pointer lookup. */
         const uint64_t first = addr > r->addr ? addr - r->addr : 0;
         const uint64_t last =
             (uint64_t)addr + size < end ? (uint64_t)addr + size - r->addr : end - r->addr;
@@ -1760,8 +1758,12 @@ static int claim(void) {
             g.mu.profile = getenv("PSPRECOMP_GL_PROFILE") != NULL;
             p_glBindVertexArray(0);
             {
+                /* Asynchronous unless asked otherwise: the pixels land in guest
+                 * memory at the next present, or earlier the moment anything
+                 * reaches for them (rt_guest_access). PSPRECOMP_GL_READBACK=sync
+                 * keeps the glReadPixels in the present. */
                 const char *rb = getenv("PSPRECOMP_GL_READBACK");
-                if (rb && strcmp(rb, "async") == 0 && g_rings.persistent) {
+                if (!(rb && strcmp(rb, "sync") == 0) && g_rings.persistent) {
                     const GLbitfield flags = GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
                     p_glGenBuffers(1, &g_rb.pbo);
                     p_glBindBuffer(GL_PIXEL_PACK_BUFFER, g_rb.pbo);
@@ -1841,6 +1843,7 @@ static int gl_init(int w, int h) {
 
 static void gl_shutdown(void) {
     if (g_rb.async) readback_complete(-1);
+    psp_mem_set_vram_access_observer(NULL, 0, 0);
     if (g.resolution) psp_mem_set_write_observer(NULL);
 }
 
@@ -3001,9 +3004,44 @@ static void readback_complete(int i) {
         p_glClientWaitSync(g_rb.pend[k].sync, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
         g_rb.wait_us += rings_now_us() - t0;
         p_glDeleteSync(g_rb.pend[k].sync);
-        readback_copy(&g.rts[g_rb.pend[k].rt], g_rb.map + g_rb.pend[k].off, g_rb.pend[k].rw, g_rb.pend[k].rh, g_rb.pend[k].rt);
+        /* Retired before the copy: the copy's own pointer lookup into the
+         * target reaches the access observer, which must find nothing left. */
+        const int rt = g_rb.pend[k].rt, rw = g_rb.pend[k].rw, rh = g_rb.pend[k].rh;
+        const size_t off = g_rb.pend[k].off;
         g_rb.pend[k].valid = 0; g_rb.completed++;
+        readback_watch();
+        readback_copy(&g.rts[rt], g_rb.map + off, rw, rh, rt);
     }
+}
+/* Land pixels in flight before the guest touches their bytes. Reached from
+ * psp_mem_ptr for any access into the watched range: a load or store by the
+ * recompiled code, the movie decoder's writes, a block copy, an instrument
+ * dumping the frame, the texture decoder. What the guest then sees is what
+ * a synchronous readback would have left there, and the readback's wait is
+ * paid only by the frames somebody actually looks at. */
+static void rt_guest_access(uint32_t addr, uint32_t size) {
+    for (int k = 0; k < RB_SLOTS; k++) {
+        if (!g_rb.pend[k].valid) continue;
+        const rendertarget *r = &g.rts[g_rb.pend[k].rt];
+        const uint64_t end = (uint64_t)r->addr + (uint64_t)r->stride * r->guest_h * (r->fmt == 3 ? 4 : 2);
+        if ((uint64_t)addr + size <= r->addr || addr >= end) continue;
+        g_rb.demanded++;
+        readback_complete(g_rb.pend[k].rt);
+    }
+}
+/* The observer is armed over the union of the targets in flight, and not at
+ * all when nothing is: the common path in psp_mem_ptr then costs a null test. */
+static void readback_watch(void) {
+    uint64_t lo = UINT64_MAX, hi = 0;
+    for (int k = 0; k < RB_SLOTS; k++) {
+        if (!g_rb.pend[k].valid) continue;
+        const rendertarget *r = &g.rts[g_rb.pend[k].rt];
+        const uint64_t end = (uint64_t)r->addr + (uint64_t)r->stride * r->guest_h * (r->fmt == 3 ? 4 : 2);
+        if (r->addr < lo) lo = r->addr;
+        if (end > hi) hi = end;
+    }
+    if (hi > lo) psp_mem_set_vram_access_observer(rt_guest_access, (uint32_t)lo, (uint32_t)(hi > UINT32_MAX ? UINT32_MAX : hi));
+    else psp_mem_set_vram_access_observer(NULL, 0, 0);
 }
 /* Start an asynchronous readback of target i into the next ring slot. */
 static void readback_issue(int i) {
@@ -3021,6 +3059,7 @@ static void readback_issue(int i) {
     g_rb.pend[k].rt = i; g_rb.pend[k].rw = rw; g_rb.pend[k].rh = rh;
     g_rb.pend[k].off = (size_t)k * RB_SLOT_BYTES; g_rb.pend[k].valid = 1;
     g_rb.issued++;
+    readback_watch();
 }
 static void readback_rt(int i) {
     rendertarget *r = &g.rts[i];
@@ -3386,9 +3425,8 @@ void render_gl_report(FILE *out) {
     if (g.mu.profile)
         fprintf(out, "\n          model path time: append %.1f ms, state %.1f ms, blocks %.1f ms, indices %.1f ms, draw calls %.1f ms",
                 g.mu.t_append / 1e3, g.mu.t_state / 1e3, g.mu.t_ubo / 1e3, g.mu.t_ebo / 1e3, g.mu.t_draw / 1e3);
-    fprintf(out, "\n          readback: %s%s", g_rb.async ? "asynchronous, one frame behind" : "synchronous",
-            g_rb.async ? "" : "");
-    if (g_rb.async) fprintf(out, ", %u issued, %u completed, fence waits %.1f ms", g_rb.issued, g_rb.completed, g_rb.wait_us / 1e3);
+    fprintf(out, "\n          readback: %s", g_rb.async ? "asynchronous, landed at the next present or on demand" : "synchronous");
+    if (g_rb.async) fprintf(out, ", %u issued, %u completed (%u on a guest access), fence waits %.1f ms", g_rb.issued, g_rb.completed, g_rb.demanded, g_rb.wait_us / 1e3);
     if (g.mu.profile)
         fprintf(out, "\n          present readback: %llu target(s) in %.1f ms (%.2f ms each)",
                 (unsigned long long)g.mu.readbacks, g.mu.t_readback / 1e3, g.mu.readbacks ? g.mu.t_readback / 1e3 / (double)g.mu.readbacks : 0.0);

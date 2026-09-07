@@ -509,6 +509,11 @@ static void dump_framebuffer(void) {
     /* And the fullest frame the run ever presented, which is the one that
      * answers "did anything appear" -- the two above only say what was in the
      * buffers at the instant the run stopped. */
+    const char *asked = getenv("PSPRECOMP_FRAME");
+    if (!asked || !*asked) {
+        printf("frame(best): not scored -- set PSPRECOMP_FRAME to keep the fullest presented frame\n");
+        return;
+    }
     const uint64_t score = psp_display_best_score();
     if (!score) {
         printf("frame(best): no presented frame had a non-black pixel\n");

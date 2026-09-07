@@ -785,6 +785,7 @@ a different moment relative to the decoder's writes. Neither matters to
 play, but both matter to the frame-exact comparisons this document's
 methodology rests on, so the default stays synchronous and the mode is a
 knob for someone who wants the 7% at 1080p more than exact dumps.
+(Section 23 closes both gaps and makes it the default.)
 
 ## 22. The list execution in the stall updates
 
@@ -861,6 +862,69 @@ dumps that differ -- the intro movie (30-42), the narration screen (122)
 and the briefing fades (126-134) -- differ between two runs of the same
 binary as well: they are paced by the wall clock, and a run that finishes
 the movie a frame earlier shows every fade a frame further on.
+
+## 23. The present readback, landed on demand
+
+Section 21 measured the readback and made an asynchronous version an
+option, and gave two reasons for leaving it off: the instruments in
+display.c saw guest memory a frame late, and during the intro movie, where
+the CPU writes every frame straight into a display buffer, the
+asynchronous dumps matched no synchronous frame. Both are the same
+omission. The pixels were landed at the next present, and anything that
+touched guest memory before then -- a dump, the movie decoder's write,
+the game itself -- saw the bytes as they were.
+
+The memory system now has a VRAM access observer: `psp_mem_ptr`, which
+every guest load and store, every block copy, every instrument and the
+texture decoder go through to reach a byte of VRAM, calls it before
+handing out a pointer into a watched range. The backend arms it over the
+union of the targets whose readbacks are in flight, and not at all
+otherwise, so an access outside the range costs a null test and an
+access inside lands that target's pixels first -- for a write, before
+the write, which is the case the write observer of section 21 could not
+serve, since it runs after. What the guest sees from then on is exactly
+what a synchronous readback would have left there, and the readback's
+wait is paid only by a frame something actually reads. Asynchronous is
+the default; `PSPRECOMP_GL_READBACK=sync` keeps the old path.
+
+Measuring it turned up a second reader nobody had asked for. The
+best-frame capture of display.c -- the fullest presented frame, kept for
+the exit-time `.best.ppm` -- scored every presented frame by reading all
+130,560 pixels back out of guest memory through `psp_read32`, more than
+a millisecond a frame at any resolution, and on a GPU backend also the
+demand that landed the pixels every frame. It now runs only when
+`PSPRECOMP_FRAME` asks for a capture, and the exit summary says so
+instead of reporting an empty frame.
+
+| GL, uncapped, GPU transform; two runs each, rotated order | fps | frame | flip incl. readback |
+| --- | ---: | ---: | ---: |
+| 1080p, synchronous, scored (the previous default) | 121.2 / 129.6 | 8.32 / 7.78 ms | 1.42 / 1.18 ms |
+| 1080p, synchronous, not scored | 145.0 / 142.0 | 6.95 / 7.10 ms | 0.97 / 0.87 ms |
+| 1080p, asynchronous, scored | 139.0 / 140.1 | 7.25 / 7.20 ms | 0.39 / 0.39 ms |
+| 1080p, asynchronous, not scored (the default) | 150.5 / 150.3 | 6.70 / 6.71 ms | 0.14 / 0.13 ms |
+| native, synchronous, scored (the previous default) | 139.1 | 7.25 ms | 0.70 ms |
+| native, asynchronous, not scored (the default) | 176.5 | 5.71 ms | 0.12 ms |
+
+The synchronous numbers move by 7% between two runs of the same binary,
+the asynchronous ones by 0.2%: the synchronous wait sits at the mercy of
+where the GPU is when the present asks, the fence does not. Fence waits
+total 1.8 ms over the 2,221-frame run when nothing reads the frames and
+231 ms when the scorer reads every one -- 0.1 ms a frame, against the
+0.88 ms a synchronous `glReadPixels` costs for the same pixels, which is
+the driver's staging path rather than the GPU. At native the texture
+decoder is the one reader left in play: a 512-row texture over both
+display buffers is decoded from guest memory there, and 565 of the
+2,221 frames landed a readback for it, 27 ms of waiting in all.
+
+Exactness: the 400 dumps of the 1080p walk run, every tenth present,
+match the synchronous run of section 22 everywhere but the wall-clock
+movie phase, and match a synchronous run of the same binary the same way;
+the counters say every one of those dumps landed its frame on demand.
+Render tests 430/430 on both backends, resolution 40/40, aspect 35/35. In
+the uncapped runs the simulation columns of the tick logs agree until
+the pad replay, which is consumed per frame, reaches a different tick at
+the higher frame rate -- the same limit every comparison in this document
+between two frame rates has had.
 
 ## Reproduction
 
