@@ -926,6 +926,77 @@ the pad replay, which is consumed per frame, reaches a different tick at
 the higher frame rate -- the same limit every comparison in this document
 between two frame rates has had.
 
+## 24. The rest of the list execution
+
+With the display-buffer readback gone (section 22) the runtime's execution
+of list chunks in the game's stall updates was 1.4 ms of the 1080p frame.
+The interpreter's timers, now split further inside PRIM, put the profiled
+run at 1.9 s in `run_list`: PRIM 1,433 ms of it at 2.4 us each, every
+other command 9-10 ns (the matrix loads are six million of the twenty
+million words), and 233 ms outside any command -- the fetch, the stall
+test and the dispatch. Inside PRIM: the texture push 587 ms, which is
+mostly the batch flush it causes (the multi-draw's per-batch state, block,
+index and draw-call work, 250 ms) plus the cache lookups and the genuine
+re-decodes; model decode 408 ms; the transform state, copied twice, 157 ms
+in the interpreter's fill and 211 ms in the backend's block. Six changes,
+each kept only after the render tests stayed at 430/430:
+
+- **The list is fetched through a host pointer** over a 4 KB span, looked
+  up again only when a command redirects the list or the span runs out. An
+  unmapped list still counts a bad access, a list in VRAM still reaches
+  the access observer. Worth about 60 ms of the 290 the fetch cost; the
+  rest of what sits outside the commands is the loop and the switch.
+- **Decode translates once per batch**: one pointer for the batch's
+  vertices and one for its indices (the index range scanned for its
+  highest entry), in place of two translations per vertex. A batch the
+  flat map cannot hand over whole falls back to the per-vertex lookups.
+  408 -> 273 ms.
+- **The eye-space lights are recomputed only when the view matrix or the
+  lights changed.** This was the transform-state fill: 157 -> 20 ms. The
+  fill's clear of a struct every member of which is then assigned went too.
+- **The backend reuses the scene part of the previous draw's block** --
+  view, projection, lights, material, fog, viewport -- when it matches,
+  and rewrites only the world and texture matrices, the texture size and
+  the per-draw flags. Three draws in four match (358 thousand of 477).
+- **The triangle indices are prefixes of three static patterns** (a list
+  counts up, a strip is (t, t+1, t+2), a fan (0, t+1, t+2)), so a batch
+  writes no indices at all: 74 -> 17 ms.
+- **A texture whose bytes changed is re-decoded by row**, only the rows
+  whose write generation moved. This turned out to matter little: the
+  remaining invalidations are three 512x512 textures in RAM the game
+  rewrites wholesale, which no cache can avoid decoding.
+
+Counting what ends each batch found the largest item. 155 thousand of the
+426 thousand batches -- a third, and the reason a batch averaged 1.1
+draws -- ended on a check left over from the single 65,536-vertex buffer
+the rings replaced: once the ring's head had passed that mark, every draw
+flushed. With persistent rings a batch may span a wrap (each draw
+addresses its own base vertex, and a wrap fences and waits like any
+allocation), so the check is gone: 4 thousand batches now end on a full
+block, and the count drops to 275 thousand. Of those, 261 thousand end on
+the CLUT setter: this game gives its parts their own palettes, a new
+palette is a new texture, and a different texture is where a multi-draw
+without per-draw texturing has to stop. That is the structural limit
+left, and only bindless or arrayed textures would move it.
+
+| GL, uncapped, GPU transform, 1080p, two runs each | Before | After |
+| --- | ---: | ---: |
+| Frame | 6.73 / 6.73 ms | 6.45 / 6.42 ms |
+| List execution in the stall updates | 1.44 / 1.52 ms | 1.19 / 1.14 ms |
+| fps | 149.8 / 149.8 | 156.3 / 157.2 |
+| Model batches per run | 426 thousand | 275 thousand |
+
+The profiled interpreter total went from 1,910 to 1,612 ms per run, PRIM
+from 2.4 to 1.9 us. What is left in it is the texture push at about 0.8
+us a draw -- the cache lookup and the flush's GL calls behind a palette
+change -- the decode at 0.4 us, and 11 ns a word of dispatch over twenty
+million words.
+
+Exactness: render tests 430/430 on both backends, resolution 40/40,
+aspect 35/35, the psprecomp unit tests, and the 400 dumps of the 1080p
+walk run identical to the section 22 baseline everywhere but the
+wall-clock phases.
+
 ## Reproduction
 
 ```sh

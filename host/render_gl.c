@@ -377,7 +377,7 @@ enum { XFORM_MAXB = 16, XFORM_RING_SLOTS = 256, MODEL_RING_VERTS = 65536 };
 static void flush_model(void);
 typedef struct {
     GLuint   ubo; GLint ubo_align; int ubo_slot, ubo_slot_bytes;
-    GLuint   vbo_draw, ebo_ring;       /* per-vertex draw index; the batch's triangle indices */
+    GLuint   vbo_draw, ebo_ring;       /* per-vertex draw index; the static index patterns */
     int      vbo_head, ebo_head;       /* ring positions, in vertices and in indices */
     uint64_t state_gen, applied_gen;   /* set_* calls bump state_gen; the model path re-applies when behind */
     int      applied_rt;
@@ -399,6 +399,13 @@ typedef struct {
      * pixels into the view, and the primitive after it reads them. */
     uint64_t bound_serial, bound_clut_gen, clut_gen, setters_skipped;
     int      tex_valid, bound_is_view;
+    /* The last draw's transform state and the block built from it. A draw
+     * whose scene part (view, projection, lights, material, fog, viewport)
+     * matches copies the block and rewrites only what is its own: the world
+     * and texture matrices, the texture size and the per-draw flags. */
+    psp_xform_state last_xs; xform_block last_xb; int last_valid;
+    uint64_t scene_hits, scene_misses;
+    uint64_t flush_by[16];   /* what ended each model batch, by cause */
     /* Set by every pass that borrows GL state between two flushes (the stencil
      * and alpha passes, a CPU import, a readback, a reallocation); the next
      * model flush then re-applies everything even if nothing tracked changed. */
@@ -514,7 +521,7 @@ static struct {
     texcache_entry cache[TEXCACHE_MAX];
     int      cache_entries;
     uint64_t cache_clock;
-    uint64_t tex_requests, tex_uploads, tex_hits, tex_fast_hits, tex_revalidated;
+    uint64_t tex_requests, tex_uploads, tex_hits, tex_fast_hits, tex_revalidated, tex_row_refreshes, tex_rows_refreshed;
     uint64_t tex_invalidations, tex_misses, tex_evictions, tex_too_big;
     uint64_t tex_vram_uploads, tex_upload_pixels;
     uint64_t tex_from_rt, tex_alias_from_rt;
@@ -540,6 +547,10 @@ static struct {
 enum { FLOATS_PER_VERT = 13 };  /* x,y,z, r,g,b,a, u,v, fog, 1/w, texture q, lod16 */
 
 static void flush(void);
+/* Why a pending model batch is about to end. The multi-draw batches only as
+ * far as the state between two draws allows; these say which setter it was. */
+enum { FB_TARGET, FB_SCISSOR, FB_TEXTURE, FB_CLUT, FB_DEPTH, FB_BLEND, FB_FOG, FB_GLYPH, FB_CLASS, FB_CPU, FB_FINISH, FB_PRESENT, FB_FULL, FB_COUNT };
+static void flush_ends(int k) { if (g.mu.npend) g.mu.flush_by[k]++; }
 static int  claim(void);
 enum { RB_SLOTS = 3, RB_SLOT_BYTES = 1024 * 1024 };
 static struct {
@@ -1752,9 +1763,20 @@ static int claim(void) {
             g.mu.vbo_draw = g_rings.r[RING_DRAW].buf;
             p_glVertexAttribIPointer(4, 1, GL_UNSIGNED_INT, sizeof(GLuint), (void *)0);
             p_glEnableVertexAttribArray(4);
-            ring_create(RING_EBO, GL_ELEMENT_ARRAY_BUFFER, (size_t)4 * MODEL_RING_VERTS * 3 * sizeof(GLushort));
-            g.mu.ebo_ring = g_rings.r[RING_EBO].buf;
-            g.mu.ebo_head = 0;
+            /* The triangle indices of every draw are a prefix of one of three
+             * patterns -- a list counts up, a strip is (t, t+1, t+2), a fan
+             * (0, t+1, t+2) -- so they live in one static buffer and a draw
+             * names its pattern and length. Nothing is written per batch. */
+            {
+                enum { NPAT = MODEL_MAX_VERTS + 2 * 3 * (MODEL_MAX_VERTS - 2) };
+                static GLushort pat[NPAT]; int k = 0;
+                for (int t = 0; t < MODEL_MAX_VERTS; t++) pat[k++] = (GLushort)t;
+                for (int t = 0; t + 2 < MODEL_MAX_VERTS; t++) { pat[k++] = (GLushort)t; pat[k++] = (GLushort)(t + 1); pat[k++] = (GLushort)(t + 2); }
+                for (int t = 0; t + 2 < MODEL_MAX_VERTS; t++) { pat[k++] = 0; pat[k++] = (GLushort)(t + 1); pat[k++] = (GLushort)(t + 2); }
+                p_glGenBuffers(1, &g.mu.ebo_ring);
+                p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.mu.ebo_ring);
+                p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)((size_t)k * sizeof(GLushort)), pat, GL_STATIC_DRAW);
+            }
             g.mu.profile = getenv("PSPRECOMP_GL_PROFILE") != NULL;
             p_glBindVertexArray(0);
             {
@@ -1852,7 +1874,7 @@ static void gl_target(uint32_t addr, uint32_t stride, int fmt) {
     /* No claim() here: set_target is the one setter ge.c calls while the
      * register is still being assembled, long before any drawing, and on a
      * run that never draws it would otherwise create a context for nothing. */
-    if (g.ready) flush();
+    if (g.ready) { flush_ends(FB_TARGET); flush(); }
     g.target_addr = addr; g.target_stride = stride; g.target_fmt = fmt;
     if (g.ready && addr) {
         g.cur_rt = rt_for(addr);
@@ -1866,7 +1888,7 @@ static void gl_scissor(int x0, int y0, int x1, int y1) {
     if (claim() != 0) return;
     if (g.sc_valid && g.sc_x0 == x0 && g.sc_y0 == y0 && g.sc_x1 == x1 && g.sc_y1 == y1) { g.mu.setters_skipped++; return; }
     g.mu.state_gen++;
-    flush();
+    flush_ends(FB_SCISSOR); flush();
     g.sc_x0 = x0; g.sc_y0 = y0; g.sc_x1 = x1; g.sc_y1 = y1; g.sc_valid = 1;
 }
 /* Only a mipmap minification filter consumes the extra levels. TEXMODE may
@@ -2029,6 +2051,61 @@ static void cache_record(texcache_entry *e, const psp_tex_state *t, int top,
     e->last_used = g.cache_clock;
 }
 
+/* A cached texture whose bytes changed under it is re-decoded only where
+ * they changed: the rows whose write generation moved past the entry's,
+ * merged across short gaps and sent with glTexSubImage2D. The display
+ * buffer sampled as a 512-row texture is the case: an off-screen target
+ * read back under its lower rows used to cost the whole megabyte again.
+ * Direct-colour, unswizzled, single-level textures only -- a palette
+ * change or a swizzle is not a row. Returns 0 to ask for the full upload,
+ * which then overwrites whatever rows this may already have refreshed. */
+static int texcache_refresh_rows(texcache_entry *e, const psp_tex_state *t, uint32_t supplied,
+                                 uint64_t generation) {
+    if (texture_top(t) != 0 || e->uploaded_top != 0 || t->swizzled || t->fmt > 3 || !e->tex) return 0;
+    if (t->w <= 0 || t->h <= 0) return 0;
+    const int bpp = t->fmt == 3 ? 4 : 2;
+    const uint32_t row_bytes = (uint32_t)t->stride * (uint32_t)bpp;
+    if (!row_bytes || (size_t)t->w * (size_t)t->h > TEXEL_CAP) return 0;
+    const uint32_t base = level_addr(t, 0);
+    static uint32_t *texels;
+    if (!texels) texels = malloc(TEXEL_CAP * sizeof(uint32_t));
+    if (!texels) return 0;
+    const psp_clut_state clut = { g.clut_addr, g.clut_fmt, g.clut_shift,
+                                  g.clut_mask, g.clut_start };
+    enum { GAP = 16, RUNS_MAX = 16 };
+    int runs = 0, bound = 0;
+    for (int y = 0; y < t->h;) {
+        if (range_generation_excluding_rts(base + (uint32_t)y * row_bytes, row_bytes, supplied) <= e->content_generation) { y++; continue; }
+        int y1 = y + 1, last = y;
+        while (y1 < t->h && y1 - last <= GAP) {
+            if (range_generation_excluding_rts(base + (uint32_t)y1 * row_bytes, row_bytes, supplied) > e->content_generation) last = y1;
+            y1++;
+        }
+        y1 = last + 1;
+        if (++runs > RUNS_MAX) return 0;
+        psp_tex_state sub = *t;
+        sub.addr = t->addr + (uint32_t)y * row_bytes;
+        sub.h = y1 - y;
+        sub.lv_addr[0] = sub.addr; sub.lv_h[0] = sub.h;
+        int dw = 0, dh = 0;
+        const uint64_t decode_t0 = psp_os_mono_ns();
+        const size_t decoded = psp_render_decode_level(&sub, 0, &clut, texels, TEXEL_CAP, &dw, &dh);
+        g.tex_decode_ns += psp_os_mono_ns() - decode_t0;
+        if (!decoded || dw != t->w || dh != y1 - y) return 0;
+        if (!bound) { p_glBindTexture(GL_TEXTURE_2D, e->tex); bound = 1; }
+        const uint64_t upload_t0 = psp_os_mono_ns();
+        p_glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y, dw, dh, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+        g.tex_upload_ns += psp_os_mono_ns() - upload_t0;
+        g.tex_upload_pixels += decoded;
+        g.tex_rows_refreshed += (uint64_t)dh;
+        y = y1;
+    }
+    e->content_generation = generation;
+    e->validated_serial = psp_mem_write_serial();
+    g.tex_row_refreshes++;
+    return 1;
+}
+
 static GLuint texcache_native(const psp_tex_state *t, uint32_t supplied) {
     if (!t->addr || t->w <= 0 || t->h <= 0) return 0;
     g.tex_requests++;
@@ -2107,11 +2184,14 @@ static GLuint texcache_native(const psp_tex_state *t, uint32_t supplied) {
                 g.tex_generation_ns += psp_os_mono_ns() - gen_t0;
                 if (generation != e->content_generation) {
                     g.tex_invalidations++;
-                    slot = at;
-                    goto upload;
+                    if (!texcache_refresh_rows(e, t, supplied, generation)) {
+                        slot = at;
+                        goto upload;
+                    }
+                } else {
+                    e->validated_serial = memory_serial;
+                    g.tex_revalidated++;
                 }
-                e->validated_serial = memory_serial;
-                g.tex_revalidated++;
             }
             g.tex_hits++;
             e->last_used = g.cache_clock;
@@ -2267,7 +2347,7 @@ static void gl_texture(const psp_tex_state *t) {
         g.mu.bound_clut_gen == g.mu.clut_gen &&
         psp_mem_write_serial() == g.mu.bound_serial && !g.mu.bound_is_view) { g.mu.setters_skipped++; return; }
     g.mu.state_gen++;
-    flush();
+    flush_ends(FB_TEXTURE); flush();
     g.mu.tex_valid = 1; g.mu.bound_clut_gen = g.mu.clut_gen; g.mu.bound_serial = psp_mem_write_serial();
     g.tex = *t;
     g.tex_enable = t->addr != 0;
@@ -2291,7 +2371,7 @@ static void gl_clut(uint32_t a, int f, int sh, int m, int st) {
     if (claim() != 0) return;
     if (g.clut_addr == a && g.clut_fmt == f && g.clut_shift == sh && g.clut_mask == m && g.clut_start == st) { g.mu.setters_skipped++; return; }
     g.mu.state_gen++; g.mu.clut_gen++;
-    flush();
+    flush_ends(FB_CLUT); flush();
     /* Part of the cache key rather than state of its own: the palette is what
      * a CLUT texture's texels decode through, so a new palette is a new
      * texture even at the same address. */
@@ -2302,7 +2382,7 @@ static void gl_depth(int test, int func, int write) {
     if (claim() != 0) return;
     if (g.z_test == test && g.z_func == func && g.z_write == write) { g.mu.setters_skipped++; return; }
     g.mu.state_gen++;
-    flush();
+    flush_ends(FB_DEPTH); flush();
     g.z_test = test; g.z_func = func; g.z_write = write;
 }
 
@@ -2310,14 +2390,14 @@ static void gl_blend(const psp_blend_state *b) {
     if (claim() != 0) return;
     if (memcmp(b, &g.bs, sizeof *b) == 0) { g.mu.setters_skipped++; return; }
     g.mu.state_gen++;
-    flush();
+    flush_ends(FB_BLEND); flush();
     g.bs = *b;
 }
 static void gl_fog(int enable, uint32_t colour) {
     if (claim() != 0) return;
     if (g.fog_enable == enable && g.fog_colour == colour) { g.mu.setters_skipped++; return; }
     g.mu.state_gen++;
-    flush();
+    flush_ends(FB_FOG); flush();
     g.fog_enable = enable;
     g.fog_colour = colour;
 }
@@ -2498,7 +2578,7 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
     }
     if ((g.resolution || prim <= PSP_PRIM_LINE_STRIP) && rt_prepare(g.cur_rt) != 0) return;
     const int glyph = bitmap_glyph_draw(prim, v, count);
-    if (glyph != g.batch_glyph) { flush(); g.batch_glyph = glyph; }
+    if (glyph != g.batch_glyph) { flush_ends(FB_GLYPH); flush(); g.batch_glyph = glyph; }
     if (glyph) g.glyph_draws++;
 
     /* Adaptive aspect: place this draw. SCENE is anything with projected
@@ -2535,7 +2615,7 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
                             (unsigned long long)g.presents);
             }
         }
-        if (cls != g.batch_class) { flush(); g.batch_class = cls; g.mu.state_gen++; }
+        if (cls != g.batch_class) { flush_ends(FB_CLASS); flush(); g.batch_class = cls; g.mu.state_gen++; }
         if (cls == CLASS_HUD) g.class_hud++; else g.class_scene++;
     }
 
@@ -2887,7 +2967,7 @@ static void flush(void) {
 
 static void gl_finish(void) {
     if (claim() != 0) return;
-    flush();
+    flush_ends(FB_FINISH); flush();
 }
 
 /* The guest-sized staging target a wide attachment is resolved into before a
@@ -3146,7 +3226,7 @@ static void gl_shot(int draw_w, int draw_h) {
 static void gl_present(void) {
     if (claim() != 0) return;
     g.presents++;
-    flush();
+    flush_ends(FB_PRESENT); flush();
     /* Count deferred alpha/stencil transfers inside the GPU frame timer. */
     for (int i = 0; i < g.n_rts; i++) stencil_to_alpha(&g.rts[i]);
 
@@ -3224,7 +3304,7 @@ static void gl_present(void) {
 
 unsigned char *render_gl_capture(uint32_t addr, int *w, int *h) {
     if (claim() != 0) return NULL;
-    flush();
+    flush_ends(FB_PRESENT); flush();
     for (int i = 0; i < g.n_rts; i++) {
         rendertarget *r = &g.rts[i];
         if (!r->configured || r->addr != (addr & PSP_ADDR_MASK)) continue;
@@ -3295,24 +3375,19 @@ static void flush_model(void) {
     p_glBindBufferRange(GL_UNIFORM_BUFFER, 1, g.mu.ubo, (GLintptr)uoff, (GLsizeiptr)(XFORM_MAXB * sizeof(xform_block)));
     const double t2 = g.mu.profile ? gl_now_us() : 0;
     /* The triangles, in the PSP's order: strips as (t, t+1, t+2), fans as
-     * (0, t+1, t+2), lists as they are. Indices are relative to each draw's
-     * base vertex, so they stay under 256. */
-    static GLushort idx[XFORM_MAXB * MODEL_MAX_VERTS * 3];
+     * (0, t+1, t+2), lists as they are -- each a prefix of its pattern in
+     * the static index buffer. Indices are relative to each draw's base
+     * vertex, so they stay under 256. */
     GLsizei counts[XFORM_MAXB]; const void *offs[XFORM_MAXB]; GLint bases[XFORM_MAXB];
-    int total = 0;
     for (int d = 0; d < nb; d++) {
         const int n = g.mu.pend_count[d], prim = g.mu.pend_prim[d];
-        int k = 0;
-        if (prim == PSP_PRIM_TRIANGLES) { for (int t = 0; t + 2 < n; t += 3) { idx[total+k] = (GLushort)t; idx[total+k+1] = (GLushort)(t+1); idx[total+k+2] = (GLushort)(t+2); k += 3; } }
-        else if (prim == PSP_PRIM_TRIANGLE_STRIP) { for (int t = 0; t + 2 < n; t++) { idx[total+k] = (GLushort)t; idx[total+k+1] = (GLushort)(t+1); idx[total+k+2] = (GLushort)(t+2); k += 3; } }
-        else { for (int t = 0; t + 2 < n; t++) { idx[total+k] = 0; idx[total+k+1] = (GLushort)(t+1); idx[total+k+2] = (GLushort)(t+2); k += 3; } }
+        size_t pat; int k;
+        if (prim == PSP_PRIM_TRIANGLES) { pat = 0; k = 3 * (n / 3); }
+        else if (prim == PSP_PRIM_TRIANGLE_STRIP) { pat = MODEL_MAX_VERTS; k = n >= 3 ? 3 * (n - 2) : 0; }
+        else { pat = MODEL_MAX_VERTS + 3 * (MODEL_MAX_VERTS - 2); k = n >= 3 ? 3 * (n - 2) : 0; }
         counts[d] = k; bases[d] = g.mu.pend_base[d];
-        offs[d] = (const void *)(uintptr_t)((size_t)total * sizeof(GLushort));   /* relative for now */
-        total += k;
+        offs[d] = (const void *)(uintptr_t)(pat * sizeof(GLushort));
     }
-    const size_t eoff = ring_alloc(RING_EBO, (size_t)total * sizeof(GLushort), sizeof(GLushort), 0);
-    ring_write(RING_EBO, eoff, idx, (size_t)total * sizeof(GLushort));
-    for (int d = 0; d < nb; d++) offs[d] = (const void *)(uintptr_t)(eoff + (size_t)(uintptr_t)offs[d]);
     p_glBindVertexArray(g.vao_model);
     p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.mu.ebo_ring);
     const double t3 = g.mu.profile ? gl_now_us() : 0;
@@ -3333,39 +3408,63 @@ static void gl_draw_model(int prim, const psp_model_vertex *v, int count, const 
     if (claim() != 0) return;
     if (count < 3 || count > MODEL_MAX_VERTS) return;
     if (rt_prepare(g.cur_rt) != 0) return;
-    if (g.batch_glyph) { flush(); g.batch_glyph = 0; }
+    if (g.batch_glyph) { flush_ends(FB_GLYPH); flush(); g.batch_glyph = 0; }
     if (g.adaptive_aspect) {
-        if (CLASS_SCENE != g.batch_class) { flush(); g.batch_class = CLASS_SCENE; }
+        if (CLASS_SCENE != g.batch_class) { flush_ends(FB_CLASS); flush(); g.batch_class = CLASS_SCENE; }
         g.class_scene++;
     }
-    if (g.batch_n) flush();
-    if (g.mu.npend == XFORM_MAXB || g.mu.vbo_head + count > MODEL_RING_VERTS) flush_model();
+    if (g.batch_n) { flush_ends(FB_CPU); flush(); }
+    /* A batch ends when its block slots are used up. It may span a wrap of
+     * the vertex ring: each draw addresses its own base vertex, the wrap
+     * fences and waits like any allocation, and the orphaning fallback below
+     * has its own guard. Ending it whenever the ring's head had passed the
+     * old single buffer's size ended a third of all batches at one draw. */
+    if (g.mu.npend == XFORM_MAXB) { flush_ends(FB_FULL); flush_model(); }
     const double t0 = g.mu.profile ? gl_now_us() : 0;
     rendertarget *r = &g.rts[g.cur_rt];
     xform_block *xb = &g.mu.pend_xb[g.mu.npend];
-    memset(xb, 0, sizeof *xb);
-    for (int c = 0; c < 3; c++) for (int r3 = 0; r3 < 3; r3++) {
-        xb->world[c*4+r3] = xs->world[c*3+r3]; xb->view[c*4+r3] = xs->view[c*3+r3]; xb->tgen[c*4+r3] = xs->tgen[c*3+r3];
+    /* The scene part of the state is everything but the world and texture
+     * matrices and the texture size: bytes [view, tgen) and [lighting, tex_w). */
+    const size_t s0 = offsetof(psp_xform_state, view), s1 = offsetof(psp_xform_state, tgen);
+    const size_t s2 = offsetof(psp_xform_state, lighting), s3 = offsetof(psp_xform_state, tex_w);
+    const int same_scene = g.mu.last_valid &&
+        memcmp((const char *)xs + s0, (const char *)&g.mu.last_xs + s0, s1 - s0) == 0 &&
+        memcmp((const char *)xs + s2, (const char *)&g.mu.last_xs + s2, s3 - s2) == 0;
+    if (same_scene) {
+        memcpy(xb, &g.mu.last_xb, sizeof *xb);
+        g.mu.scene_hits++;
+    } else {
+        memset(xb, 0, sizeof *xb);
+        for (int c = 0; c < 3; c++) for (int r3 = 0; r3 < 3; r3++) xb->view[c*4+r3] = xs->view[c*3+r3];
+        for (int r3 = 0; r3 < 3; r3++) xb->view[12+r3] = xs->view[9+r3];
+        xb->view[15] = 1.0f;
+        memcpy(xb->proj, xs->proj, sizeof xb->proj);
+        for (int i = 0; i < 4; i++) {
+            xb->lmeta[i*4] = xs->light[i].enable; xb->lmeta[i*4+1] = xs->light[i].type; xb->lmeta[i*4+2] = xs->light[i].kind;
+            memcpy(xb->lpos + i*4, xs->light[i].pos, 12); memcpy(xb->ldir + i*4, xs->light[i].dir, 12);
+            memcpy(xb->latten + i*4, xs->light[i].atten, 12);
+            xb->lexpcut[i*4] = xs->light[i].exponent; xb->lexpcut[i*4+1] = xs->light[i].cutoff;
+            memcpy(xb->lamb + i*4, xs->light[i].amb, 12); memcpy(xb->ldif + i*4, xs->light[i].dif, 12); memcpy(xb->lspec + i*4, xs->light[i].spec, 12);
+        }
+        memcpy(xb->memis, xs->mat_emissive, 12); memcpy(xb->mamb, xs->mat_ambient, 12);
+        memcpy(xb->mdif, xs->mat_diffuse, 12); memcpy(xb->mspec, xs->mat_specular, 12); memcpy(xb->gamb, xs->global_amb, 12);
+        xb->coef_fog[0] = xs->mat_spec_coef; xb->coef_fog[1] = xs->fog_end; xb->coef_fog[2] = xs->fog_range;
+        xb->flags[0] = xs->lighting; xb->flags[1] = xs->mat_update; xb->flags[2] = xs->mat_alpha; xb->flags[3] = xs->fog_enable;
+        xb->texmap_vp[0] = xs->tex_map_mode; xb->texmap_vp[1] = xs->tex_proj_mode; xb->texmap_vp[2] = xs->vp_set; xb->texmap_vp[3] = xs->depth_clamp;
+        xb->texsize_off[2] = xs->off_x; xb->texsize_off[3] = xs->off_y;
+        xb->vps[0] = xs->vp_xs; xb->vps[1] = xs->vp_ys; xb->vps[2] = xs->vp_zs;
+        xb->vpc[0] = xs->vp_xc; xb->vpc[1] = xs->vp_yc; xb->vpc[2] = xs->vp_zc;
+        xb->cull_strip[0] = xs->cull_enable; xb->cull_strip[1] = xs->cull_ccw;
+        memcpy(&g.mu.last_xs, xs, sizeof g.mu.last_xs);
+        memcpy(&g.mu.last_xb, xb, sizeof g.mu.last_xb);
+        g.mu.last_valid = 1;
+        g.mu.scene_misses++;
     }
-    for (int r3 = 0; r3 < 3; r3++) { xb->world[12+r3] = xs->world[9+r3]; xb->view[12+r3] = xs->view[9+r3]; xb->tgen[12+r3] = xs->tgen[9+r3]; }
-    xb->world[15] = xb->view[15] = xb->tgen[15] = 1.0f;
-    memcpy(xb->proj, xs->proj, sizeof xb->proj);
-    for (int i = 0; i < 4; i++) {
-        xb->lmeta[i*4] = xs->light[i].enable; xb->lmeta[i*4+1] = xs->light[i].type; xb->lmeta[i*4+2] = xs->light[i].kind;
-        memcpy(xb->lpos + i*4, xs->light[i].pos, 12); memcpy(xb->ldir + i*4, xs->light[i].dir, 12);
-        memcpy(xb->latten + i*4, xs->light[i].atten, 12);
-        xb->lexpcut[i*4] = xs->light[i].exponent; xb->lexpcut[i*4+1] = xs->light[i].cutoff;
-        memcpy(xb->lamb + i*4, xs->light[i].amb, 12); memcpy(xb->ldif + i*4, xs->light[i].dif, 12); memcpy(xb->lspec + i*4, xs->light[i].spec, 12);
-    }
-    memcpy(xb->memis, xs->mat_emissive, 12); memcpy(xb->mamb, xs->mat_ambient, 12);
-    memcpy(xb->mdif, xs->mat_diffuse, 12); memcpy(xb->mspec, xs->mat_specular, 12); memcpy(xb->gamb, xs->global_amb, 12);
-    xb->coef_fog[0] = xs->mat_spec_coef; xb->coef_fog[1] = xs->fog_end; xb->coef_fog[2] = xs->fog_range;
-    xb->flags[0] = xs->lighting; xb->flags[1] = xs->mat_update; xb->flags[2] = xs->mat_alpha; xb->flags[3] = xs->fog_enable;
-    xb->texmap_vp[0] = xs->tex_map_mode; xb->texmap_vp[1] = xs->tex_proj_mode; xb->texmap_vp[2] = xs->vp_set; xb->texmap_vp[3] = xs->depth_clamp;
-    xb->texsize_off[0] = (float)xs->tex_w; xb->texsize_off[1] = (float)xs->tex_h; xb->texsize_off[2] = xs->off_x; xb->texsize_off[3] = xs->off_y;
-    xb->vps[0] = xs->vp_xs; xb->vps[1] = xs->vp_ys; xb->vps[2] = xs->vp_zs;
-    xb->vpc[0] = xs->vp_xc; xb->vpc[1] = xs->vp_yc; xb->vpc[2] = xs->vp_zc;
-    xb->cull_strip[0] = xs->cull_enable; xb->cull_strip[1] = xs->cull_ccw; xb->cull_strip[2] = prim == PSP_PRIM_TRIANGLE_STRIP; xb->cull_strip[3] = g.resolution && r->display;
+    for (int c = 0; c < 3; c++) for (int r3 = 0; r3 < 3; r3++) { xb->world[c*4+r3] = xs->world[c*3+r3]; xb->tgen[c*4+r3] = xs->tgen[c*3+r3]; }
+    for (int r3 = 0; r3 < 3; r3++) { xb->world[12+r3] = xs->world[9+r3]; xb->tgen[12+r3] = xs->tgen[9+r3]; }
+    xb->world[15] = xb->tgen[15] = 1.0f;
+    xb->texsize_off[0] = (float)xs->tex_w; xb->texsize_off[1] = (float)xs->tex_h;
+    xb->cull_strip[2] = prim == PSP_PRIM_TRIANGLE_STRIP; xb->cull_strip[3] = g.resolution && r->display;
     xb->lodi[0] = g.tex.lod_mode; xb->lodi[1] = g.tex.lod_bias16;
     /* sample_psp reads the LOD only to pick min over mag filtering and, past
      * that, a mip level; with one level (or no mip filter) and filters of
@@ -3418,8 +3517,14 @@ void render_gl_report(FILE *out) {
         fprintf(out, " -- %llu draw(s), %llu vertices, %llu readback(s)",
                 (unsigned long long)g.draws, (unsigned long long)g.verts,
                 (unsigned long long)g.readbacks);
-    fprintf(out, "\n          transform: %s, %llu model draw(s) in %llu batch(es), %llu vertices; %llu repeated setter(s) skipped",
-            g.model_unavailable ? "CPU" : "GPU", (unsigned long long)g.model_draws, (unsigned long long)g.mu.batches, (unsigned long long)g.model_verts, (unsigned long long)g.mu.setters_skipped);
+    fprintf(out, "\n          transform: %s, %llu model draw(s) in %llu batch(es), %llu vertices; %llu repeated setter(s) skipped, scene state reused %llu of %llu time(s)",
+            g.model_unavailable ? "CPU" : "GPU", (unsigned long long)g.model_draws, (unsigned long long)g.mu.batches, (unsigned long long)g.model_verts, (unsigned long long)g.mu.setters_skipped,
+            (unsigned long long)g.mu.scene_hits, (unsigned long long)(g.mu.scene_hits + g.mu.scene_misses));
+    {
+        static const char *const cause[FB_COUNT] = { "target", "scissor", "texture", "clut", "depth", "blend", "fog", "glyph", "class", "cpu draw", "finish", "present", "full" };
+        fprintf(out, "\n          batches ended by:");
+        for (int k = 0; k < FB_COUNT; k++) if (g.mu.flush_by[k]) fprintf(out, " %s %llu", cause[k], (unsigned long long)g.mu.flush_by[k]);
+    }
     fprintf(out, "\n          rings: %s, %u frame fence(s), %u wait(s) totalling %.1f ms",
             g_rings.persistent ? "persistently mapped" : "glBufferSubData with orphaning", g_rings.fences, g_rings.waits, g_rings.wait_us / 1e3);
     if (g.mu.profile)
@@ -3470,7 +3575,7 @@ void render_gl_report(FILE *out) {
     fprintf(out, "\n          textures: %llu request(s), %llu upload(s), %llu hit(s)"
                  " (%llu immediate, %llu revalidated), %llu dirty invalidation(s),"
                  " %llu miss(es), %llu eviction(s), %d/%d resident, %llu too big, %llu from VRAM,"
-                 " %llu sampled from a target",
+                 " %llu sampled from a target, %llu row refresh(es) of %llu row(s)",
             (unsigned long long)g.tex_requests,
             (unsigned long long)g.tex_uploads, (unsigned long long)g.tex_hits,
             (unsigned long long)g.tex_fast_hits,
@@ -3480,7 +3585,8 @@ void render_gl_report(FILE *out) {
             (unsigned long long)g.tex_evictions, g.cache_entries, TEXCACHE_MAX,
             (unsigned long long)g.tex_too_big,
             (unsigned long long)g.tex_vram_uploads,
-            (unsigned long long)g.tex_from_rt);
+            (unsigned long long)g.tex_from_rt,
+            (unsigned long long)g.tex_row_refreshes, (unsigned long long)g.tex_rows_refreshed);
     if (g.tex_alias_from_rt)
         fprintf(out, ", %llu target alias decode(s)",
                 (unsigned long long)g.tex_alias_from_rt);
