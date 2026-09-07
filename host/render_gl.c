@@ -1437,6 +1437,21 @@ static void rt_layout(rendertarget *r) {
     r->h = (int)ceil(r->guest_h * r->sy);
 }
 
+/* The write observer is asked about writes into configured targets only:
+ * the union of their ranges, kept as targets come and go. Without it every
+ * store the recompiled code makes would pay the call. */
+static void rt_watch_writes(void) {
+    uint64_t lo = UINT64_MAX, hi = 0;
+    for (int i = 0; i < g.n_rts; i++) {
+        const rendertarget *r = &g.rts[i];
+        if (!r->configured) continue;
+        const uint64_t end = (uint64_t)r->addr + (uint64_t)r->stride * r->guest_h * (r->fmt == 3 ? 4 : 2);
+        if (r->addr < lo) lo = r->addr;
+        if (end > hi) hi = end;
+    }
+    if (hi > lo) psp_mem_set_write_observer_range((uint32_t)lo, (uint32_t)(hi > UINT32_MAX ? UINT32_MAX : hi));
+    else psp_mem_set_write_observer_range(0, 0);
+}
 static void rt_release(rendertarget *r) {
     if (r->fbo) p_glDeleteFramebuffers(1, &r->fbo);
     if (r->colour) p_glDeleteTextures(1, &r->colour);
@@ -1445,6 +1460,7 @@ static void rt_release(rendertarget *r) {
     r->fbo = r->colour = r->depth = 0;
     r->cpu_dirty = NULL;
     r->configured = 0;
+    rt_watch_writes();
 }
 
 static uint32_t decode_pixel(uint32_t v, int fmt) {
@@ -1551,14 +1567,13 @@ static int rt_allocate(rendertarget *r, int inherit) {
         rt_release(r);
         return -1;
     }
-    if (g.resolution) {
-        r->cpu_dirty = calloc((size_t)r->stride * r->guest_h, 1);
-        if (!r->cpu_dirty) {
-            rt_release(r);
-            return -1;
-        }
+    r->cpu_dirty = calloc((size_t)r->stride * r->guest_h, 1);
+    if (!r->cpu_dirty) {
+        rt_release(r);
+        return -1;
     }
     r->configured = 1;
+    rt_watch_writes();
     if (r->wide) g.wide_allocs++;
     return 0;
 }
@@ -1843,7 +1858,8 @@ static int claim(void) {
             me, g.w, g.h);
     g.ready = 1;
     resolution_size();
-    if (g.resolution) psp_mem_set_write_observer(rt_guest_write);
+    psp_mem_set_write_observer(rt_guest_write);
+    rt_watch_writes();
     /* Whatever the GE last named, or the primary display buffer if it has not
      * named one yet -- a target has to exist before the first draw. */
     g.cur_rt = rt_for(g.target_addr ? g.target_addr : 0x04000000u);
@@ -1866,7 +1882,7 @@ static int gl_init(int w, int h) {
 static void gl_shutdown(void) {
     if (g_rb.async) readback_complete(-1);
     psp_mem_set_vram_access_observer(NULL, 0, 0);
-    if (g.resolution) psp_mem_set_write_observer(NULL);
+    psp_mem_set_write_observer(NULL);
 }
 
 static void gl_target(uint32_t addr, uint32_t stride, int fmt) {
@@ -1940,7 +1956,7 @@ static uint32_t level_bytes(const psp_tex_state *t, int level) {
  * off-screen target under a 512-row display texture, say): that one is
  * read back into guest memory and must reach the decoded copy. */
 static uint64_t range_generation_excluding_rts(uint32_t addr, uint32_t size, uint32_t supplied) {
-    if (!supplied || !g.resolution) return psp_mem_range_generation(addr, size);
+    if (!supplied) return psp_mem_range_generation(addr, size);
     uint64_t pieces[2 * RT_MAX + 2][2]; int n = 1;
     pieces[0][0] = addr; pieces[0][1] = (uint64_t)addr + size;
     for (int i = 0; i < g.n_rts; i++) {
@@ -2128,7 +2144,7 @@ static GLuint texcache_native(const psp_tex_state *t, uint32_t supplied) {
                 stencil_to_alpha(r);
                 return r->colour;
             }
-            if (r->dirty) {
+            if (r->dirty && !(supplied & (1u << i))) {
                 readback_rt(i);
                 r->dirty = 0;
             }
@@ -2270,12 +2286,20 @@ static GLuint texcache_get(const psp_tex_state *t) {
     double sx = 1, sy = 1;
     const uint32_t base = t->addr & PSP_ADDR_MASK;
     const uint64_t end = (uint64_t)base + (uint64_t)t->stride * t->h * (t->fmt == 3 ? 4 : 2);
-    if (g.resolution)
-        for (int i = 0; i < g.n_rts; i++) {
+    /* In either mode: at native the scale is one and the view is a copy of
+     * the target's rows under the texture, which is what a texture over a
+     * 272-row target and 240 rows of whatever follows it needs. The one case
+     * texcache_native serves better -- a texture that is exactly the target,
+     * at native -- is left to it, and samples the attachment itself. */
+    for (int i = 0; i < g.n_rts; i++) {
             rendertarget *r = &g.rts[i];
             const uint64_t re =
                 (uint64_t)r->addr + (uint64_t)r->stride * r->guest_h * (r->fmt == 3 ? 4 : 2);
             if (!r->configured || base >= re || end <= r->addr) continue;
+            const int exact_alias = !g.resolution && r->addr == base && r->fmt == 3 && t->fmt == 3 &&
+                                    !t->swizzled && t->stride == r->stride && t->w == r->w &&
+                                    t->h == r->h && texture_top(t) == 0;
+            if (exact_alias) continue;
             const int view_ok = t->fmt == 3 && r->fmt == 3 && !t->swizzled && texture_top(t) == 0 &&
                                 t->stride == r->stride &&
                                 ((int64_t)r->addr - base) % ((int64_t)t->stride * 4) == 0;

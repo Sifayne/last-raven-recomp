@@ -1040,6 +1040,52 @@ texture's size to equal the target's -- so every bind reads the target
 back and decodes the megabyte, 1.7 s a run, the very cost section 22
 removed at 1080p.
 
+## 26. The display texture at native, and the observer on every store
+
+Section 22's view of a render target -- the target's pixels blitted into
+the texture that samples it, its bytes left out of the texture's write
+generation -- ran only in resolution mode. At native the alias in
+texcache_native serves a texture that is exactly the target, and the
+512-row display texture is not that: every bind read the target back and
+decoded it again, 769 times in the fast pad's run, 0.72 s of decoding.
+The view now runs in either mode; at native its scale is one and it is a
+copy of the target's rows under the texture, over whatever the decoder
+put in the 240 rows after them. The exact alias stays as it was.
+
+The view at native needs the CPU's writes into a target to reach it, and
+that tracking -- the write observer and the per-target dirty bytes --
+also ran only in resolution mode. It runs in both now, which surfaced
+the larger finding: the observer was called on every store the
+recompiled code made, anywhere in memory, to loop over three targets and
+find no overlap. `psp_mem_set_write_observer_range` narrows it to writes
+overlapping the configured targets, kept as they come and go, so a store
+into RAM pays a compare in mark_write and nothing else. The game's own
+tail of the frame, where its logic runs, went from 2.9 to 2.1 ms at 1080p.
+
+| mission-fast.pad, uncapped, GPU transform; two runs | Before | After |
+| --- | ---: | ---: |
+| 1920x1080 fps | 131.8 / 130.2 | 152.7 / 149.1 |
+| 1920x1080 frame | 7.61 / 7.70 ms | 6.57 / 6.73 ms |
+| 1920x1080 game tail | 2.83 / 2.92 ms | 2.08 / 2.11 ms |
+| 480x272 fps | 160.6 | 209.0 / 204.1 |
+| 480x272 frame | 6.25 ms | 4.80 / 4.91 ms |
+| 480x272 list execution in stall updates | 2.35 ms | 1.20 / 1.23 ms |
+| 480x272 texture bind per run | 0.83 s | 0.26 s |
+
+Exactness: render tests 430/430 on both backends, resolution 40/40,
+aspect 35/35, the unit tests with a new check on the observer's range,
+and the fast pad's 1080p dumps from the mission load onward identical to
+the baseline. At native, thirty dumps at the end of the opening flyover
+differ from the old native run by two units in one channel on the bottom
+eleven rows -- the signature of section 22's edge effect. Run with each
+half of the change alone, the tracking changes nothing there and the view
+changes exactly those dumps; and where the two native paths disagree, the
+software renderer agrees with the new one in about 950 of 1,000 pixels on
+the flyover frames and with the old one in 5. The old native path had
+those rows stale, and the view corrects them. (On the darkest fade frame
+the oracle sides with neither, 304 of 462 pixels, and with the old path
+on the rest -- rounding at values of ten.)
+
 ## Reproduction
 
 ```sh
