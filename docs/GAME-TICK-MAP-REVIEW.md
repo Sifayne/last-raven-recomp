@@ -666,6 +666,48 @@ geometry stage (the exact area in split 32-bit integers instead of doubles,
 fewer varyings), or a non-exact mode that leaves clipping and culling to GL
 for displays where 1080p at 120 Hz matters more than PSP-exact edges.
 
+## 19. The geometry stage, made cheaper, and measured from three sides
+
+Three changes, all keeping the output exact (three captures identical to
+the CPU-transform renders, render tests 430/430 on each backend):
+
+- The cull sign is taken in 64-bit integers, as `ge.c` takes it, from the
+  two products in split 32-bit form (`imulExtended`) compared as signed
+  64-bit values. No doubles.
+- The stage emits one four-vertex strip instead of up to six vertices in
+  separate primitives: a clipped quad's fan triangles (0,1,2) and (0,2,3)
+  are the strip 1,2,0,3, and each triangle's provoking vertex carries its
+  LOD. GL never culls on this path, so the strip's alternating winding is
+  irrelevant.
+- The per-triangle LOD derivatives are skipped when the fragment stage
+  cannot depend on the value: filters of the same kind and either no mip
+  filter or a single level, which the host puts in the block.
+
+| GL, native 480x272, uncapped | Frame rate | GPU draw+blit per frame |
+| --- | ---: | ---: |
+| Exact geometry stage, before | 138.5 fps | 2.19 ms |
+| Exact geometry stage, after | 138.6 fps | 2.21 ms |
+| Pass-through geometry stage (experiment, not exact) | 138.3 fps | 2.02 ms |
+| No geometry stage, vertex shader maps to screen (experiment, not exact) | 145.9 fps | 1.72 ms |
+| CPU transform, for reference | 88.0 fps | 0.56 ms |
+
+At 1080p the exact stage is unchanged too: 79.9 fps, 2.91 ms. So on this
+GPU, an RX 6900 XT, the stage's logic costs about 0.2 ms, its presence
+about 0.5 ms, and the other 1.2 ms of the model path's GPU time is in the
+vertex and buffer path: every vertex is shaded before culling where the CPU
+path uploads only survivors, the rings take a `glBufferSubData` per draw
+and a uniform-range bind per batch, and the vertex stage does the lighting
+under `precise`. The two experiments are gated on nothing and not kept; the
+three exact changes are, because they remove the doubles and halve the
+stage's output for free.
+
+If more is wanted from the GPU side, in order of expected return:
+persistent-mapped rings written once per frame instead of a `SubData` per
+draw; one uniform upload and bind per frame with the block index covering
+the frame's draws; and, to recover the stage's 0.5 ms, a geometry-stage-free
+exact path that draws each triangle as an instance fetching its three
+vertices from a buffer texture, which is a larger rewrite.
+
 ## Reproduction
 
 ```sh

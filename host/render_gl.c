@@ -691,7 +691,7 @@ static const char *VS_MODEL_SRC =
 static const char *GS_MODEL_SRC =
     "#version 400 core\n"
     "layout(triangles) in;\n"
-    "layout(triangle_strip, max_vertices = 6) out;\n"
+    "layout(triangle_strip, max_vertices = 4) out;\n"
     "in VData { vec4 clip; vec4 col; vec2 uv; float texq; float fog; flat int draw; } v[];\n"
     "struct XformBlock {\n"
     "    mat4  world; mat4 view; mat4 proj; mat4 tgen;\n"
@@ -756,7 +756,7 @@ static const char *GS_MODEL_SRC =
     "}\n"
     "/* triangle_lod16 + psp_render_lod16, render_gl.c / render.c. */\n"
     "int lod16_of(SV a, SV b, SV c) {\n"
-    "    if (u_texenable == 0) return 0;\n"
+    "    if (u_texenable == 0 || X.lodi.z != 0) return 0;\n"
     "    float e1x = float(b.x16 - a.x16) / 16.0;\n"
     "    float e1y = float(b.y16 - a.y16) / 16.0;\n"
     "    float e2x = float(c.x16 - a.x16) / 16.0;\n"
@@ -821,15 +821,28 @@ static const char *GS_MODEL_SRC =
     "        if (sv[i].sx < -X.guard_slope.x || sv[i].sx >= 4096.0 - X.guard_slope.x || sv[i].sy < -X.guard_slope.y || sv[i].sy >= 4096.0 - X.guard_slope.y) anyout = true;\n"
     "    }\n"
     "    if (anyout) return;\n"
-    "    double ax = double(sv[1].x16 - sv[0].x16), ay = double(sv[1].y16 - sv[0].y16);\n"
-    "    double bx = double(sv[2].x16 - sv[0].x16), by = double(sv[2].y16 - sv[0].y16);\n"
-    "    double area = ax * by - ay * bx;\n"
-    "    if (X.cull_strip.z != 0 && (gl_PrimitiveIDIn & 1) != 0) area = -area;\n"
-    "    if (X.cull_strip.x != 0 && area != 0.0 && ((area < 0.0) == (X.cull_strip.y != 0))) return;\n"
-    "    for (int i = 1; i + 1 < n; i++) {\n"
-    "        int lod = lod16_of(sv[0], sv[i], sv[i + 1]);\n"
-    "        emit(sv[0], lod); emit(sv[i], lod); emit(sv[i + 1], lod);\n"
-    "        EndPrimitive();\n"
+    /* The sign of ax*by - ay*bx exactly, as ge.c takes it in 64-bit
+     * integers: the two products in split 32-bit form, compared as signed
+     * 64-bit values. No doubles. */
+    "    int ax = sv[1].x16 - sv[0].x16, ay = sv[1].y16 - sv[0].y16;\n"
+    "    int bx = sv[2].x16 - sv[0].x16, by = sv[2].y16 - sv[0].y16;\n"
+    "    int h1, l1, h2, l2;\n"
+    "    imulExtended(ax, by, h1, l1);\n"
+    "    imulExtended(ay, bx, h2, l2);\n"
+    "    int sgn = (h1 != h2) ? (h1 < h2 ? -1 : 1) : (uint(l1) == uint(l2) ? 0 : (uint(l1) < uint(l2) ? -1 : 1));\n"
+    "    if (X.cull_strip.z != 0 && (gl_PrimitiveIDIn & 1) != 0) sgn = -sgn;\n"
+    "    if (X.cull_strip.x != 0 && sgn != 0 && ((sgn < 0) == (X.cull_strip.y != 0))) return;\n"
+    /* emit_tri draws the polygon as a fan from vertex 0: (0,1,2) and, for a
+     * clipped quad, (0,2,3). One strip in the order 1,2,0,3 is those same two
+     * triangles -- (1,2,0) then (2,0,3) -- and the provoking vertex of each,
+     * the last one emitted, carries that triangle's LOD. GL never culls here,
+     * so the strip's alternating winding does not matter. */
+    "    int lodA = lod16_of(sv[0], sv[1], sv[2]);\n"
+    "    if (n == 3) {\n"
+    "        emit(sv[0], lodA); emit(sv[1], lodA); emit(sv[2], lodA);\n"
+    "    } else {\n"
+    "        int lodB = lod16_of(sv[0], sv[2], sv[3]);\n"
+    "        emit(sv[1], lodA); emit(sv[2], lodA); emit(sv[0], lodA); emit(sv[3], lodB);\n"
     "    }\n"
     "}\n";
 
@@ -3079,6 +3092,11 @@ static void gl_draw_model(int prim, const psp_model_vertex *v, int count, const 
     xb->vpc[0] = xs->vp_xc; xb->vpc[1] = xs->vp_yc; xb->vpc[2] = xs->vp_zc;
     xb->cull_strip[0] = xs->cull_enable; xb->cull_strip[1] = xs->cull_ccw; xb->cull_strip[2] = prim == PSP_PRIM_TRIANGLE_STRIP; xb->cull_strip[3] = g.resolution && r->display;
     xb->lodi[0] = g.tex.lod_mode; xb->lodi[1] = g.tex.lod_bias16;
+    /* sample_psp reads the LOD only to pick min over mag filtering and, past
+     * that, a mip level; with one level (or no mip filter) and filters of
+     * the same kind the value cannot matter, and the geometry stage skips
+     * the derivative work. */
+    xb->lodi[2] = !g.tex_enable || (((g.tex.min_filter & 1) == (g.tex.mag_filter & 1)) && (g.tex.min_filter < 4 || g.bound_top <= 0));
     xb->guard_slope[0] = xs->vp_set ? xs->off_x : 1808.0f; xb->guard_slope[1] = xs->vp_set ? xs->off_y : 1912.0f; xb->guard_slope[2] = g.tex.lod_slope;
     /* The vertices and their draw index, appended to the rings; orphan when
      * a ring wraps (the pending batch was flushed above if it would). */
