@@ -997,6 +997,49 @@ aspect 35/35, the psprecomp unit tests, and the 400 dumps of the 1080p
 walk run identical to the section 22 baseline everywhere but the
 wall-clock phases.
 
+## 25. A faster recording
+
+Every measurement so far replayed `walk-60.pad`, which reaches the first
+mission at poll 2050 after the intro movie and the briefing cutscene, and
+measured polls 2101-2219. Sif recorded `mission-fast.pad` on 7 September in
+a window (`PSPRECOMP_REPLAY_REC`): Start through the intro and the title
+at polls 248-271, the name entry and the menus to the mission, Start again
+at 1409 to skip the mission's opening cutscene, then play -- walking,
+boosting, a target engaged -- until a last Start at 1817 that opened the
+quit dialog and marks the end. The cut stops at 1816; the recording as
+made is kept beside it.
+
+Two things came with it. A controller left plugged in idles a few counts
+off centre, and the replay reported itself tainted by live input at poll
+one -- as five of this document's earlier dump runs had, without effect,
+because a scenario that drives the stick owns it. `PSPRECOMP_REPLAY_LIVE=0`
+now keeps the host lane out of a scenario's run altogether, and the
+measurement runs pass it. And the probe's activation poll and window are
+`PROBE_ACTIVE` and `PROBE_END`, defaulting to the old 2100 and 2219.
+
+With `PROBE_ACTIVE=1450 PROBE_END=1800` the window is 350 polls of play
+instead of 119, reached fifty seconds sooner. Two 1080p runs agree on
+where the AC is at every poll; the frame time varies more than on the
+walk (sd 1.3 ms against 0.8), since this window has fights in it.
+
+| mission-fast.pad, uncapped, GPU transform | fps | frame | stall updates |
+| --- | ---: | ---: | ---: |
+| 1920x1080, two runs | 131.8 / 130.2 | 7.61 / 7.70 ms | 1.26 / 1.29 ms |
+| 480x272 native | 160.6 | 6.25 ms | 2.35 ms |
+
+Frame dumps every tenth present, two runs: identical from dump 176 to
+the end (the mission load onward); the intro, the loading screens and the
+opening cutscene before it are wall-clock paced and differ, as the movie
+did on the old pad. Comparisons on this pad use dumps 180 and up.
+
+The native row says where the next lever is. At native the list
+execution costs 2.35 ms against 1.26 ms at 1080p, and the texture timer
+says why: outside resolution mode the display buffer sampled as a
+512-row texture is not a view of the target -- the alias needs the
+texture's size to equal the target's -- so every bind reads the target
+back and decodes the megabyte, 1.7 s a run, the very cost section 22
+removed at 1080p.
+
 ## Reproduction
 
 ```sh
@@ -1024,6 +1067,7 @@ bash reports/game-tick-review/opt/link-probe9.sh # section profiler, boot9opt-14
 PSPRECOMP_GE_PROFILE=1 <any boot> ...            # per-vertex pipeline breakdown at the end of the run
 build/host-opt/gereplay frame.gcap gl out.ppm    # GL with the GPU transform; PSPRECOMP_GL_TRANSFORM=cpu for the old path
 PSPRECOMP_FRAMES=<prefix> PSPRECOMP_FRAMES_EVERY=10 <any boot> ...   # 400 guest-memory dumps for a frame-exact comparison
+PSPRECOMP_REPLAY=reports/game-tick-research/mission-fast.pad PSPRECOMP_REPLAY_LIVE=0 PROBE_ACTIVE=1450 PROBE_END=1800 ...   # the fast pad (section 25); dumps 180+ are comparable
 OPT=1 scripts/04-emit-build.sh && OPT=1 BOOT_NO_RUN=1 scripts/06-boot.sh   # the optimised build, build/host-opt/
 ```
 
