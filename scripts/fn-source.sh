@@ -19,7 +19,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 [ $# -eq 1 ] || die "usage: $0 <hex address>"
 addr=$(printf '%08X' "$((16#${1#0x}))")
-src="$GEN/aclr_funcs.c"
+src="$GEN/${PREFIX}_funcs.c"
 [ -f "$src" ] || die "no $src -- run scripts/04-emit-build.sh first"
 
 awk -v a="$addr" '

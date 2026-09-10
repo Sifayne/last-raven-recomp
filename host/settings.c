@@ -19,7 +19,7 @@ const lr_option_def lr_options[LR_OPTION_COUNT] = {
     C(WINDOW_MODE,"Window mode","Graphics","Windowed fullscreen fills the display without borders at the current desktop resolution. Rendering resolution and aspect ratio remain separate settings.","windowed","windowed|borderless","Windowed|Windowed fullscreen"),
     {"DISPLAY","PSPRECOMP_DISPLAY","Start on display","Graphics","Choose the screen for the game in either window mode. If the saved screen is unavailable, the primary display is used. Screen numbers follow the current display order.",LR_INTEGER,"primary",NULL,NULL,1,65535,1,"primary"},
     C(INPUT,"Control scheme","Controls","Classic uses the game's controls. Modern improves one-stick response. Dual separates movement from right-stick and mouse look.","classic","classic|modern|dual","Classic|Modern one-stick|Dual stick / mouse look"),
-    C(GAMEPAD,"Controller layout","Controls","Modern: LT boost, RT right weapon, LB left weapon/event, RB switch, L3 extension, R3 OB/EO, A inside, B view reset, Y purge. Menu buttons remain conventional.","auto","auto|classic|modern","Follow control scheme|Classic PSP buttons|Modern action buttons"),
+    C(GAMEPAD,"Controller layout","Controls","Modern: LT boost, RT right weapon, LB left weapon/event, RB switch, L3 extension, R3 OB/EO, A inside, B view reset, Y purge. Menu buttons remain conventional. A title without native replacements always uses the classic buttons.","auto","auto|classic|modern","Follow control scheme|Classic PSP buttons|Modern action buttons"),
     C(KEYS,"Keyboard layout","Controls","WASD moves; Space boosts; left mouse fires right weapon; right/middle fires left weapon; Q switches. Enter is Start, Backspace Select. Uses the game's default key assignment.","classic","classic|wasd","Classic|WASD"),
     C(MOUSE,"Mouse capture","Controls","Captures the pointer at launch. Escape releases it; click to recapture. Mouse look requires the Dual control scheme.","0","0|1","Off|On"),
     N(MOUSE_SENS,"Mouse sensitivity","Controls","Multiplier for mouse look. 1.0 is 0.001 radians per mouse count. Requires Dual controls and mouse capture.","1",0.001,1000,0.1,NULL),
@@ -236,7 +236,8 @@ int lr_presets_load(lr_presets *p, const char *path, char *error) {
         if (at<0) {
             if (!strcmp(key,"version") && !version && !strcmp(v,"1")) version=1;
             else if (!strcmp(key,"selected") && !*selected && lr_presets_name_valid(v)) strcpy(selected,v);
-            else { strcpy(why,"expected version=1 and selected=Name once, before preset sections"); bad=1; break; }
+            else if (!strcmp(key,"game") && !*next.game && lr_presets_name_valid(v)) strcpy(next.game,v);
+            else { strcpy(why,"expected version=1, selected=Name and at most one game=Slug, before preset sections"); bad=1; break; }
         } else {
             int id=0; while (id<LR_OPTION_COUNT && strcmp(key,lr_options[id].key)) id++;
             if (id==LR_OPTION_COUNT) { snprintf(why,sizeof why,"unknown option '%s'",key); bad=1; break; }
@@ -255,6 +256,7 @@ int lr_presets_load(lr_presets *p, const char *path, char *error) {
 int lr_presets_save(const lr_presets *p, const char *path, char *error) {
     if (p->count<1 || p->count>LR_MAX_PRESETS || p->selected<0 || p->selected>=p->count)
         return fail(error,"presets","invalid selection");
+    if (*p->game && !lr_presets_name_valid(p->game)) return fail(error,"presets","invalid game slug");
     for (int i=0;i<p->count;i++) {
         if (!lr_presets_name_valid(p->presets[i].name) || lr_presets_find(p,p->presets[i].name)!=i)
             return fail(error,"presets","invalid or duplicate name");
@@ -270,7 +272,8 @@ int lr_presets_save(const lr_presets *p, const char *path, char *error) {
     if (fd<0) { free(tmp); return fail(error,path,strerror(errno)); }
     FILE *f=fdopen(fd,"w");
     if (!f) { int e=errno; close(fd); unlink(tmp); free(tmp); return fail(error,path,strerror(e)); }
-    fprintf(f,"# Last Raven player settings. Environment overrides are never saved.\nversion=1\nselected=%s\n",p->presets[p->selected].name);
+    fprintf(f,"# Armored Core player settings. Environment overrides are never saved.\nversion=1\nselected=%s\n",p->presets[p->selected].name);
+    if (*p->game) fprintf(f,"game=%s\n",p->game);
     for (int i=0;i<p->count;i++) {
         fprintf(f,"\n[preset %s]\n",p->presets[i].name);
         for (int k=0;k<LR_OPTION_COUNT;k++) fprintf(f,"%s=%s\n",lr_options[k].key,p->presets[i].settings.value[k]);

@@ -1,0 +1,121 @@
+# The modern pad's actions in AC3P's first sortie: probe-mission.pad's route, then the
+# carrier bits one at a time -- LT (boost) held 100 polls, RT (arm R) tapped, RB
+# (change weapon) tapped, LB (arm L) held 30 polls, the look stick up for 90 polls
+# and B (view reset) tapped, then L3 (extension), A (inside), R3 (OB/EO) tapped.
+# Under dual each should log as a semantic action; the boost lifts the AC and
+# the reset drops the pitch to zero.
+
+
+drain 1500
+minhold 4
+
+  @100 tap start
+  @200 tap circle
+  @300 tap cross
+  @400 tap start
+  @500 tap circle
+  @600 tap cross
+  @700 tap start
+  @800 tap circle
+  @900 tap cross
+  @1000 tap start
+  @1100 tap circle
+  @1200 tap cross
+  @1300 tap start
+  @1400 tap circle
+  @1500 tap cross
+  @1600 tap start
+  @1700 tap circle
+  @1800 tap cross
+  @1900 tap start
+  @2000 tap circle
+  @2100 tap cross
+  @2200 tap start
+  @2300 tap circle
+  @2400 tap cross
+  @2500 tap start
+  @2600 tap circle
+  @2700 tap cross
+  @2800 tap start
+  @2900 tap circle
+  mark "leave the option screen"
+  @3000 tap circle
+  @3080 tap circle
+  @3160 tap down
+  @3190 tap down
+  @3220 tap down
+  @3250 tap down
+  @3280 tap down
+  @3310 tap down
+  @3360 tap cross
+  mark "confirm onwards"
+  @3440 tap cross
+  @3520 tap cross
+  @3600 tap cross
+  @3680 tap cross
+  @3760 tap cross
+  @3840 tap cross
+  @3920 tap cross
+  @4000 tap circle
+  @4080 tap cross
+  @4160 tap cross
+  @4240 tap cross
+  @4320 tap cross
+  @4400 tap cross
+  @4480 tap cross
+  @4560 tap cross
+  @4640 tap cross
+  @4720 tap cross
+  @4800 tap cross
+  @4880 tap cross
+  @4960 tap cross
+  @5040 tap cross
+  @5120 tap cross
+  @5200 tap cross
+  @5280 tap cross
+  @5360 tap cross
+  @5440 tap cross
+  @5520 tap cross
+  @5600 tap cross
+  @5680 tap cross
+  @5760 tap cross
+  @5840 tap cross
+  @5920 tap cross
+  @6000 tap circle
+  @6080 tap cross
+  @6160 tap cross
+  @6240 tap cross
+  @6320 tap cross
+  @6400 tap cross
+  @6480 tap cross
+  @6560 tap cross
+  @6640 tap cross
+  @6720 tap cross
+  @6800 tap cross
+  @6880 tap cross
+  @6960 tap cross
+  @7040 tap cross
+  @7120 tap cross
+  @7200 tap cross
+  @7280 tap cross
+  @7360 tap cross
+  mark "walk forward, full stick"
+  mark "LT: boost"
+  @7600 down 0x00400000
+  @7700 up 0x00400000
+  mark "RT: arm R"
+  @7750 tap 0x00800000
+  mark "RB: change weapon"
+  @7800 tap 0x00200000
+  mark "LB: arm L"
+  @7850 down 0x00100000
+  @7880 up 0x00100000
+  mark "look up, then B: view reset"
+  @7900 analog 128 128 128 0
+  @7990 analog 128 128 128 128
+  @8000 tap 0x00000800
+  mark "L3 extension, A inside, R3 OB/EO"
+  @8050 tap 0x01000000
+  @8100 tap 0x00000400
+  @8150 tap 0x02000000
+  @8300 stop

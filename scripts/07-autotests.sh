@@ -26,7 +26,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-DIR="${1:-$GAME_DIR/pspautotests/tests/cpu/vfpu}"
+DIR="${1:-$PSPAUTOTESTS/tests/cpu/vfpu}"
 # A cap, not a cost: a test that finishes stops on its own, so raising this
 # only changes what happens to the ones that do not. At 100M, cpu/vfpu/vector
 # was reported as "instruction budget exhausted" when what it actually needs is

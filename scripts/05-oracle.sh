@@ -24,12 +24,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 need_tool
 [ -f "$ELF" ] || die "no $ELF — run scripts/01-extract-decrypt.sh first"
 
-GEN_OBJ="$ROOT/build/host"
+GEN_OBJ="$BUILD_HOST_BASE"
 BIN="$GEN_OBJ/oracle_diff"
 LIMIT="${1:-400}"
 FUNCLIST="$REPORTS/05-funclist.txt"
 
-[ -f "$GEN_OBJ/aclr_funcs.o" ] || die "no recompiled objects — run scripts/04-emit-build.sh first"
+[ -f "$GEN_OBJ/${PREFIX}_funcs.o" ] || die "no recompiled objects — run scripts/04-emit-build.sh first"
 
 # Existence is not freshness, and the difference cost a wrong conclusion.
 #
@@ -52,7 +52,7 @@ for src in "$ROOT/tools/psprecomp/tools/allegrexrecomp/emit.c" \
            "$ROOT/tools/psprecomp/tools/allegrexrecomp/decode.h" \
            "$ROOT/tools/psprecomp/include/psprecomp/recomp_rt.h"; do
     [ -e "$src" ] || continue
-    [ "$src" -nt "$GEN_OBJ/aclr_funcs.o" ] && die \
+    [ "$src" -nt "$GEN_OBJ/${PREFIX}_funcs.o" ] && die \
         "$(basename "$src") is newer than the recompiled objects — the emitted C
      predates it, so a 'differ' here would be a stale artifact rather than a
      codegen bug. Run scripts/04-emit-build.sh first."
@@ -74,12 +74,12 @@ cc -O2 -std=gnu11 -c "$ROOT/host/settings.c" -o "$GEN_OBJ/settings.o"
 # presentation layer, so give it its own object instead of depending on which
 # build script most recently wrote replacements.o.
 cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -I "$GEN" \
-    -c "$ROOT/host/replacements.c" -o "$GEN_OBJ/oracle_replacements.o"
+    -c "$REPLACEMENTS_SRC" -o "$GEN_OBJ/oracle_replacements.o"
 cc -o "$BIN" "$GEN_OBJ/oracle_diff.o" \
-       "$GEN_OBJ/aclr_funcs.o" "$GEN_OBJ/aclr_imports.o" \
+       "$GEN_OBJ/${PREFIX}_funcs.o" "$GEN_OBJ/${PREFIX}_imports.o" \
        "$GEN_OBJ/oracle_replacements.o" "$GEN_OBJ/settings.o" \
        "$ROOT/build/psprecomp/tools/allegrexrecomp/liballegrex_core.a" \
-       "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread $HOST_LIBS
+       "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${HOST_LINK_FLAGS[@]}"
 
 # The work-list is the discovered function *entries*, not every address the
 # dispatch table happens to resolve. The table also holds interior labels —

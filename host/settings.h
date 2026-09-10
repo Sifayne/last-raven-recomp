@@ -34,7 +34,9 @@ typedef struct {
 } lr_settings;
 
 typedef struct { char name[LR_NAME_SIZE]; lr_settings settings; } lr_preset;
-typedef struct { int count, selected; lr_preset presets[LR_MAX_PRESETS]; } lr_presets;
+/* game: the launcher's remembered title, a scripts/games/<slug>.sh slug. Empty
+ * in a file that predates titles or that the tool wrote; never required. */
+typedef struct { int count, selected; char game[LR_NAME_SIZE]; lr_preset presets[LR_MAX_PRESETS]; } lr_presets;
 
 extern const lr_option_def lr_options[LR_OPTION_COUNT];
 /* Error buffers passed to this API must hold LR_ERROR_SIZE bytes. All

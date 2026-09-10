@@ -108,9 +108,24 @@ def implemented():
     return have
 
 
+def default_elf():
+    """The decrypted module for the title GAME selects (see scripts/common.sh):
+    scripts/games/<slug>.sh names the module, and every slug but Last Raven's
+    lives under games/<slug>/. Read from the profile directly rather than
+    through common.sh, whose checks and side effects are not wanted here."""
+    game = os.environ.get("GAME", "aclr")
+    module = "ACLR_App"
+    profile = os.path.join(ROOT, "scripts", "games", game + ".sh")
+    if os.path.exists(profile):
+        with open(profile) as f:
+            m = re.search(r'^MODULE="([^"]+)"', f.read(), re.M)
+        if m:
+            module = m.group(1)
+    game_dir = "game" if game == "aclr" else os.path.join("games", game)
+    return os.path.join(ROOT, game_dir, "extracted", module + ".elf")
+
 def main():
-    elf = sys.argv[1] if len(sys.argv) > 1 else \
-        os.path.join(ROOT, "game/extracted/ACLR_App.elf")
+    elf = sys.argv[1] if len(sys.argv) > 1 else default_elf()
     need = imports_from_elf(elf)
     have = implemented()
 

@@ -296,7 +296,9 @@ def main():
     sub = parser.add_subparsers(dest="action", required=True)
     cap = sub.add_parser("capture", help="record all suite scenes in one GL run")
     cap.add_argument("--suite", type=Path, default=ROOT / "scenarios/render-checks.json")
-    cap.add_argument("--elf", type=Path, default=ROOT / "game/extracted/ACLR_App.elf")
+    # The Last Raven defaults; ELF in the environment (a GAME profile's, via
+    # `. scripts/common.sh`) overrides them.
+    cap.add_argument("--elf", type=Path, default=Path(os.environ.get("ELF", ROOT / "game/extracted/ACLR_App.elf")))
     cap.add_argument("--iso", type=Path)
     cap.add_argument("--output", required=True, type=Path, help="new output directory")
     cmp = sub.add_parser("compare", help="replay each capture twice per backend and measure")

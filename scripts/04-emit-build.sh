@@ -14,26 +14,25 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 need_tool
 [ -f "$ELF" ] || die "no $ELF — run scripts/01-extract-decrypt.sh first"
 
-PREFIX=aclr
-# A traced build and a plain one are different objects answering different
-# questions, and they used to share a directory: TRACE=1 only changed CFLAGS, so
-# it silently overwrote the fast build's objects and left a build/host-trace
-# that someone had moved aside by hand. Keep them apart, so having one never
-# means losing the other.
-OBJ="$ROOT/build/host"
-# OPT=1 compiles the generated code at -O2 into its own directory, so the -O0
-# build the rest of the project links against stays where it is. See the
-# compile step below; scripts/06-boot.sh and 09-replay.sh take the same OPT.
-[ "${OPT:-0}" != "0" ] && OBJ="$OBJ-opt"
-[ "${TRACE:-0}" != "0" ] && OBJ="$OBJ-trace"
+# PREFIX (the emit prefix) and the build directory come from common.sh, keyed
+# on GAME. A traced build and a plain one are different objects answering
+# different questions, and they used to share a directory: TRACE=1 only changed
+# CFLAGS, so it silently overwrote the fast build's objects and left a
+# build/host-trace that someone had moved aside by hand. Keep them apart, so
+# having one never means losing the other. OPT=1 likewise compiles the
+# generated code at -O2 into its own directory, so the -O0 build the rest of
+# the project links against stays where it is -- see the compile step below;
+# scripts/06-boot.sh and 09-replay.sh take the same OPT.
+OBJ="$(host_build_dir)"
 mkdir -p "$OBJ"
 
 info "emitting C"
 rm -rf "${GEN:?}"/*
-# host/replace.txt names the functions this project implements natively. Their
-# bodies are still emitted, as psp_func_<addr>__orig, but the public symbol is
-# left for host/replacements.c to define. An empty list changes nothing.
-"$AR" emit "$ELF" "$GEN" "$PREFIX" --replace @"$ROOT/host/replace.txt" \
+# The replace list (host/replace.txt, or host/replace-<slug>.txt for another
+# title) names the functions this project implements natively. Their bodies
+# are still emitted, as psp_func_<addr>__orig, but the public symbol is left
+# for the replacements source to define. An empty list changes nothing.
+"$AR" emit "$ELF" "$GEN" "$PREFIX" --replace @"$REPLACE_LIST" \
     | tee "$REPORTS/04-emit.txt"
 echo
 info "$(cat "$GEN"/*.c | wc -l) lines of C in $(ls "$GEN" | wc -l) files, $(du -sh "$GEN" | cut -f1)"
@@ -56,7 +55,7 @@ if [ "${OPT:-0}" != "0" ]; then
     # body is static and self-contained and every call goes through a public
     # symbol. Thirty-two chunks at -O2, as many at a time as there are cores,
     # take about 30 s; the registration table (one 59k-line function) stays at
-    # -O0; ld -r merges the pieces back into the one aclr_funcs.o that
+    # -O0; ld -r merges the pieces back into the one <prefix>_funcs.o that
     # everything downstream names. -fno-strict-aliasing and -fwrapv keep the
     # generated code's memory and integer semantics exactly as at -O0; the
     # mission replay matches the -O0 build in every logged column
@@ -81,9 +80,9 @@ else
     done
 fi
 cc -c "${CFLAGS[@]}" -o "$OBJ/link_probe.o" "$ROOT/host/link_probe.c"
-# The native replacements for whatever host/replace.txt names. Compiled even
+# The native replacements for whatever the replace list names. Compiled even
 # when that list is empty, so adding the first one needs no build change here.
-cc -c "${CFLAGS[@]}" -I "$GEN" -o "$OBJ/replacements.o" "$ROOT/host/replacements.c"
+cc -c "${CFLAGS[@]}" -I "$GEN" -o "$OBJ/replacements.o" "$REPLACEMENTS_SRC"
 
 cc -O2 -std=gnu11 -c "$ROOT/host/settings.c" -o "$OBJ/settings.o"
 
@@ -95,7 +94,7 @@ GEN_OBJS=()
 for src in "$GEN"/*.c; do GEN_OBJS+=("$OBJ/$(basename "${src%.c}").o"); done
 cc -o "$OBJ/${PREFIX}_probe" "${GEN_OBJS[@]}" "$OBJ/link_probe.o" \
       "$OBJ/replacements.o" "$OBJ/settings.o" \
-      "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread $HOST_LIBS
+      "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${HOST_LINK_FLAGS[@]}"
 
 info "link closed: $(du -h "$OBJ/${PREFIX}_probe" | cut -f1) executable"
 "$OBJ/${PREFIX}_probe"

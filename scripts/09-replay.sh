@@ -59,13 +59,11 @@ done
 SCENARIO="$1"; shift
 [ -f "$SCENARIO" ] || die "no scenario at $SCENARIO"
 
-ELF="${1:-$ROOT/game/extracted/ACLR_App.elf}"
-ISO="${2:-$(ls "$ROOT"/game/*.iso 2>/dev/null | head -1 || true)}"
+ELF="${1:-$ELF}"
+ISO="${2:-$(ls "$GAME_DIR"/*.iso 2>/dev/null | head -1 || true)}"
 [ -f "$ELF" ] || die "no module at $ELF"
 
-OUT="$ROOT/build/host"
-[ "${OPT:-0}" != "0" ] && OUT="$OUT-opt"        # OPT=1: the -O2 generated code
-[ -n "$TRACE_ON" ] && OUT="$OUT-trace"
+OUT="$(host_build_dir "${TRACE_ON:-0}")"      # OPT=1: the -O2 generated code
 
 info "building"
 BOOT_NO_RUN=1 OPT="${OPT:-0}" TRACE="${TRACE_ON:-0}" "$ROOT/scripts/06-boot.sh" >/dev/null

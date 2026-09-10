@@ -1,0 +1,57 @@
+# The stick on the OPTION screen, for checking the converter port headless.
+#
+# Route: probe.pad's round-robin to the option screen (title, NEW GAME), then
+# the left stick held straight up, straight right, on a 30-degree diagonal and
+# on a 60-degree one, and the right stick right and up. Under
+# PSPRECOMP_INPUT=classic the game's own converter answers (one axis over 100
+# of 127 at a time, nothing from the right stick); under dual the port's does
+# (eight sectors, right-stick turn and look), and PSPRECOMP_INPUT_LOG shows the
+# bits each hold asked for.
+
+drain 400
+minhold 4
+
+  @100 tap start
+  @200 tap circle
+  @300 tap cross
+  @400 tap start
+  @500 tap circle
+  @600 tap cross
+  @700 tap start
+  @800 tap circle
+  @900 tap cross
+  @1000 tap start
+  @1100 tap circle
+  @1200 tap cross
+  @1300 tap start
+  @1400 tap circle
+  @1500 tap cross
+  @1600 tap start
+  @1700 tap circle
+  @1800 tap cross
+  @1900 tap start
+  @2000 tap circle
+  @2100 tap cross
+  @2200 tap start
+  @2300 tap circle
+  @2400 tap cross
+  @2500 tap start
+  @2600 tap circle
+  @2700 tap cross
+  @2800 tap start
+  @2900 tap circle
+  mark "left stick: up, right, 30 deg off up, 60 deg off up"
+  @3000 analog 128 8
+  @3060 analog 128 128
+  @3120 analog 248 128
+  @3180 analog 128 128
+  @3240 analog 188 24
+  @3300 analog 128 128
+  @3360 analog 232 68
+  @3420 analog 128 128
+  mark "right stick: right, then up"
+  @3480 analog 128 128 248 128
+  @3540 analog 128 128 128 128
+  @3600 analog 128 128 128 8
+  @3660 analog 128 128 128 128
+  @3720 stop

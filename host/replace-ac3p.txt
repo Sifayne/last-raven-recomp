@@ -1,0 +1,53 @@
+# Functions of the ac3p module (Armored Core 3 Portable) that the host
+# implements natively. One hex address per line; see host/replace.txt for what
+# a line means and what to check before adding one.
+
+# The stick -> virtual-bits converter, the twin of Last Raven's 00279A50 (same
+# 26 instructions, same threshold of 100 at run time); see host/ac3_controls.h.
+# Interior entries: none (checked on 7 Sep).
+001ECE84
+
+# The yaw integrator, psp_func_00106B3C(ac, accel, max): the two-state turn
+# ramp the turn state's handler calls every frame; see host/ac3_controls.h.
+# Interior entries: eleven branch-target thunks, as Last Raven's has.
+00106B3C
+
+# The look (pitch) controller, psp_func_00104FC4(ac): the two-state look ramp,
+# its lockout and its clamp, once a frame from the player's update 00100450;
+# see host/ac3_controls.h. Interior entries: twelve branch-target thunks.
+00104FC4
+
+# The walk's push assemblers, psp_func_0010D5A4 and 0010DF98(ac, direction):
+# identical twins, one per walk handler, that take the animation's root travel,
+# rotate it by the yaw, scale it by the start-up ramp and hand it to the push
+# 00106EF8 with its own length as the cap; see host/ac3_controls.h. Interior
+# entries: four branch-target thunks each.
+0010D5A4
+0010DF98
+
+# The modern pad. The twelve-entry PSP-button converter, psp_func_001ECE44
+# (Last Raven's 00279A10 to the instruction): the carrier bits are stripped
+# and remembered here. The AC's per-frame pad copy, psp_func_00100894(ac,
+# word): the held word at +180 and the pressed word at +184 get the semantic
+# actions' masks ORed in; see host/ac3_controls.h. Interior entries: none in
+# the converter, a few branch thunks in the copy.
+001ECE44
+00100894
+
+# The projection builder, psp_func_001CC4DC(camera): field of view at +192 to
+# radians, then the matrix builder with the aspect at +204, near +196 and far
+# +200, into the camera's projection at +128. Replaced for the adaptive aspect;
+# see host/ac3_controls.h.
+001CC4DC
+
+# The per-frame camera update, psp_func_0011B440(index, out matrix): dispatches
+# on the camera's mode byte and installs the eye and target the handler blended.
+# Replaced to lend the chase camera a different lag; see host/ac3_controls.h.
+# Interior entries: five branch-target thunks.
+0011B440
+
+# The animation updater, psp_func_000DD29C(anim object): advances the skeleton's
+# one time counter and poses its bones from it. Replaced so the walk cycle keeps
+# the pace the AC actually walks at; see host/ac3_controls.h. Interior entries:
+# thirty-four branch-target thunks.
+000DD29C

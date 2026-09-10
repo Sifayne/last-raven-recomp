@@ -1,0 +1,106 @@
+# The modern pad in AC3P's menus: probe-mission.pad's route to the first sortie with
+# every cross tap sent as the modern pad's A (carrier 0x00000400) and every circle
+# tap as its B (0x00000800). Under dual, where the gamepad layout is modern, the
+# PSP converter's replacement must turn them back into cross and circle outside
+# play, or the route never leaves the title screen. Then a short walk, to show
+# the sortie was reached.
+
+
+drain 1500
+minhold 4
+
+  @100 tap start
+  @200 tap 0x00000800
+  @300 tap 0x00000400
+  @400 tap start
+  @500 tap 0x00000800
+  @600 tap 0x00000400
+  @700 tap start
+  @800 tap 0x00000800
+  @900 tap 0x00000400
+  @1000 tap start
+  @1100 tap 0x00000800
+  @1200 tap 0x00000400
+  @1300 tap start
+  @1400 tap 0x00000800
+  @1500 tap 0x00000400
+  @1600 tap start
+  @1700 tap 0x00000800
+  @1800 tap 0x00000400
+  @1900 tap start
+  @2000 tap 0x00000800
+  @2100 tap 0x00000400
+  @2200 tap start
+  @2300 tap 0x00000800
+  @2400 tap 0x00000400
+  @2500 tap start
+  @2600 tap 0x00000800
+  @2700 tap 0x00000400
+  @2800 tap start
+  @2900 tap 0x00000800
+  mark "leave the option screen"
+  @3000 tap 0x00000800
+  @3080 tap 0x00000800
+  @3160 tap down
+  @3190 tap down
+  @3220 tap down
+  @3250 tap down
+  @3280 tap down
+  @3310 tap down
+  @3360 tap 0x00000400
+  mark "confirm onwards"
+  @3440 tap 0x00000400
+  @3520 tap 0x00000400
+  @3600 tap 0x00000400
+  @3680 tap 0x00000400
+  @3760 tap 0x00000400
+  @3840 tap 0x00000400
+  @3920 tap 0x00000400
+  @4000 tap 0x00000800
+  @4080 tap 0x00000400
+  @4160 tap 0x00000400
+  @4240 tap 0x00000400
+  @4320 tap 0x00000400
+  @4400 tap 0x00000400
+  @4480 tap 0x00000400
+  @4560 tap 0x00000400
+  @4640 tap 0x00000400
+  @4720 tap 0x00000400
+  @4800 tap 0x00000400
+  @4880 tap 0x00000400
+  @4960 tap 0x00000400
+  @5040 tap 0x00000400
+  @5120 tap 0x00000400
+  @5200 tap 0x00000400
+  @5280 tap 0x00000400
+  @5360 tap 0x00000400
+  @5440 tap 0x00000400
+  @5520 tap 0x00000400
+  @5600 tap 0x00000400
+  @5680 tap 0x00000400
+  @5760 tap 0x00000400
+  @5840 tap 0x00000400
+  @5920 tap 0x00000400
+  @6000 tap 0x00000800
+  @6080 tap 0x00000400
+  @6160 tap 0x00000400
+  @6240 tap 0x00000400
+  @6320 tap 0x00000400
+  @6400 tap 0x00000400
+  @6480 tap 0x00000400
+  @6560 tap 0x00000400
+  @6640 tap 0x00000400
+  @6720 tap 0x00000400
+  @6800 tap 0x00000400
+  @6880 tap 0x00000400
+  @6960 tap 0x00000400
+  @7040 tap 0x00000400
+  @7120 tap 0x00000400
+  @7200 tap 0x00000400
+  @7280 tap 0x00000400
+  @7360 tap 0x00000400
+  mark "walk forward, full stick"
+  mark "walk forward"
+  @7600 analog 128 8
+  @7700 analog 128 128
+  @7800 stop

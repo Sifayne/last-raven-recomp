@@ -72,10 +72,9 @@
 #include "controls.h"
 #include "settings.h"
 #include "present.h"
+#include "stick.h"      /* INPUT_*, stick2, input_tune(), stick_radial(), stick_look(), hysteresis() */
 
 /* ---- configuration ------------------------------------------------------ */
-
-enum { INPUT_CLASSIC = 0, INPUT_MODERN = 1, INPUT_DUAL = 2 };
 
 static int input_mode(void) {
     static int mode = -1;
@@ -90,6 +89,15 @@ static int input_mode(void) {
     }
     return mode;
 }
+
+/* This host does read the modern pad's carrier bits (psp_func_00279A10 and
+ * the action helpers below), so the presentation layer may offer that layout.
+ * A title without these replacements leaves the symbol undefined and
+ * present.c keeps its controller on the PSP buttons. */
+const int lr_modern_controls_available = 1;
+
+/* The adaptive aspect is this title's own camera rebuild, below. */
+const int lr_adaptive_aspect_available = 1;
 
 /* Button layout is independently overridable so the analog work can be
  * compared with the PSP buttons, or the modern buttons can be used with the
@@ -172,9 +180,9 @@ void psp_func_000889B4(void) {
     const uint32_t height_addr = render + RENDER_HEIGHT;
     const uint32_t old_w = render ? psp_read32(width_addr) : 0;
     const uint32_t old_h = render ? psp_read32(height_addr) : 0;
-    /* Only the display's camera. The same rebuild serves the AC preview,
-     * whose descriptor is the 256x128 scratch surface; widening that camera
-     * would distort a preview that is composited at its native size. */
+    /* Only the full display camera. Scratch previews and the inset Assembly
+     * cameras keep their own aspect. GL places the latter in the centered
+     * menu area using their viewport/scissor, on both transform paths. */
     if (old_w != 480u || old_h != 272u) {
         psp_func_000889B4__orig();
         return;
@@ -211,74 +219,8 @@ void psp_func_000889B4(void) {
     }
 }
 
-typedef struct {
-    float x, y;                    /* processed components, magnitude `m` */
-    float m;                       /* 0..1 after the radial deadzones       */
-    float raw_m;                   /* magnitude before them                */
-} stick2;
-
-typedef struct {
-    int init;
-    float move_dead, move_enter;
-    float look_dead, outer_dead, look_expo;
-} input_tuning;
-
-static const input_tuning *input_tune(void) {
-    static input_tuning t;
-    if (!t.init) {
-        t.move_dead = (float)lr_settings_current()->number[LR_MOVE_DEADZONE];
-        t.move_enter = fminf(t.move_dead + 0.03f, 0.55f);
-        t.look_dead = (float)lr_settings_current()->number[LR_LOOK_DEADZONE];
-        t.outer_dead = (float)lr_settings_current()->number[LR_STICK_OUTER_DEADZONE];
-        t.look_expo = (float)lr_settings_current()->number[LR_LOOK_EXPO];
-        t.init = 1;
-        if (input_mode() != INPUT_CLASSIC)
-            printf("      sticks    radial -- move %.0f/%.0f%% exit/enter, "
-                   "look %.0f%%, outer %.0f%%, expo %.2f\n",
-                   100.0f * t.move_dead, 100.0f * t.move_enter,
-                   100.0f * t.look_dead, 100.0f * t.outer_dead, t.look_expo);
-    }
-    return &t;
-}
-
-static float byte_axis(uint8_t v) {
-    const int x = (int)v - 128;
-    return x < 0 ? x / 128.0f : x / 127.0f;
-}
-
-/* One radial inner deadzone, applied after the byte is in the recorded input
- * lane.  The host deliberately does no deadzoning of its own.  Rescaling the
- * remaining radius makes the first live value continuous at zero, preserves
- * the stick's angle, and still reaches one on a pad whose rim falls short. */
-static stick2 stick_radial(uint8_t xb, uint8_t yb, float dead) {
-    const input_tuning *t = input_tune();
-    stick2 out = { byte_axis(xb), byte_axis(yb), 0.0f, 0.0f };
-    out.raw_m = hypotf(out.x, out.y);
-    if (out.raw_m <= dead) { out.x = out.y = 0.0f; return out; }
-    const float outer = 1.0f - t->outer_dead;
-    const float rim = fmaxf(outer, dead + 0.01f);
-    const float radius = fminf(out.raw_m, rim);
-    out.m = (radius - dead) / (rim - dead);
-    const float scale = out.m / out.raw_m;
-    out.x *= scale;
-    out.y *= scale;
-    return out;
-}
-
-/* Shape the look stick's radial magnitude, then restore its direction.  A
- * component-wise cubic bends diagonals; doing it once to the radius does not. */
-static stick2 stick_look(uint8_t xb, uint8_t yb) {
-    const input_tuning *t = input_tune();
-    stick2 out = stick_radial(xb, yb, t->look_dead);
-    if (out.m == 0.0f) return out;
-    const float curved = (1.0f - t->look_expo) * out.m +
-                         t->look_expo * out.m * out.m * out.m;
-    const float scale = curved / out.m;
-    out.x *= scale;
-    out.y *= scale;
-    out.m = curved;
-    return out;
-}
+/* stick2, input_tuning, input_tune(), stick_radial(), stick_look(): host/stick.h,
+ * shared with the other titles' replacements. */
 
 /* The left stick as a direction and a magnitude for the walk: the unit vector
  * in the AC's frame and how far past the profile's radial deadzone the stick
@@ -871,10 +813,6 @@ void psp_func_000746D4(void) {
 
 enum { MOUSE_HOLD_POLLS = 4 };
 static int g_move_gate, g_turn_gate;
-
-static int hysteresis(int held, float value, float enter, float leave) {
-    return held ? value > leave : value >= enter;
-}
 
 /* Mouse travel arrives at the mouse's rate and this runs at the guest's; a
  * bit that dropped the poll after a motion event would flicker the state

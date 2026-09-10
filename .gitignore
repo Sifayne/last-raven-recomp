@@ -8,6 +8,7 @@
 
 # --- Game dumps and containers ---------------------------------------------
 game/
+/games/
 *.iso
 *.cso
 *.dax

@@ -1,0 +1,44 @@
+# Blind probe for a title nobody has played through this host yet.
+#
+# Nothing here knows the game's menus. It taps the three buttons that get a
+# PSP game past a logo, a movie and a title screen -- start, circle, cross --
+# one at a time, every hundred polls, so whichever the game wants arrives
+# within three hundred polls of it becoming receptive. A tap the game ignores
+# costs one poll. Run with --decode so a movie plays instead of gating the run.
+#
+# Once someone has recorded a real route, replace this with it.
+
+drain 300
+minhold 4
+
+  mark "start/circle/cross round-robin"
+  @100 tap start
+  @200 tap circle
+  @300 tap cross
+  @400 tap start
+  @500 tap circle
+  @600 tap cross
+  @700 tap start
+  @800 tap circle
+  @900 tap cross
+  @1000 tap start
+  @1100 tap circle
+  @1200 tap cross
+  @1300 tap start
+  @1400 tap circle
+  @1500 tap cross
+  @1600 tap start
+  @1700 tap circle
+  @1800 tap cross
+  @1900 tap start
+  @2000 tap circle
+  @2100 tap cross
+  @2200 tap start
+  @2300 tap circle
+  @2400 tap cross
+  @2500 tap start
+  @2600 tap circle
+  @2700 tap cross
+  @2800 tap start
+  @2900 tap circle
+  @3000 stop

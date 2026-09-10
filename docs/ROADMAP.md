@@ -67,6 +67,19 @@ pieces not built, deliberately.
 Saves: the game writes a real save to `ms0:` and loads it back — M4's gate,
 passed 3 Sep.
 
+**Sibling titles (7 Sep).** Armored Core 3 Portable (NPUH10023) and Silent
+Line Portable (NPUH10025) go through the same pipeline unmodified:
+`GAME=ac3p` / `GAME=acsl` select a profile in `scripts/games/`, decode
+coverage is 100% with 0 unknown words, 196 of their 210 imports are
+implemented (Last Raven's gaps plus three InterruptManager sub-interrupt
+functions nothing has called yet), and a blind probe reaches each game's
+OPTION screen headless in 3,000 polls with 0 bad accesses.
+[findings/sibling-titles.md](findings/sibling-titles.md) has the numbers.
+AC3P's first sortie is reached blind, and the four control laws (converter,
+yaw, look, walk) are ported to both titles through `host/ac3_controls.h`
+and measured on AC3P, then confirmed on Silent Line against Sif's recording
+of its first mission (`scenarios/acsl/mission.pad`).
+
 ## M1 — Past New Game ✅ 1 Sep
 
 **Gate — passed.** `scripts/09-replay.sh --decode scenarios/new-game.pad`

@@ -33,6 +33,12 @@
 #include <time.h>
 #include <unistd.h>
 
+/* The window title. scripts/06-boot.sh passes the GAME profile's TITLE;
+ * built any other way, this is Last Raven's. */
+#ifndef GAME_TITLE
+#define GAME_TITLE "Armored Core: Last Raven"
+#endif
+
 enum { SCREEN_W = 480, SCREEN_H = 272 };
 
 /* ---- frames -------------------------------------------------------------- */
@@ -352,8 +358,21 @@ static void publish_pad(void) {
     psp_ctrl_set_look(atomic_load(&g_pad_rx), atomic_load(&g_pad_ry));
 }
 
+/* The modern layout sends the face buttons, bumpers, triggers and stick
+ * clicks as carrier bits (host/controls.h) that the game never sees: a native
+ * replacement of its button converter reads them. Last Raven's
+ * host/replacements.c defines this flag; a title with no replacements leaves
+ * it undefined, the weak reference is null, and the pad speaks the PSP
+ * buttons the game already understands -- otherwise A, B, X, Y, LB, RB and
+ * both triggers would go nowhere. Weak, not merely extern, because present.c
+ * is also linked into the render fixtures without any replacements. */
+extern const int lr_modern_controls_available __attribute__((weak));
 static int gamepad_modern(void) {
-    return lr_settings_current()->gamepad;
+    if (!lr_settings_current()->gamepad) return 0;
+    if (&lr_modern_controls_available && lr_modern_controls_available) return 1;
+    fprintf(stderr, "present: this title has no native replacements for the modern "
+                    "controller layout -- using the classic PSP buttons instead\n");
+    return 0;
 }
 
 static void clear_controller(void) {
@@ -641,8 +660,22 @@ void present_request_window_size(int w, int h) {
         atomic_store(&g_requested_size, ((uint64_t)(uint32_t)w << 32) | (uint32_t)h);
 }
 
+/* As the modern pad above: the wide mapping in the GL backend spreads a scene
+ * the game's camera compressed into 480 columns, so a title whose camera has
+ * no aspect replacement must not be put into it -- the 3D would stretch and
+ * the assembly's inset previews would leave their panels. The settings file is
+ * shared by every title, so a preset saved on one reaches the others. */
+extern const int lr_adaptive_aspect_available __attribute__((weak));
 int present_adaptive_aspect(void) {
-    return lr_settings_current()->number[LR_ASPECT] != 0;
+    if (!lr_settings_current()->number[LR_ASPECT]) return 0;
+    if (&lr_adaptive_aspect_available && lr_adaptive_aspect_available) return 1;
+    static int said;
+    if (!said) {
+        said = 1;
+        fprintf(stderr, "present: this title has no native camera replacement for "
+                        "the adaptive aspect -- keeping the original PSP view\n");
+    }
+    return 0;
 }
 
 int present_aspect_wide_width(void) {
@@ -693,7 +726,7 @@ static void *sdl_thread(void *arg) {
         display = 0;
     }
     SDL_Window *win = SDL_CreateWindow(
-        "Armored Core: Last Raven -- recompiled",
+        GAME_TITLE " -- recompiled",
         SDL_WINDOWPOS_CENTERED_DISPLAY(display), SDL_WINDOWPOS_CENTERED_DISPLAY(display),
         win_w, win_h,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
@@ -874,7 +907,7 @@ static void *sdl_thread(void *arg) {
                 const uint64_t frames = atomic_load(&g_frames_rendered);
                 const double fps = (double)(frames - title_frames) * 1000.0 / (double)(now - title_t0);
                 char title[96];
-                snprintf(title, sizeof title, "Armored Core: Last Raven -- recompiled  |  %.0f fps", fps);
+                snprintf(title, sizeof title, GAME_TITLE " -- recompiled  |  %.0f fps", fps);
                 if (strcmp(title, last) != 0) { SDL_SetWindowTitle(win, title); snprintf(last, sizeof last, "%s", title); }
                 title_t0 = now; title_frames = frames;
             }

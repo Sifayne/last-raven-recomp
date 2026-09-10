@@ -1,0 +1,102 @@
+# A full-stick turn in AC3P's first sortie, for the yaw hunt: probe-mission.pad's
+# route to control, then the left stick held hard left from 7600 to 7900 (the
+# game's own converter, classic: the two-state turn at its cap after the ramp).
+# Snapshots a poll apart in the hold find the heading and the rate.
+
+drain 1500
+minhold 4
+
+  @100 tap start
+  @200 tap circle
+  @300 tap cross
+  @400 tap start
+  @500 tap circle
+  @600 tap cross
+  @700 tap start
+  @800 tap circle
+  @900 tap cross
+  @1000 tap start
+  @1100 tap circle
+  @1200 tap cross
+  @1300 tap start
+  @1400 tap circle
+  @1500 tap cross
+  @1600 tap start
+  @1700 tap circle
+  @1800 tap cross
+  @1900 tap start
+  @2000 tap circle
+  @2100 tap cross
+  @2200 tap start
+  @2300 tap circle
+  @2400 tap cross
+  @2500 tap start
+  @2600 tap circle
+  @2700 tap cross
+  @2800 tap start
+  @2900 tap circle
+  mark "leave the option screen"
+  @3000 tap circle
+  @3080 tap circle
+  @3160 tap down
+  @3190 tap down
+  @3220 tap down
+  @3250 tap down
+  @3280 tap down
+  @3310 tap down
+  @3360 tap cross
+  mark "confirm onwards"
+  @3440 tap cross
+  @3520 tap cross
+  @3600 tap cross
+  @3680 tap cross
+  @3760 tap cross
+  @3840 tap cross
+  @3920 tap cross
+  @4000 tap circle
+  @4080 tap cross
+  @4160 tap cross
+  @4240 tap cross
+  @4320 tap cross
+  @4400 tap cross
+  @4480 tap cross
+  @4560 tap cross
+  @4640 tap cross
+  @4720 tap cross
+  @4800 tap cross
+  @4880 tap cross
+  @4960 tap cross
+  @5040 tap cross
+  @5120 tap cross
+  @5200 tap cross
+  @5280 tap cross
+  @5360 tap cross
+  @5440 tap cross
+  @5520 tap cross
+  @5600 tap cross
+  @5680 tap cross
+  @5760 tap cross
+  @5840 tap cross
+  @5920 tap cross
+  @6000 tap circle
+  @6080 tap cross
+  @6160 tap cross
+  @6240 tap cross
+  @6320 tap cross
+  @6400 tap cross
+  @6480 tap cross
+  @6560 tap cross
+  @6640 tap cross
+  @6720 tap cross
+  @6800 tap cross
+  @6880 tap cross
+  @6960 tap cross
+  @7040 tap cross
+  @7120 tap cross
+  @7200 tap cross
+  @7280 tap cross
+  @7360 tap cross
+  mark "turn left, full stick"
+  @7600 analog 8 128
+  @7900 analog 128 128
+  @8000 stop

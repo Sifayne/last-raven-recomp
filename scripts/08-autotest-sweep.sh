@@ -41,7 +41,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-TESTS="${1:-$GAME_DIR/pspautotests/tests}"
+TESTS="${1:-$PSPAUTOTESTS/tests}"
 BUDGET="${BUDGET:-200000000}"
 TMO="${TMO:-25}"
 OUT="$REPORTS/08-sweep.tsv"

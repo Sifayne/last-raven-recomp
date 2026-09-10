@@ -1,0 +1,42 @@
+# Functions of the acsl module (Armored Core: Silent Line Portable) that the host
+# implements natively. One hex address per line; see host/replace.txt for what
+# a line means and what to check before adding one.
+
+# The stick -> virtual-bits converter, the twin of Last Raven's 00279A50 (same
+# 26 instructions, same threshold of 100 at run time); see host/ac3_controls.h.
+# Interior entries: none (checked on 7 Sep).
+0020CE84
+
+# The yaw integrator, psp_func_00009D80(ac, accel, max), called by the turn
+# handler 000006F4 (the twin of AC3P's 00102B9C); see host/ac3_controls.h.
+00009D80
+
+# The look (pitch) controller, psp_func_000081A4(ac): Last Raven's shape (the
+# movement-state gate, actions 10/11 through the pad helpers 000130B8/000130D8)
+# on AC3P's state layout; see host/ac3_controls.h.
+000081A4
+
+# The walk's push assemblers, psp_func_000193D4 and 00019E24(ac, direction),
+# AC3P's 0010D5A4/0010DF98 to the instruction; see host/ac3_controls.h.
+000193D4
+00019E24
+
+# The modern pad, Last Raven's shape: the PSP-button converter 0020CE44 strips
+# and remembers the carrier bits; the action queries held 000130B8 and pressed
+# 000130D8 answer them for the player's pad; see host/ac3_controls.h.
+0020CE44
+000130B8
+000130D8
+
+# The projection builder, psp_func_001EA920(camera), AC3P's 001CC4DC and Last
+# Raven's 0025879C to the instruction; see host/ac3_controls.h.
+001EA920
+
+# The per-frame camera update, psp_func_00025268(index, out matrix), AC3P's
+# 0011B440 (0.82 by instruction sequence); see host/ac3_controls.h.
+# Interior entries: two branch-target thunks.
+00025268
+
+# The animation updater, psp_func_00099E38(anim object), AC3P's 000DD29C (0.90
+# by instruction sequence); see host/ac3_controls.h.
+00099E38

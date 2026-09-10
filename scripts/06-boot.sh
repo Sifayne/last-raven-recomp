@@ -13,15 +13,14 @@ set -euo pipefail
 . "$(dirname "$0")/common.sh"
 
 RECOMP_DIR="$ROOT/tools/psprecomp/tools/allegrexrecomp"
-# Match 04-emit-build.sh: TRACE=1 boots the traced objects, from their own
-# directory, without disturbing the plain build.
-OUT="$ROOT/build/host"
-[ "${OPT:-0}" != "0" ] && OUT="$OUT-opt"        # the -O2 generated code, see 04-emit-build.sh
-[ "${TRACE:-0}" != "0" ] && OUT="$OUT-trace"
+# Match 04-emit-build.sh: the build directory comes from common.sh (GAME, OPT,
+# TRACE), so TRACE=1 boots the traced objects from their own directory without
+# disturbing the plain build.
+OUT="$(host_build_dir)"
 LIB="$ROOT/build/psprecomp/libpsprecomp.a"
 
 [ -f "$LIB" ] || die "no runtime library; run scripts/build-tools.sh first"
-[ -f "$OUT/aclr_funcs.o" ] || die "no emitted module; run scripts/04-emit-build.sh first"
+[ -f "$OUT/${PREFIX}_funcs.o" ] || die "no emitted module; run scripts/04-emit-build.sh first"
 
 # Rebuild the runtime library before linking against it.
 #
@@ -59,18 +58,18 @@ cc -O2 -std=gnu11 $SDL_DEF \
    -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
    -c "$ROOT/host/boot.c" -o "$OUT/boot.o"
 
-# Native replacements for the functions host/replace.txt names. Linked into the
+# Native replacements for the functions the replace list names. Linked into the
 # boot host as well as stage 04's probe, because this is the build that runs.
 #
 # The emitted header declares psp_func_<addr>__orig only for the addresses the
 # list held when stage 04 last ran, so a list edited since then fails here as
 # an implicit declaration of that one symbol -- which reads like a typo in
 # replacements.c and is not. Say what it is.
-if [ "$ROOT/host/replace.txt" -nt "$GEN/aclr_funcs.h" ]; then
-    die "host/replace.txt is newer than the emitted C -- run scripts/04-emit-build.sh first"
+if [ "$REPLACE_LIST" -nt "$GEN/${PREFIX}_funcs.h" ]; then
+    die "$(basename "$REPLACE_LIST") is newer than the emitted C -- run scripts/04-emit-build.sh first"
 fi
 cc -O2 -std=gnu11 $SDL_DEF -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" -I "$GEN" \
-   -c "$ROOT/host/replacements.c" -o "$OUT/replacements.o"
+   -c "$REPLACEMENTS_SRC" -o "$OUT/replacements.o"
 
 for src in loader container decode; do
     cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
@@ -79,7 +78,8 @@ done
 
 if [ -n "$SDL_DEF" ]; then
     info "compiling presentation layer (SDL2)"
-    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2) \
+    # The window is titled after the profile's TITLE.
+    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2) -DGAME_TITLE="\"$TITLE\"" \
        -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
        -c "$ROOT/host/present.c" -o "$OUT/present.o"
     # The GL backend is compiled here rather than with the runtime: it needs a
@@ -108,11 +108,11 @@ cc -O2 -std=gnu11 $SDL_DEF ${SDL_DEF:+$(pkg-config --cflags sdl2)} \
 
 info "linking"
 cc "$OUT/settings.o" "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT \
-   "$OUT/aclr_funcs.o" "$OUT/aclr_imports.o" "$OUT/replacements.o" "$LIB" \
-   -o "$OUT/boot" -lm -lpthread $HOST_LIBS
+   "$OUT/${PREFIX}_funcs.o" "$OUT/${PREFIX}_imports.o" "$OUT/replacements.o" "$LIB" \
+   -o "$OUT/boot" -lm -lpthread "${HOST_LINK_FLAGS[@]}"
 
 cc "$OUT/settings.o" "$OUT/gereplay.o" $PRESENT "$LIB" \
-   -o "$OUT/gereplay" -lm -lpthread $HOST_LIBS
+   -o "$OUT/gereplay" -lm -lpthread "${HOST_LINK_FLAGS[@]}"
 
 # Build without running, so 09-replay.sh reuses this recipe instead of copying
 # it. The recipe is worth not duplicating: it probes SDL2 *before* compiling
@@ -130,8 +130,8 @@ if [[ "${1:-}" == --* ]]; then
     EXTRA=("$@")
     set --
 fi
-ELF="${1:-$ROOT/game/extracted/ACLR_App.elf}"
-ISO="${2:-$(ls "$ROOT"/game/*.iso 2>/dev/null | head -1 || true)}"
+ELF="${1:-$ELF}"
+ISO="${2:-$(ls "$GAME_DIR"/*.iso 2>/dev/null | head -1 || true)}"
 [ -f "$ELF" ] || die "no module at $ELF"
 
 exec "$OUT/boot" "$ELF" ${ISO:+"$ISO"} "${@:3}" "${EXTRA[@]}"

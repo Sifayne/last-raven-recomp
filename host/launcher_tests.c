@@ -51,14 +51,14 @@ static void shot(launcher *a,const char *dir,const char *name) {
     assert(!SDL_SaveBMP(surface,path)); SDL_FreeSurface(surface); SDL_RenderPresent(a->renderer);
 }
 int main(int argc,char **argv) {
-    assert(argc==2);
+    assert(argc==2 || argc==3);
     for (int k=0;k<LR_OPTION_COUNT;k++) unsetenv(lr_options[k].env);
     launcher a={0}; a.running=1; a.focus=a.selected_row=LR_RESOLUTION; a.movie_available=1;
     snprintf(a.path,sizeof a.path,"%s/presets with spaces.ini",argv[1]);
     assert(!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMECONTROLLER)); assert(!TTF_Init());
     a.window=SDL_CreateWindow("Settings UI checks",0,0,UI_W,UI_H,SDL_WINDOW_HIDDEN);
     assert(a.window); a.renderer=SDL_CreateRenderer(a.window,-1,SDL_RENDERER_SOFTWARE); assert(a.renderer);
-    SDL_RenderSetLogicalSize(a.renderer,UI_W,UI_H); assert(!fonts(&a,NULL));
+    SDL_RenderSetLogicalSize(a.renderer,UI_W,UI_H); assert(!fonts(&a,argc==3?argv[2]:NULL));
     lr_presets_defaults(&a.book); shot(&a,argv[1],"graphics");
     a.focus=a.selected_row=LR_WINDOW_MODE;
     pad_press(&a,SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
@@ -150,14 +150,33 @@ int main(int argc,char **argv) {
     a.running=1; a.dirty=1; activate(&a,CANCEL); assert(a.modal==MODAL_CANCEL_DIRTY);
     press(&a,SDLK_ESCAPE); assert(a.running && a.dirty);
     activate(&a,CANCEL); press(&a,SDLK_RETURN); assert(!a.running);
+    /* Title tabs: a click switches the launch target and remembers the slug,
+     * Left/Right cycle on a focused tab, Save persists it, Play uses it. */
+    a.running=1; a.dirty=0; a.game_count=2;
+    a.games[0]=(game_entry){"aclr","Armored Core: Last Raven",child,module,NULL};
+    a.games[1]=(game_entry){"ac3p","Armored Core 3 Portable",child,module,""};
+    select_game(&a,0,1); assert(a.game==0 && !strcmp(a.book.game,"aclr") && !a.dirty);
+    shot(&a,argv[1],"games");
+    draw(&a); click(&a,400,110);
+    assert(a.game==1 && a.focus==GAME_BASE+1 && a.dirty && !strcmp(a.book.game,"ac3p") && !a.iso);
+    press(&a,SDLK_RIGHT); assert(a.game==0 && a.focus==GAME_BASE);
+    press(&a,SDLK_LEFT); assert(a.game==1);
+    shot(&a,argv[1],"games-second");
+    assert(!save(&a)); assert(!lr_presets_load(&disk,a.path,error)); assert(!strcmp(disk.game,"ac3p"));
+    activate(&a,PLAY); assert(a.child>0);
+    for (int i=0;i<200 && a.child;i++) { SDL_Delay(5); poll_child(&a); }
+    assert(!a.child && !a.running);
+    contents[0]=0; f=fopen(arguments,"r"); assert(f); fread(contents,1,sizeof contents-1,f); fclose(f);
+    assert(strstr(contents,module) && strstr(contents,"--preset\nDesk & controller\n--window\n"));
+    a.game_count=0;
     unlink(child); unlink(module); unlink(arguments);
     TTF_CloseFont(a.body); TTF_CloseFont(a.small); TTF_CloseFont(a.heading);
     SDL_DestroyRenderer(a.renderer); SDL_DestroyWindow(a.window); TTF_Quit(); SDL_Quit();
     /* Also exercise the real CLI entry point, loading the file we just saved.
      * The event thread closes it normally, without touching user preferences. */
     pthread_t closer; assert(!pthread_create(&closer,NULL,close_startup,NULL));
-    char *startup[]={"launcher","--config",a.path,NULL};
-    assert(!launcher_entry(3,startup)); assert(!pthread_join(closer,NULL));
+    char *startup[]={"launcher","--config",a.path,"--font",argc==3?argv[2]:NULL,NULL};
+    assert(!launcher_entry(argc==3?5:3,startup)); assert(!pthread_join(closer,NULL));
     unlink(a.path);
     puts("launcher: mouse, keyboard, controller, presets, overrides, cancel, validation and launch handoff passed");
     return 0;

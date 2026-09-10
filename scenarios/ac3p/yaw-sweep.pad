@@ -1,0 +1,153 @@
+# The yaw law under dual in AC3P's first sortie: probe-mission.pad's route to
+# control, then the right stick held right at 127, 64, 32 and 16 of 127 for
+# 100 polls each with the stick centred between, then left at 127, then a
+# mouse drag of 30 counts a poll for 40 polls. Under classic the right stick
+# does nothing and the mouse nothing; under dual the integrator's log line
+# shows the rate each hold asks for against the game's own cap.
+
+drain 1500
+minhold 4
+
+  @100 tap start
+  @200 tap circle
+  @300 tap cross
+  @400 tap start
+  @500 tap circle
+  @600 tap cross
+  @700 tap start
+  @800 tap circle
+  @900 tap cross
+  @1000 tap start
+  @1100 tap circle
+  @1200 tap cross
+  @1300 tap start
+  @1400 tap circle
+  @1500 tap cross
+  @1600 tap start
+  @1700 tap circle
+  @1800 tap cross
+  @1900 tap start
+  @2000 tap circle
+  @2100 tap cross
+  @2200 tap start
+  @2300 tap circle
+  @2400 tap cross
+  @2500 tap start
+  @2600 tap circle
+  @2700 tap cross
+  @2800 tap start
+  @2900 tap circle
+  mark "leave the option screen"
+  @3000 tap circle
+  @3080 tap circle
+  @3160 tap down
+  @3190 tap down
+  @3220 tap down
+  @3250 tap down
+  @3280 tap down
+  @3310 tap down
+  @3360 tap cross
+  mark "confirm onwards"
+  @3440 tap cross
+  @3520 tap cross
+  @3600 tap cross
+  @3680 tap cross
+  @3760 tap cross
+  @3840 tap cross
+  @3920 tap cross
+  @4000 tap circle
+  @4080 tap cross
+  @4160 tap cross
+  @4240 tap cross
+  @4320 tap cross
+  @4400 tap cross
+  @4480 tap cross
+  @4560 tap cross
+  @4640 tap cross
+  @4720 tap cross
+  @4800 tap cross
+  @4880 tap cross
+  @4960 tap cross
+  @5040 tap cross
+  @5120 tap cross
+  @5200 tap cross
+  @5280 tap cross
+  @5360 tap cross
+  @5440 tap cross
+  @5520 tap cross
+  @5600 tap cross
+  @5680 tap cross
+  @5760 tap cross
+  @5840 tap cross
+  @5920 tap cross
+  @6000 tap circle
+  @6080 tap cross
+  @6160 tap cross
+  @6240 tap cross
+  @6320 tap cross
+  @6400 tap cross
+  @6480 tap cross
+  @6560 tap cross
+  @6640 tap cross
+  @6720 tap cross
+  @6800 tap cross
+  @6880 tap cross
+  @6960 tap cross
+  @7040 tap cross
+  @7120 tap cross
+  @7200 tap cross
+  @7280 tap cross
+  @7360 tap cross
+  mark "right stick: 127, 64, 32, 16 right; 127 left"
+  @7600 analog 128 128 255 128
+  @7700 analog 128 128 128 128
+  @7800 analog 128 128 192 128
+  @7900 analog 128 128 128 128
+  @8000 analog 128 128 160 128
+  @8100 analog 128 128 128 128
+  @8200 analog 128 128 144 128
+  @8300 analog 128 128 128 128
+  @8400 analog 128 128 1 128
+  @8500 analog 128 128 128 128
+  mark "mouse: 30 counts a poll for 40 polls"
+  @8600 mouse 30 0
+  @8601 mouse 30 0
+  @8602 mouse 30 0
+  @8603 mouse 30 0
+  @8604 mouse 30 0
+  @8605 mouse 30 0
+  @8606 mouse 30 0
+  @8607 mouse 30 0
+  @8608 mouse 30 0
+  @8609 mouse 30 0
+  @8610 mouse 30 0
+  @8611 mouse 30 0
+  @8612 mouse 30 0
+  @8613 mouse 30 0
+  @8614 mouse 30 0
+  @8615 mouse 30 0
+  @8616 mouse 30 0
+  @8617 mouse 30 0
+  @8618 mouse 30 0
+  @8619 mouse 30 0
+  @8620 mouse 30 0
+  @8621 mouse 30 0
+  @8622 mouse 30 0
+  @8623 mouse 30 0
+  @8624 mouse 30 0
+  @8625 mouse 30 0
+  @8626 mouse 30 0
+  @8627 mouse 30 0
+  @8628 mouse 30 0
+  @8629 mouse 30 0
+  @8630 mouse 30 0
+  @8631 mouse 30 0
+  @8632 mouse 30 0
+  @8633 mouse 30 0
+  @8634 mouse 30 0
+  @8635 mouse 30 0
+  @8636 mouse 30 0
+  @8637 mouse 30 0
+  @8638 mouse 30 0
+  @8639 mouse 30 0
+  @8800 stop
