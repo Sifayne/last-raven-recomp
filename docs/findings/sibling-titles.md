@@ -657,6 +657,70 @@ the game's own; at half it holds 83 frames of 140. The classic path is
 untouched: the module image at poll 7,700 is still byte-identical to the
 snapshot from before any of this work.
 
+## The garage previews: a depth write through a disabled test (10 Sep)
+
+Sif reported the AC and part previews missing from AC3P's garage and assembly
+screens, with things drawing in front of the mech, and sent PPSSPP shots
+beside ours. The first diagnosis here was wrong: it blamed the adaptive aspect,
+on the reasoning that the settings file is shared between titles and the wide
+mapping displaces inset cameras. That is a real hazard and is now gated, but
+it was not this. Sif recorded a route into the garage
+(`scenarios/ac3p/garage.pad`, 568 polls from the title screen through the save
+to assembly), and replaying it through the **software** rasterizer at the
+**original** aspect reproduced the missing mech exactly. No wide mapping, no
+GL.
+
+What settled it was Sif's own observation that a foot was visible at the very
+bottom of the panel: the mech was being drawn and something was in front of it.
+`PSPRECOMP_PIXWATCH` on a foot pixel and on one two rows above tells the whole
+story. Both take the panel background at depths 7,803 to 11,938. Two rows up, a
+translucent tint quad then arrives at depth **65,000**, essentially the near
+plane, and every mech triangle after it is rejected by the GEQUAL test. On the
+foot the quad never arrives -- it spans x 169..477, y 24..248 and the foot sits
+below its bottom edge -- and the mech draws normally.
+
+The draw log gives that quad's state as `z 0/7/1`: **depth test disabled,
+depth write enabled**. Both backends honoured the write anyway. In OpenGL,
+disabling the depth test also disables depth writes whatever the mask says, and
+the hardware agrees -- PPSSPP renders the mech. The reason the old code kept
+the write alive is in a comment in `host/render_gl.c`: clear-mode draws had to
+establish the depth later geometry tests against, and `src/hle/ge.c` encoded a
+clear as a *disabled* test with the clear depth as its write. Protecting that
+one case let every ordinary draw with the test off stamp the depth buffer.
+
+The fix is three coordinated edits:
+
+- `src/render.c` writes depth only when the test is enabled.
+- `src/hle/ge.c` hands clear mode an **enabled** ALWAYS test rather than a
+  disabled one, so clears still establish depth.
+- `host/render_gl.c` enables `GL_DEPTH_TEST` from the game's own test enable
+  rather than from "test or write".
+
+Three fixtures primed their depth buffers with the same disabled-test shorthand
+(`host/render_tests.c`'s `seed()`, two seeds in `host/resolution_tests.c`) and
+now use an enabled ALWAYS test, which is what they meant. That the shorthand
+appeared in fixtures as a convenience, rather than as an assertion about the
+hardware, is itself evidence it was not a deliberate specification.
+
+After the fix the garage and assembly previews render, the head part preview
+with them, and the pixel that was rejected against 65,000 accepts the mech at
+16,370. Everything else holds:
+
+| suite | result |
+|---|---|
+| toolkit tests | 24 / 24 |
+| renderer fixtures, software | 430 / 430 |
+| renderer fixtures, GL | 430 / 430 |
+| resolution fixtures | 40 / 40 |
+| assembly preview fixtures | 46 / 46, in each of eight combinations |
+| settings | pass |
+| Last Raven garage replay | 928 lists, 11,012,854 commands, unchanged |
+| AC3P classic walk | module image byte-identical |
+
+Frames: `reports/ac3p/garage-software-native.png` (before),
+`reports/ac3p/garage-foot-visible.png` (the clue),
+`reports/ac3p/garage-after-depth-fix.png` (after).
+
 ## Commands
 
 ```bash

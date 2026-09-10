@@ -78,7 +78,9 @@ static void detail_and_views(void) {
     target(A);
     untextured();
     blend(1);
-    be->set_depth(0, 1, 1);
+    /* Prime colour, alpha and depth history: an enabled test that always
+     * passes. A disabled test writes no depth. */
+    be->set_depth(1, 1, 1);
     rect(0, 0, 512, 272, 0x6D332211, 10000, 0);
     /* A quarter PSP-pixel stripe misses all 1x sample centres, but contains
      * a 2x sample. The second stripe's float edges round to the same 12.4
@@ -215,7 +217,7 @@ static void resize_history(void) {
     target(B);
     untextured();
     blend(1);
-    be->set_depth(0, 1, 1);
+    be->set_depth(1, 1, 1);          /* as above: a disabled test writes no depth */
     rect(0, 0, 512, 272, 0x5A332211, 10000, 0);
     be->finish();
     const int sizes[][2] = {{1365, 767},  {2560, 1440}, {3440, 1440},

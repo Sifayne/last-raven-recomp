@@ -31,7 +31,9 @@ static void rect(int x, int y, int w, int h, uint32_t rgba, float z) {
 }
 static void seed(int x, int y, unsigned a) {
     bs = (psp_blend_state){.write_colour=1, .write_alpha=1};
-    be->set_depth(0, 1, 1);
+    /* Prime the depth buffer: an enabled test that always passes. A *disabled*
+     * test writes no depth, so this cannot be set_depth(0, 1, 1). */
+    be->set_depth(1, 1, 1);
     rect(x, y, 1, 1, (a << 24) | 0x302010, 10000);
     bs = (psp_blend_state){.write_colour=1, .stencil_test=1,
         .stencil_func=1, .stencil_ref=0x61, .stencil_mask=255};

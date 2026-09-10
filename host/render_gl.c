@@ -2779,13 +2779,19 @@ static void apply_state(void) {
         p_glStencilMask(0);
     }
     /* In OpenGL, disabling GL_DEPTH_TEST also disables depth-buffer writes,
-     * regardless of glDepthMask.  The GE treats those controls separately:
-     * clear-mode draws disable the comparison but still write the clear depth.
-     * Keep the GL test enabled with ALWAYS whenever a depth write is requested
-     * so those clears actually establish the value later geometry tests. */
-    if (g.z_test || g.z_write) {
+     * regardless of glDepthMask, and the hardware agrees: ZMSK on its own does
+     * not write depth through a disabled test. An earlier revision kept the GL
+     * test alive with ALWAYS whenever a write was asked for, so that clear-mode
+     * draws -- which the GE layer used to encode as a *disabled* test -- would
+     * still establish the depth later geometry tests against. That also let
+     * every ordinary draw with the test off stamp the depth buffer: in AC3
+     * Portable's garage the panel's translucent tint is drawn that way, at the
+     * near plane, and it occluded the AC and part previews entirely (only the
+     * foot below its bottom edge survived). Clear mode now arrives as an
+     * enabled ALWAYS test instead, so both cases are right. */
+    if (g.z_test) {
         p_glEnable(GL_DEPTH_TEST);
-        p_glDepthFunc(g.z_test ? gl_compare(g.z_func) : GL_ALWAYS);
+        p_glDepthFunc(gl_compare(g.z_func));
     } else {
         p_glDisable(GL_DEPTH_TEST);
     }
