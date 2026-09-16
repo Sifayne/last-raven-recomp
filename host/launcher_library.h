@@ -40,6 +40,12 @@ static int library_load(launcher *a,int imported) {
     free(a->library_buffer); a->library_buffer=data;
     memcpy(a->games,entries,(size_t)count*sizeof entries[0]); a->game_count=count;
     if (count) select_game(a,at,!imported);
+    else {
+        /* The launch targets pointed into the buffer just freed. A valid but
+         * empty library leaves nothing to launch, so say so rather than keep
+         * dangling strings that draw() and launch_game() would read. */
+        a->game=0; a->boot=NULL; a->module=NULL; a->iso=NULL;
+    }
     return 0;
 invalid:
     free(data); snprintf(a->status,sizeof a->status,"Cannot read game library. Installed files have not been changed."); return -1;

@@ -222,6 +222,13 @@ int main(int argc,char **argv) {
     import_cancel(&a);
     for (int i=0;i<200 && a.import_pid;i++) { SDL_Delay(5); import_poll(&a); }
     assert(!a.import_pid && strstr(a.status,"canceled"));
+    /* A valid library with no entries: the previous targets pointed into the
+     * buffer the reload frees, so they must be cleared, not kept; the screen
+     * must still draw with nothing to launch. */
+    f=fopen(library,"wb"); assert(f); fprintf(f,"LRLIB1%cacsl%c",0,0); fclose(f);
+    assert(!library_load(&a,0) && a.game_count==0 && a.game==0);
+    assert(!a.boot && !a.module && !a.iso && !strcmp(game_title(&a),"Last Raven"));
+    shot(&a,argv[1],"no-games");
     free(a.library_buffer); a.library_buffer=NULL; a.library=a.importer=NULL;
     unlink(library); unlink(importer); unlink(iso_fixture); rmdir(browser);
     a.game_count=0;
