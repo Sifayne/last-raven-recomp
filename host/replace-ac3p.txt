@@ -51,3 +51,9 @@
 # the pace the AC actually walks at; see host/ac3_controls.h. Interior entries:
 # thirty-four branch-target thunks.
 000DD29C
+
+# Optional higher-FPS mission loop, pacer, skeleton builder and camera update.
+000E0F10
+001CD1C4
+00104EEC
+000E07F0

@@ -73,6 +73,7 @@
 #include "settings.h"
 #include "present.h"
 #include "stick.h"      /* INPUT_*, stick2, input_tune(), stick_radial(), stick_look(), hysteresis() */
+#include "fps_aclr.h"
 
 /* ---- configuration ------------------------------------------------------ */
 

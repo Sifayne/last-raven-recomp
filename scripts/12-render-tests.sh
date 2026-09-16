@@ -20,7 +20,7 @@ fi
 cc -O2 -Wall -Wextra -std=gnu11 "${SDL_FLAGS[@]}" \
     -I "$ROOT/tools/psprecomp/include" "${SOURCES[@]}" \
     "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread \
-    "${SDL_LIBS[@]}" $HOST_LIBS -o "$OUT/render-tests"
+    "${SDL_LIBS[@]}" "${HOST_LINK_FLAGS[@]}" -o "$OUT/render-tests"
 "$OUT/render-tests" software
 if [ "${1:-}" != --software ]; then
     [ "${#SDL_LIBS[@]}" != 0 ] || die "GL checks require SDL2 (or use --software)"

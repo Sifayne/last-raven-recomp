@@ -34,6 +34,7 @@ rm -rf "${GEN:?}"/*
 # for the replacements source to define. An empty list changes nothing.
 "$AR" emit "$ELF" "$GEN" "$PREFIX" --replace @"$REPLACE_LIST" \
     | tee "$REPORTS/04-emit.txt"
+python3 "$ROOT/scripts/fps-loop.py" "$PREFIX" "$GEN"
 echo
 info "$(cat "$GEN"/*.c | wc -l) lines of C in $(ls "$GEN" | wc -l) files, $(du -sh "$GEN" | cut -f1)"
 

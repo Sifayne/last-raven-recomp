@@ -83,6 +83,23 @@ int main(int argc,char **argv) {
     setenv("PSPRECOMP_DISPLAY","primary",1);
     press(&a,SDLK_LEFT); refresh(&a);
     assert(editing(&a)->number[LR_DISPLAY]==2 && a.effective.number[LR_DISPLAY]==-1);
+    /* Higher FPS and its cap are saved rows, with common rates and custom
+     * integer entry. Arrow adjustments from a custom cap use adjacent rates. */
+    a.focus=a.selected_row=LR_HIGH_FPS;
+    press(&a,SDLK_RIGHT); assert(editing(&a)->number[LR_HIGH_FPS]==1);
+    a.focus=a.selected_row=LR_FPS_CAP;
+    press(&a,SDLK_RETURN); assert(a.modal==MODAL_VALUE);
+    type(&a,"175"); press(&a,SDLK_RETURN);
+    assert(a.modal==MODAL_NONE && editing(&a)->number[LR_FPS_CAP]==175);
+    press(&a,SDLK_LEFT); assert(editing(&a)->number[LR_FPS_CAP]==165);
+    press(&a,SDLK_RIGHT); assert(editing(&a)->number[LR_FPS_CAP]==240);
+    press(&a,SDLK_RETURN); type(&a,"unlimited"); press(&a,SDLK_RETURN);
+    assert(editing(&a)->number[LR_FPS_CAP]==-1);
+    a.scroll=2; shot(&a,argv[1],"higher-fps");
+    setenv("PSPRECOMP_FPS_CAP","60",1);
+    press(&a,SDLK_LEFT); refresh(&a);
+    assert(editing(&a)->number[LR_FPS_CAP]==-1 && a.effective.number[LR_FPS_CAP]==60);
+    unsetenv("PSPRECOMP_FPS_CAP");
     /* Mouse navigation and adjustment. */
     click(&a,500,166); assert(a.page==1); draw(&a);
     a.focus=LR_MOUSE_SENS; press(&a,SDLK_RIGHT);
@@ -168,6 +185,45 @@ int main(int argc,char **argv) {
     assert(!a.child && !a.running);
     contents[0]=0; f=fopen(arguments,"r"); assert(f); fread(contents,1,sizeof contents-1,f); fclose(f);
     assert(strstr(contents,module) && strstr(contents,"--preset\nDesk & controller\n--window\n"));
+    /* Imported games keep release order, retain the saved selection, and
+     * reject a truncated library without losing the current launch targets. */
+    char library[4096], importer[4096], browser[4096], iso_fixture[4096];
+    snprintf(library,sizeof library,"%s/library.bin",argv[1]);
+    snprintf(importer,sizeof importer,"%s/fake importer",argv[1]);
+    snprintf(browser,sizeof browser,"%s/disc folder",argv[1]);
+    assert(!mkdir(browser,0700));
+    assert(snprintf(iso_fixture,sizeof iso_fixture,"%s/a disc & spaces.iso",browser)<(int)sizeof iso_fixture);
+    f=fopen(iso_fixture,"w"); assert(f); fclose(f);
+    f=fopen(library,"wb"); assert(f);
+    const char *slugs[]={"aclr","ac3p","acsl"};
+    const char *titles[]={"Armored Core: Last Raven","Armored Core 3 Portable","Armored Core: Silent Line"};
+    fprintf(f,"LRLIB1%cacsl%c",0,0);
+    for (int i=0;i<3;i++) fprintf(f,"%s%c%s%c%s%c%s%c%s%c",slugs[i],0,titles[i],0,child,0,module,0,iso_fixture,0);
+    fclose(f); a.library=library; a.importer=importer; a.running=1;
+    assert(!library_load(&a,0));
+    assert(a.game_count==3 && a.game==0 && !strcmp(a.games[0].slug,"ac3p"));
+    assert(!strcmp(a.games[1].slug,"acsl") && !strcmp(a.games[2].slug,"aclr"));
+    shot(&a,argv[1],"release-order");
+    browser_scan(&a,browser); browser_open(&a);
+    assert(a.modal==MODAL_BROWSE && a.file_count==1 && !a.files[0].directory);
+    shot(&a,argv[1],"add-game");
+    f=fopen(importer,"w"); assert(f);
+    fputs("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$LR_LAUNCH_TEST_ARGS\"\necho Ready\n",f);
+    fclose(f); assert(!chmod(importer,0700));
+    press(&a,SDLK_RETURN); assert(a.import_pid>0 && a.modal==MODAL_PREPARING);
+    for (int i=0;i<200 && a.import_pid;i++) { SDL_Delay(5); import_poll(&a); }
+    assert(!a.import_pid && a.modal==MODAL_NONE && a.game==1 && !strcmp(a.book.game,"acsl"));
+    contents[0]=0; f=fopen(arguments,"r"); assert(f); fread(contents,1,sizeof contents-1,f); fclose(f);
+    assert(strstr(contents,"import\n") && strstr(contents,iso_fixture));
+    f=fopen(library,"wb"); assert(f); fputs("truncated",f); fclose(f);
+    assert(library_load(&a,0)<0 && a.game_count==3 && !strcmp(a.games[a.game].slug,"acsl"));
+    f=fopen(importer,"w"); assert(f); fputs("#!/bin/sh\nsleep 30\n",f); fclose(f);
+    import_start(&a,iso_fixture); assert(a.import_pid>0);
+    import_cancel(&a);
+    for (int i=0;i<200 && a.import_pid;i++) { SDL_Delay(5); import_poll(&a); }
+    assert(!a.import_pid && strstr(a.status,"canceled"));
+    free(a.library_buffer); a.library_buffer=NULL; a.library=a.importer=NULL;
+    unlink(library); unlink(importer); unlink(iso_fixture); rmdir(browser);
     a.game_count=0;
     unlink(child); unlink(module); unlink(arguments);
     TTF_CloseFont(a.body); TTF_CloseFont(a.small); TTF_CloseFont(a.heading);

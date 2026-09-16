@@ -40,3 +40,9 @@
 # The animation updater, psp_func_00099E38(anim object), AC3P's 000DD29C (0.90
 # by instruction sequence); see host/ac3_controls.h.
 00099E38
+
+# Optional higher-FPS mission loop, pacer, skeleton builder and camera update.
+000914B0
+001EB608
+000023C4
+0009039C

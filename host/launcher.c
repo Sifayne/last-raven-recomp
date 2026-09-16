@@ -4,20 +4,31 @@
 #include "psprecomp/hle.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <ctype.h>
 #include <errno.h>
+#include <dirent.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-enum { UI_W=1120, UI_H=800, VISIBLE_ROWS=6 };
+enum { UI_W=1120, UI_H=800, VISIBLE_ROWS=6, MAX_GAMES=8, MAX_FILES=1024 };
 enum { NEW=100, DUPLICATE, RENAME, DELETE, RESET, SAVE, PLAY, CANCEL,
-       MODAL_OK, MODAL_CANCEL, PRESET_BASE=200, PAGE_BASE=300 };
+       MODAL_OK, MODAL_CANCEL, ABOUT, ADD_GAME, PRESET_BASE=200, PAGE_BASE=300, GAME_BASE=700,
+       BROWSER_UP=900, BROWSER_HOME, BROWSER_DRIVES, BROWSER_OPEN, BROWSER_CANCEL, FILE_BASE=1000 };
 enum { MODAL_NONE, MODAL_NEW, MODAL_DUPLICATE, MODAL_RENAME, MODAL_VALUE,
-       MODAL_DELETE, MODAL_RESET, MODAL_CANCEL_DIRTY };
+       MODAL_DELETE, MODAL_RESET, MODAL_CANCEL_DIRTY, MODAL_BROWSE, MODAL_PREPARING };
 typedef struct { SDL_Rect rect; int id; } hit;
+/* One built title, as scripts/15-settings.sh found it: the profile slug and
+ * name, the boot host to exec, its module, and its disc (NULL or empty for
+ * none). The strings point into argv. */
+typedef struct { const char *slug, *title, *boot, *module, *iso; } game_entry;
+typedef struct { char name[256]; int directory; } browser_file;
 typedef struct {
     SDL_Window *window;
     SDL_Renderer *renderer;
@@ -27,6 +38,13 @@ typedef struct {
     lr_settings effective;
     char path[4096];
     const char *boot, *module, *iso;
+    game_entry games[MAX_GAMES]; int game_count, game;
+    const char *library,*importer;
+    char *library_buffer;
+    browser_file files[MAX_FILES]; int file_count,file_selected,file_scroll;
+    char browser_path[4096],browser_error[256];
+    pid_t import_pid; int import_fd,import_cancelled,quit_after_import;
+    char import_line[1024],import_status[1024]; size_t import_used;
     int page, scroll, selected_row, focus, dirty, running, valid, movie_available;
     int load_failed; /* A malformed file must never be overwritten by defaults. */
     char status[LR_ERROR_SIZE], validation[LR_ERROR_SIZE];
@@ -123,12 +141,54 @@ static void close_modal(launcher *a) {
     SDL_StopTextInput(); a->modal=MODAL_NONE; a->focus=a->selected_row;
 }
 
+/* Titles. Each --game names one profile the scripts found built. The tabs
+ * switch which boot host, module and disc a launch uses, and the chosen slug
+ * is saved beside the presets so the next start opens on the same game.
+ * Without --game this is the single-title launcher it always was. */
+static const char *game_title(const launcher *a) {
+    return a->game_count?a->games[a->game].title:"Last Raven";
+}
+static void select_game(launcher *a,int at,int quiet) {
+    if (at<0 || at>=a->game_count) return;
+    const game_entry *g=&a->games[at];
+    a->game=at; a->boot=g->boot && *g->boot?g->boot:NULL; a->module=g->module; a->iso=g->iso && *g->iso?g->iso:NULL;
+    if (strcmp(a->book.game,g->slug)) {
+        snprintf(a->book.game,sizeof a->book.game,"%s",g->slug);
+        if (!quiet) { a->dirty=1; snprintf(a->status,sizeof a->status,"Game: %s",g->title); refresh(a); }
+    }
+    if (a->window) {
+        char title[192]; snprintf(title,sizeof title,"%s - Settings",g->title);
+        SDL_SetWindowTitle(a->window,title);
+    }
+}
+
+#include "launcher_library.h"
+
 static void draw(launcher *a) {
     refresh(a); a->hit_count=0;
     box(a,(SDL_Rect){0,0,UI_W,UI_H},BG);
     label(a,a->small,28,22,800,"ARMORED CORE  /  PC SETTINGS",ACCENT);
-    label(a,a->heading,26,48,700,"LAST RAVEN",TEXT);
-    label(a,a->body,28,94,1000,"Choose a setup. Make it yours. Launch when you're ready.",MUTED);
+    char heading[LR_VALUE_SIZE]; snprintf(heading,sizeof heading,"%s",game_title(a));
+    for (char *c=heading;*c;c++) *c=(char)toupper((unsigned char)*c);
+    label(a,a->heading,26,48,a->importer?770:930,heading,TEXT);
+    if (a->importer) button(a,ADD_GAME,822,44,138,40,"Add Game",1);
+    button(a,ABOUT,972,44,120,40,"About",0);
+    if (!a->game_count) label(a,a->body,28,94,1000,a->boot && a->module?
+        "Choose a setup. Make it yours. Launch when you're ready.":
+        a->importer?"Choose Add Game to select your PSP ISO and prepare it for play.":
+        "No game installed. You can set up and save your presets.",MUTED);
+    /* One tab per built title, where the tagline goes otherwise. */
+    int tab_w=a->game_count?(936-8*(a->game_count-1))/a->game_count:0;
+    if (tab_w>300) tab_w=300;
+    for (int k=0;k<a->game_count;k++) {
+        SDL_Rect r={28+k*(tab_w+8),90,tab_w,40}; box(a,r,ROW);
+        outline(a,r,a->focus==GAME_BASE+k?ACCENT:BORDER);
+        if (k==a->game) box(a,(SDL_Rect){r.x,r.y+37,r.w,3},ACCENT);
+        SDL_RenderSetClipRect(a->renderer,&r);
+        label(a,a->body,r.x+12,r.y+8,2000,a->games[k].title,k==a->game?TEXT:MUTED);
+        SDL_RenderSetClipRect(a->renderer,NULL);
+        add_hit(a,GAME_BASE+k,r);
+    }
     box(a,(SDL_Rect){28,144,242,544},PANEL);
     label(a,a->small,44,160,210,"SAVED PRESETS",MUTED);
     int start=a->book.selected>7?a->book.selected-7:0;
@@ -199,6 +259,8 @@ static void draw(launcher *a) {
         }
         label(a,a->small,310,594,762,info,MUTED);
     }
+    if (a->page==1)
+        label(a,a->small,310,664,762,"Quit game: hold View + Menu (Select + Start) 2s  |  Ctrl+Shift+Q",MUTED);
     const char *status=a->load_failed?a->status:!a->valid?a->validation:*a->status?a->status:
                        a->dirty?"Unsaved changes":"Presets are ready. Changes take effect when you launch.";
     SDL_Rect status_clip={28,695,1064,30}; SDL_RenderSetClipRect(a->renderer,&status_clip);
@@ -207,9 +269,12 @@ static void draw(launcher *a) {
     button(a,RESET,28,737,155,43,"Reset preset",0);
     button(a,CANCEL,700,737,110,43,"Cancel",0);
     button(a,SAVE,822,737,100,43,"Save",0);
-    button(a,PLAY,934,737,158,43,"Save & Play",1);
-    label(a,a->small,205,745,465,"Tab: focus   Arrows: adjust   Enter: edit\nController: D-pad / A / B   Bumpers: pages",MUTED);
+    if (a->boot && a->module) button(a,PLAY,934,737,158,43,"Save & Play",1);
+    else if (a->game_count && a->importer) button(a,PLAY,934,737,158,43,"Prepare game",1);
+    else label(a,a->small,943,750,149,"No game installed",MUTED);
+    label(a,a->small,205,737,465,"Tab: focus   Arrows: adjust   Enter: edit\nController: D-pad / A / B   Bumpers: pages\nQuit game: hold View + Menu 2s / Ctrl+Shift+Q",MUTED);
 
+    if (a->modal==MODAL_BROWSE || a->modal==MODAL_PREPARING) { library_modal_draw(a); return; }
     if (a->modal) {
         SDL_SetRenderDrawBlendMode(a->renderer,SDL_BLENDMODE_BLEND);
         box(a,(SDL_Rect){0,0,UI_W,UI_H},(SDL_Color){0,0,0,190});
@@ -263,7 +328,14 @@ static void adjust(launcher *a,int id,int direction) {
         if (s->number[id] && !lr_settings_set(s,id,"0",LR_PRESET,a->status)) changed(a);
         return;
     }
-    if (id==LR_DISPLAY) {
+    if (id==LR_FPS_CAP) {
+        const int rates[]={30,60,90,120,144,165,240,360,1000,-1};
+        int pick=s->number[id]<0?9:0;
+        while (pick<8 && s->number[id]>rates[pick]) pick++;
+        if (s->number[id]==rates[pick] || direction<0) pick=(pick+direction+10)%10;
+        if (rates[pick]<0) snprintf(value,sizeof value,"unlimited");
+        else snprintf(value,sizeof value,"%d",rates[pick]);
+    } else if (id==LR_DISPLAY) {
         int count=SDL_GetNumVideoDisplays();
         if (count<0) count=0;
         int pick=(int)s->number[id];
@@ -327,7 +399,12 @@ static void modal_accept(launcher *a) {
 static void launch_game(launcher *a) {
     refresh(a);
     if (!a->valid || a->load_failed) return;
-    if (!a->boot || !a->module) { strcpy(a->status,"Launch needs --boot EXECUTABLE and --module ELF. Settings can still be saved."); return; }
+    if (!a->boot || !a->module) {
+        if (a->importer && a->iso && !access(a->iso,R_OK)) import_start(a,a->iso);
+        else if (a->importer) browser_open(a);
+        else strcpy(a->status,"No game installed. You can still save your presets.");
+        return;
+    }
     if (access(a->boot,X_OK) || access(a->module,R_OK) || (a->iso && access(a->iso,R_OK))) {
         snprintf(a->status,sizeof a->status,"Cannot access game executable, module or disc: %s",strerror(errno)); return;
     }
@@ -349,7 +426,14 @@ static void launch_game(launcher *a) {
         /* Only async-signal-safe operations between fork and exec: SDL may
          * have other threads with libc locks held at the fork boundary. */
         const char message[]="Could not execute the game host. Check its path and permissions.\n";
-        write(STDERR_FILENO,message,sizeof message-1); _exit(127);
+        size_t sent=0;
+        while (sent<sizeof message-1) {
+            ssize_t n=write(STDERR_FILENO,message+sent,sizeof message-1-sent);
+            if (n>0) sent+=(size_t)n;
+            else if (n<0 && errno==EINTR) continue;
+            else break;
+        }
+        _exit(127);
     }
     close(pipes[1]); fcntl(pipes[0],F_SETFL,O_NONBLOCK);
     a->child=child; a->child_error_fd=pipes[0]; a->child_error_len=0; a->child_error[0]=0;
@@ -357,6 +441,8 @@ static void launch_game(launcher *a) {
 }
 
 static void activate(launcher *a,int id) {
+    if (a->modal==MODAL_BROWSE) { browser_activate(a,id); return; }
+    if (a->modal==MODAL_PREPARING) { if (id==BROWSER_CANCEL || id==CANCEL) import_cancel(a); return; }
     if (a->modal) {
         if (id==MODAL_OK) modal_accept(a);
         else if (id==MODAL_CANCEL) close_modal(a);
@@ -372,6 +458,7 @@ static void activate(launcher *a,int id) {
         if (a->book.selected!=id-PRESET_BASE) { a->book.selected=id-PRESET_BASE; changed(a); }
         a->focus=id; return;
     }
+    if (id>=GAME_BASE && id<GAME_BASE+a->game_count) { select_game(a,id-GAME_BASE,0); a->focus=id; return; }
     if (id>=0 && id<LR_OPTION_COUNT) {
         a->selected_row=a->focus=id;
         if (overridden(id) || (unavailable(a,id) && !editing(a)->number[id])) return;
@@ -392,6 +479,18 @@ static void activate(launcher *a,int id) {
     case RESET: open_modal(a,MODAL_RESET,NULL); break;
     case SAVE: save(a); break;
     case PLAY: launch_game(a); break;
+    case ADD_GAME: browser_open(a); break;
+    case ABOUT:
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION,"About",
+            "Armored Core PC runtime and launcher: MIT license.\n\n"
+            "Audio uses FFmpeg libraries, copyright the FFmpeg contributors,\n"
+            "under the GNU LGPL version 2.1 or later. https://ffmpeg.org/\n\n"
+            "See licenses/ffmpeg/ for the license and notices, and the\n"
+            "source/ package alongside the release for matching FFmpeg\n"
+            "source and build instructions. Compatible modified shared\n"
+            "libraries may be substituted.\n\n"
+            "Original game code and assets belong to their rights holders.",a->window);
+        break;
     case CANCEL:
         if (a->dirty) open_modal(a,MODAL_CANCEL_DIRTY,NULL); else a->running=0;
         break;
@@ -403,17 +502,36 @@ static void focus_next(launcher *a,int direction) {
     if (a->modal) { a->focus=a->focus==MODAL_OK?MODAL_CANCEL:MODAL_OK; return; }
     /* Include every option, including offscreen rows, so navigation can
      * scroll them into view. Small +/- mouse targets are not tab stops. */
+    for (int i=0;i<a->game_count;i++) ids[n++]=GAME_BASE+i;
+    if (a->importer) ids[n++]=ADD_GAME;
     for (int i=0;i<a->book.count;i++) ids[n++]=PRESET_BASE+i;
     ids[n++]=NEW; ids[n++]=DUPLICATE; ids[n++]=RENAME; ids[n++]=DELETE;
     for (int i=0;i<3;i++) ids[n++]=PAGE_BASE+i;
     int option_ids[LR_OPTION_COUNT],count=rows(a,option_ids);
     for (int i=0;i<count;i++) ids[n++]=option_ids[i];
-    ids[n++]=RESET; ids[n++]=CANCEL; ids[n++]=SAVE; ids[n++]=PLAY;
+    ids[n++]=RESET; ids[n++]=CANCEL; ids[n++]=SAVE;
+    if ((a->boot && a->module) || (a->game_count && a->importer)) ids[n++]=PLAY;
+    ids[n++]=ABOUT;
     int at=0; for (int i=0;i<n;i++) if (ids[i]==a->focus) at=i;
     a->focus=ids[(at+direction+n)%n]; show_row(a,a->focus);
 }
 
 static void key(launcher *a,SDL_Keycode k,SDL_Keymod mod) {
+    if (a->modal==MODAL_PREPARING) { if (k==SDLK_ESCAPE || k==SDLK_RETURN) import_cancel(a); return; }
+    if (a->modal==MODAL_BROWSE) {
+        if (k==SDLK_ESCAPE) close_modal(a);
+        else if (k==SDLK_UP || k==SDLK_DOWN) browser_move(a,k==SDLK_UP?-1:1);
+        else if (k==SDLK_PAGEUP || k==SDLK_PAGEDOWN) browser_move(a,k==SDLK_PAGEUP?-10:10);
+        else if (k==SDLK_LEFT || k==SDLK_BACKSPACE) browser_up(a);
+        else if (k==SDLK_RETURN || k==SDLK_KP_ENTER || k==SDLK_RIGHT) browser_enter(a);
+        else if (k==SDLK_v && (mod & KMOD_CTRL)) {
+            char *path=SDL_GetClipboardText(); struct stat st;
+            if (path && !stat(path,&st)) { if (S_ISDIR(st.st_mode)) browser_scan(a,path); else import_start(a,path); }
+            else snprintf(a->browser_error,sizeof a->browser_error,"The pasted path could not be opened.");
+            SDL_free(path);
+        }
+        return;
+    }
     if (k==SDLK_ESCAPE) { if (a->modal) close_modal(a); else activate(a,CANCEL); return; }
     if (k==SDLK_TAB) { focus_next(a,(mod & KMOD_SHIFT)?-1:1); return; }
     if (k==SDLK_RETURN || k==SDLK_KP_ENTER) { activate(a,a->focus); return; }
@@ -430,8 +548,12 @@ static void key(launcher *a,SDL_Keycode k,SDL_Keymod mod) {
     }
     if (k==SDLK_UP || k==SDLK_DOWN) { focus_next(a,k==SDLK_UP?-1:1); return; }
     if (k==SDLK_LEFT || k==SDLK_RIGHT) {
-        if (a->focus>=0 && a->focus<LR_OPTION_COUNT) adjust(a,a->focus,k==SDLK_LEFT?-1:1);
-        else focus_next(a,k==SDLK_LEFT?-1:1);
+        int d=k==SDLK_LEFT?-1:1;
+        if (a->focus>=0 && a->focus<LR_OPTION_COUNT) adjust(a,a->focus,d);
+        else if (a->game_count && a->focus>=GAME_BASE && a->focus<GAME_BASE+a->game_count) {
+            /* A focused tab cycles the titles, so a controller can pick one. */
+            select_game(a,(a->game+d+a->game_count)%a->game_count,0); a->focus=GAME_BASE+a->game;
+        } else focus_next(a,d);
     }
 }
 
@@ -444,7 +566,12 @@ static void controller_open(launcher *a) {
 static void event(launcher *a,const SDL_Event *e) {
     if (e->type==SDL_CONTROLLERDEVICEADDED || e->type==SDL_CONTROLLERDEVICEREMOVED) controller_open(a);
     if (a->child) return;
-    if (e->type==SDL_QUIT) { activate(a,CANCEL); return; }
+    if (e->type==SDL_QUIT) {
+        if (a->import_pid) { a->quit_after_import=1; import_cancel(a); }
+        else { if (a->modal==MODAL_BROWSE) close_modal(a); activate(a,CANCEL); }
+        return;
+    }
+    if (e->type==SDL_DROPFILE) { import_start(a,e->drop.file); SDL_free(e->drop.file); return; }
     if (e->type==SDL_KEYDOWN) key(a,e->key.keysym.sym,(SDL_Keymod)e->key.keysym.mod);
     if (e->type==SDL_TEXTINPUT && a->modal && a->modal<=MODAL_VALUE) {
         if (a->select_text) a->edit[0]=0;
@@ -459,6 +586,8 @@ static void event(launcher *a,const SDL_Event *e) {
             if (SDL_PointInRect(&p,&a->hits[i].rect)) { a->focus=a->hits[i].id; activate(a,a->focus); break; }
         }
     }
+    if (e->type==SDL_MOUSEWHEEL && a->modal==MODAL_BROWSE)
+        browser_move(a,(e->wheel.direction==SDL_MOUSEWHEEL_FLIPPED?1:-1)*e->wheel.y);
     if (e->type==SDL_MOUSEWHEEL && !a->modal) {
         int x,y; SDL_GetMouseState(&x,&y);
         float lx,ly; SDL_RenderWindowToLogical(a->renderer,x,y,&lx,&ly);
@@ -480,6 +609,7 @@ static void event(launcher *a,const SDL_Event *e) {
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: key(a,SDLK_RIGHT,0); break;
         case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
         case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+            if (a->modal==MODAL_BROWSE) browser_move(a,e->cbutton.button==SDL_CONTROLLER_BUTTON_LEFTSHOULDER?-10:10);
             if (!a->modal) activate(a,PAGE_BASE+(a->page+(e->cbutton.button==SDL_CONTROLLER_BUTTON_LEFTSHOULDER?2:1))%3);
             break;
         case SDL_CONTROLLER_BUTTON_START: if (!a->modal) activate(a,PLAY); break;
@@ -507,8 +637,8 @@ static void poll_child(launcher *a) {
     SDL_ShowWindow(a->window); SDL_RaiseWindow(a->window);
     snprintf(a->status,sizeof a->status,"Game stopped (%s %d). See terminal output.",
              WIFEXITED(status)?"exit":"signal",WIFEXITED(status)?WEXITSTATUS(status):WTERMSIG(status));
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Last Raven could not start",
-                             *a->child_error?a->child_error:a->status,a->window);
+    char title[192]; snprintf(title,sizeof title,"%s could not start",game_title(a));
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,title,*a->child_error?a->child_error:a->status,a->window);
 }
 
 static int fonts(launcher *a,const char *requested) {
@@ -529,12 +659,17 @@ static int fonts(launcher *a,const char *requested) {
 
 int main(int argc,char **argv) {
     launcher a={0}; a.running=1; a.focus=a.selected_row=LR_RESOLUTION;
-    const char *preset=NULL,*font=NULL;
+    int check_startup=0;
+    const char *preset=NULL,*font=NULL,*wanted=NULL;
     for (int i=1;i<argc;i++) {
         if (!strcmp(argv[i],"--help")) {
             puts("launcher [--config FILE] [--preset NAME] [--boot EXECUTABLE --module ELF [--iso DISC]] [--font TTF]\n"
+                 "         [--game SLUG|TITLE|BOOT|MODULE[|ISO]]... [--select SLUG] [--check-startup]\n"
+                 "         [--library FILE --importer EXECUTABLE]\n"
+                 "Each --game adds a title tab; --select opens on that slug instead of the remembered one.\n"
                  "Keyboard: Tab, arrows, Enter, Escape. Controller: D-pad, A/B, bumpers, Start."); return 0;
         }
+        if (!strcmp(argv[i],"--check-startup")) { check_startup=1; continue; }
         const char *option=argv[i];
         if (++i==argc) { fprintf(stderr,"%s needs a value\n",option); return 2; }
         if (!strcmp(option,"--config")) {
@@ -545,6 +680,24 @@ int main(int argc,char **argv) {
         else if (!strcmp(option,"--module")) a.module=argv[i];
         else if (!strcmp(option,"--iso")) a.iso=argv[i];
         else if (!strcmp(option,"--font")) font=argv[i];
+        else if (!strcmp(option,"--select")) wanted=argv[i];
+        else if (!strcmp(option,"--library")) a.library=argv[i];
+        else if (!strcmp(option,"--importer")) a.importer=argv[i];
+        else if (!strcmp(option,"--game")) {
+            if (a.game_count==MAX_GAMES) { fprintf(stderr,"too many --game entries (at most %d)\n",MAX_GAMES); return 2; }
+            game_entry g={0}; char *spec=argv[i];
+            const char **field[]={&g.slug,&g.title,&g.boot,&g.module,&g.iso};
+            for (int k=0;k<5 && spec;k++) {
+                *field[k]=spec; char *bar=strchr(spec,'|');
+                if (bar) *bar=0;
+                spec=bar?bar+1:NULL;
+            }
+            if (!g.slug || !*g.slug || !g.title || !*g.title || !g.boot || !*g.boot || !g.module || !*g.module ||
+                !lr_presets_name_valid(g.slug)) {
+                fprintf(stderr,"--game needs SLUG|TITLE|BOOT|MODULE[|ISO], got: %s\n",argv[i]); return 2;
+            }
+            a.games[a.game_count++]=g;
+        }
         else { fprintf(stderr,"unknown option: %s\n",option); return 2; }
     }
     if (SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMECONTROLLER) || TTF_Init()) {
@@ -572,8 +725,26 @@ int main(int argc,char **argv) {
         if (a.book.selected!=at) a.dirty=1;
         a.book.selected=at;
     }
-    a.window=SDL_CreateWindow("Last Raven - Settings",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,
-                              UI_W,UI_H,SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI);
+    if (library_load(&a,0)) return 2;
+    qsort(a.games,(size_t)a.game_count,sizeof a.games[0],title_order);
+    if (a.game_count) {
+        /* Open on the requested title, else the remembered one, else the first. */
+        int at=wanted?-1:0;
+        for (int k=0;k<a.game_count;k++)
+            if (!strcmp(a.games[k].slug,wanted?wanted:a.book.game)) at=k;
+        if (at<0) { fprintf(stderr,"--select: no such game: %s\n",wanted); return 2; }
+        select_game(&a,at,1);
+    }
+    char window_title[192]; snprintf(window_title,sizeof window_title,"%s - Settings",game_title(&a));
+    int width=UI_W,height=UI_H;
+    SDL_Rect usable;
+    if (!SDL_GetDisplayUsableBounds(0,&usable)) {
+        double scale=fmin(1.0,fmin((usable.w-32.0)/UI_W,(usable.h-48.0)/UI_H));
+        scale=fmax(0.75,scale);
+        width=(int)(UI_W*scale); height=(int)(UI_H*scale);
+    }
+    a.window=SDL_CreateWindow(window_title,SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,
+                              width,height,SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI);
     if (!a.window) { fprintf(stderr,"launcher: %s\n",SDL_GetError()); return 1; }
     SDL_SetWindowMinimumSize(a.window,840,600);
     a.renderer=SDL_CreateRenderer(a.window,-1,SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);
@@ -587,6 +758,18 @@ int main(int argc,char **argv) {
     SDL_RenderSetLogicalSize(a.renderer,UI_W,UI_H);
     controller_open(&a);
     fprintf(stderr,"launcher: preferences %s\n",a.path);
+    if (check_startup && a.load_failed) {
+        fprintf(stderr,"Cannot read saved presets: %s\n",a.status);
+        return 2;
+    }
+    if (check_startup) {
+        draw(&a); SDL_RenderPresent(a.renderer);
+        SDL_RendererInfo info={0}; SDL_GetRendererInfo(a.renderer,&info);
+        printf("Launcher startup OK: video=%s renderer=%s window=%dx%d controllers=%d movie_decoder=%d\n",
+               SDL_GetCurrentVideoDriver(),info.name?info.name:"unknown",width,height,
+               SDL_NumJoysticks(),a.movie_available);
+        a.running=0;
+    }
     if (a.load_failed) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Cannot read saved presets",a.status,a.window);
     while (a.running) {
         if (!a.child) { draw(&a); SDL_RenderPresent(a.renderer); }
@@ -601,9 +784,10 @@ int main(int argc,char **argv) {
                 a.stick_repeat=now+180;
             }
         }
-        poll_child(&a);
+        import_poll(&a); poll_child(&a);
     }
     if (a.pad) SDL_GameControllerClose(a.pad);
+    free(a.library_buffer);
     TTF_CloseFont(a.body); TTF_CloseFont(a.small); TTF_CloseFont(a.heading);
     SDL_DestroyRenderer(a.renderer); SDL_DestroyWindow(a.window); TTF_Quit(); SDL_Quit();
     return 0;

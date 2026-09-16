@@ -427,9 +427,9 @@ typedef struct {
     int      stencil_valid, alpha_dirty;
 } rendertarget;
 
-/* Where a batch is placed on a widened target. SCENE geometry is spread across
- * the whole target; HUD geometry is translated to the centre and kept 1:1. */
-enum { CLASS_SCENE = 0, CLASS_HUD = 1 };
+/* Where a batch is placed on a widened target. SCENE spans the whole target;
+ * HUD and inset 3D PREVIEW geometry use the centered menu area. */
+enum { CLASS_SCENE = 0, CLASS_HUD = 1, CLASS_PREVIEW = 2 };
 
 typedef struct {
     int      used;
@@ -508,10 +508,11 @@ static struct {
      * the placement of the geometry now in the batch. The staging target
      * downsamples a wide attachment to guest width for the readback. */
     int      wide_w, batch_class, batch_glyph;
+    float    viewport_x, viewport_y, viewport_w, viewport_h;
     uint64_t glyph_draws;
     GLuint   stage_fbo, stage_tex;
     int      stage_w, stage_h;
-    uint64_t class_scene, class_hud, hud_flushes, wide_allocs, wide_retired;
+    uint64_t class_scene, class_hud, class_preview, hud_flushes, wide_allocs, wide_retired;
     uint64_t hud_hazard_depth, hud_hazard_stencil, hud_hazard_dst_alpha;
     uint64_t hud_depth_func[8], hud_depth_writes;
     /* PSPRECOMP_ASPECT_LOG: what the HUD class holds, per texture. */
@@ -1369,6 +1370,8 @@ static int rt_for(uint32_t addr) {
  *          property that keeps the UI sharp (findings: bilinear equals nearest
  *          at 1:1), and the reason no squeeze-and-stretch of the HUD can work.
  *
+ * PREVIEW uses the same centered mapping as HUD, while retaining its own
+ * perspective/depth behavior and diagnostics. Its scissor follows that mapping.
  * Both are viewports, not vertex transforms: the shader still maps guest x over
  * the guest width, so nothing is requantised. With wide_w == 480 every mapping
  * is the identity and the run is bit-identical to native. */
@@ -1906,6 +1909,29 @@ static void gl_scissor(int x0, int y0, int x1, int y1) {
     g.mu.state_gen++;
     flush_ends(FB_SCISSOR); flush();
     g.sc_x0 = x0; g.sc_y0 = y0; g.sc_x1 = x1; g.sc_y1 = y1; g.sc_valid = 1;
+}
+
+static void gl_viewport(float x, float y, float w, float h) {
+    /* Metadata only. Classification at the draw flushes if placement changes;
+     * a pending batch never consults this rectangle during its later flush. */
+    g.viewport_x = x; g.viewport_y = y; g.viewport_w = w; g.viewport_h = h;
+}
+
+static int menu_preview(const rendertarget *r) {
+    /* Assembly's part/AC cameras occupy inset viewports on the display, with
+     * scissors matching their rectangles (half-pixel differences for odd
+     * dimensions). They project at the panel's aspect, so scene expansion
+     * would stretch and displace them. Require the matching scissor as well
+     * as an inset viewport; a scissored full-screen camera remains SCENE.
+     * Scratch targets never participate in the wide-display mapping. */
+    const float x = g.viewport_x, y = g.viewport_y;
+    const float w = g.viewport_w, h = g.viewport_h;
+    return r->wide && g.sc_valid && x >= 0 && y >= 0 &&
+           w > 0 && w < g.w && h > 0 && h < g.h &&
+           x + w <= g.w && y + h <= g.h &&
+           fabsf(g.sc_x0 - x) <= 1 && fabsf(g.sc_y0 - y) <= 1 &&
+           fabsf(g.sc_x1 + 1 - (x + w)) <= 1 &&
+           fabsf(g.sc_y1 + 1 - (y + h)) <= 1;
 }
 /* Only a mipmap minification filter consumes the extra levels. TEXMODE may
  * retain a non-zero top while a draw deliberately selects ordinary nearest or
@@ -2605,15 +2631,18 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
     if (glyph != g.batch_glyph) { flush_ends(FB_GLYPH); flush(); g.batch_glyph = glyph; }
     if (glyph) g.glyph_draws++;
 
-    /* Adaptive aspect: place this draw. SCENE is anything with projected
-     * geometry, and any screen-space draw spanning the full guest width --
+    /* Adaptive aspect: inset PREVIEW passes follow the centered menu,
+     * including their depth clears. SCENE is other projected geometry,
+     * and any screen-space draw spanning the full guest width --
      * clears, fades, a movie in strips, a bar -- which must cover the wide
      * target. HUD is the rest of the screen-space geometry, kept 1:1. The
      * class is batch state, so a change flushes like any other state does. */
     if (g.adaptive_aspect) {
         if (rt_prepare(g.cur_rt) != 0) return;
         int cls = CLASS_SCENE;
-        if (g.rts[g.cur_rt].wide && count > 0) {
+        if (menu_preview(&g.rts[g.cur_rt])) {
+            cls = CLASS_PREVIEW;
+        } else if (g.rts[g.cur_rt].wide && count > 0) {
             int ss = 1, min_x = v[0].x, max_x = v[0].x;
             for (int i = 0; i < count; i++) {
                 if (!v[i].screen_space) { ss = 0; break; }
@@ -2640,7 +2669,8 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
             }
         }
         if (cls != g.batch_class) { flush_ends(FB_CLASS); flush(); g.batch_class = cls; g.mu.state_gen++; }
-        if (cls == CLASS_HUD) g.class_hud++; else g.class_scene++;
+        if (cls == CLASS_PREVIEW) g.class_preview++;
+        else if (cls == CLASS_HUD) g.class_hud++; else g.class_scene++;
     }
 
     switch (prim) {
@@ -2808,7 +2838,7 @@ static void apply_state(void) {
     if (g.sc_valid) {
         p_glEnable(GL_SCISSOR_TEST);
         const rendertarget *r = &g.rts[g.cur_rt];
-        const int hud = r->wide && g.batch_class == CLASS_HUD;
+        const int hud = r->wide && g.batch_class != CLASS_SCENE;
         const double sx = hud ? r->ui_scale : r->sx;
         const double sy = hud ? r->ui_scale : r->sy;
         const double off = hud ? rt_off(r) : 0;
@@ -2898,7 +2928,7 @@ static void apply_state(void) {
 }
 
 static void apply_placement(const rendertarget *r) {
-    const int hud = r->wide && g.batch_class == CLASS_HUD;
+    const int hud = r->wide && g.batch_class != CLASS_SCENE;
     p_glUseProgram(g.cur_prog);
     if (g.resolution) {
         p_glViewport(0, 0, r->w, r->h);
@@ -3389,8 +3419,10 @@ static void flush_model(void) {
     if (g.bs.stencil_test) alpha_to_stencil(r);
     p_glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
     r->dirty = 1;
-    p_glViewport(0, 0, rt_scene_w(r), r->h);
     use_program(g.prog_model, &g.ug);
+    /* Placement owns the viewport too. Resetting it to SCENE here would
+     * undo a cached PREVIEW placement after a model batch fills at PSP
+     * resolution, where centering is implemented by the GL viewport. */
     if (g.mu.disturbed || g.mu.applied_gen != g.mu.state_gen || g.mu.applied_rt != g.cur_rt) {
         apply_placement(r);
         apply_state();
@@ -3440,8 +3472,11 @@ static void gl_draw_model(int prim, const psp_model_vertex *v, int count, const 
     if (rt_prepare(g.cur_rt) != 0) return;
     if (g.batch_glyph) { flush_ends(FB_GLYPH); flush(); g.batch_glyph = 0; }
     if (g.adaptive_aspect) {
-        if (CLASS_SCENE != g.batch_class) { flush_ends(FB_CLASS); flush(); g.batch_class = CLASS_SCENE; }
-        g.class_scene++;
+        const int cls = menu_preview(&g.rts[g.cur_rt]) ? CLASS_PREVIEW : CLASS_SCENE;
+        if (cls != g.batch_class) {
+            flush_ends(FB_CLASS); flush(); g.batch_class = cls; g.mu.state_gen++;
+        }
+        if (cls == CLASS_PREVIEW) g.class_preview++; else g.class_scene++;
     }
     if (g.batch_n) { flush_ends(FB_CPU); flush(); }
     /* A batch ends when its block slots are used up. It may span a wrap of
@@ -3536,6 +3571,7 @@ static const psp_render_backend gl_backend = {
     .present = gl_present,
     .model_ok = gl_model_ok,
     .draw_model = gl_draw_model,
+    .set_viewport = gl_viewport,
 };
 
 const psp_render_backend *render_gl_backend(void) { return &gl_backend; }
@@ -3581,14 +3617,16 @@ void render_gl_report(FILE *out) {
     if (g.adaptive_aspect)
         fprintf(out, "\n          aspect: virtual width %d (x%.4f), %llu scene draw(s),"
                      " %llu HUD draw(s) in %llu batch(es), HUD hazards depth %llu"
-                     " stencil %llu dst-alpha %llu, %llu wide allocation(s), %llu retired",
+                     " stencil %llu dst-alpha %llu, %llu wide allocation(s), %llu retired,"
+                     " %llu preview draw(s)",
                 g.wide_w, (double)g.wide_w / (double)g.w,
                 (unsigned long long)g.class_scene, (unsigned long long)g.class_hud,
                 (unsigned long long)g.hud_flushes,
                 (unsigned long long)g.hud_hazard_depth,
                 (unsigned long long)g.hud_hazard_stencil,
                 (unsigned long long)g.hud_hazard_dst_alpha,
-                (unsigned long long)g.wide_allocs, (unsigned long long)g.wide_retired);
+                (unsigned long long)g.wide_allocs, (unsigned long long)g.wide_retired,
+                (unsigned long long)g.class_preview);
     for (int k = 0; k < g.hud_by_tex_n; k++)
         fprintf(out, "\n          HUD tex %08X %dx%d: %llu batch(es), %llu depth-tested, z %.4f..%.4f",
                 g.hud_by_tex[k].addr, g.hud_by_tex[k].w, g.hud_by_tex[k].h,

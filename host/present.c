@@ -179,6 +179,32 @@ static int g_gamepad_modern;                /* semantic buttons in modern/dual *
 static SDL_GameController *g_controller;    /* one controller owns the pad lane */
 static SDL_JoystickID      g_controller_id = -1;
 
+/* Host-only quit chord: physical View/Back + Menu/Start, held continuously.
+ * Keep it separate from guest/replay buttons and from controller mappings. */
+static struct { unsigned buttons; uint64_t since; int timing; } g_quit_chord;
+enum { QUIT_HOLD_MS = 2000 };
+
+static void quit_chord_button(uint8_t button, int down, uint64_t now) {
+    const unsigned bit = button == SDL_CONTROLLER_BUTTON_BACK ? 1u :
+                         button == SDL_CONTROLLER_BUTTON_START ? 2u : 0u;
+    if (!bit) return;
+    if (down) g_quit_chord.buttons |= bit;
+    else g_quit_chord.buttons &= ~bit;
+    if (g_quit_chord.buttons == 3) {
+        if (!g_quit_chord.timing) { g_quit_chord.since = now; g_quit_chord.timing = 1; }
+    } else g_quit_chord.timing = 0;
+}
+
+static int quit_chord_due(uint64_t now) {
+    return g_quit_chord.timing && now - g_quit_chord.since >= QUIT_HOLD_MS;
+}
+
+static int quit_key_event(const SDL_Event *event) {
+    return event->type == SDL_KEYDOWN && !event->key.repeat &&
+           event->key.keysym.sym == SDLK_q &&
+           (event->key.keysym.mod & KMOD_CTRL) && (event->key.keysym.mod & KMOD_SHIFT);
+}
+
 static void set_bit(_Atomic uint32_t *buttons, uint32_t bit, int down) {
     if (down) atomic_fetch_or(buttons, bit);
     else      atomic_fetch_and(buttons, ~bit);
@@ -249,6 +275,7 @@ static void clear_keys(void) {
 }
 
 static void set_button(uint8_t b, int down) {
+    quit_chord_button(b, down, SDL_GetTicks64());
     static const controller_bind CLASSIC[] = {
         { SDL_CONTROLLER_BUTTON_DPAD_RIGHT,          0x000020 },
         { SDL_CONTROLLER_BUTTON_DPAD_LEFT,           0x000080 },
@@ -376,6 +403,7 @@ static int gamepad_modern(void) {
 }
 
 static void clear_controller(void) {
+    memset(&g_quit_chord, 0, sizeof g_quit_chord);
     atomic_store(&g_controller_buttons, 0);
     atomic_store(&g_pad_ax, 128);
     atomic_store(&g_pad_ay, 128);
@@ -693,6 +721,36 @@ void *present_gl_proc(const char *name) { return SDL_GL_GetProcAddress(name); }
 
 /* ---- the SDL thread -------------------------------------------------------- */
 
+/* Window close and both shortcuts share the scheduler's normal shutdown. */
+static void close_game_window(void) {
+    /* What the mixer saw, per channel: frames pushed, dropped
+     * for a full ring, and the times the ring ran dry -- each
+     * of those a gap the listener heard. */
+    if (g_audio_dev) {
+        SDL_LockAudioDevice(g_audio_dev);
+        for (int ch = 0; ch < MIX_CHANNELS; ch++) {
+            const mix_ring *m = &g_mix[ch];
+            if (m->pushed)
+                fprintf(stderr, "present: audio ch %d  %.1f s pushed over %.1f s  %u dropped  "
+                                "%u underruns (%.2f s of silence)  longest wait between pushes %llu ms, "
+                                "%u waits longer than the pre-roll\n",
+                        ch, m->pushed / 44100.0,
+                        (m->last_ms - m->first_ms) / 1000.0, m->dropped,
+                        m->underruns, m->silence / 44100.0,
+                        (unsigned long long)m->max_gap_ms, m->long_gaps);
+        }
+        SDL_UnlockAudioDevice(g_audio_dev);
+    }
+    /* Stop the run the way the host already stops one, rather than
+     * _exit(0): that killed the process mid-drain and took the
+     * whole end-of-run report with it. This is not a guest thread,
+     * so it marks the guest threads dead and wakes the main
+     * context in psp_sched_drain, which then reports "stopped by
+     * the host (window closed)" and prints the summary. */
+    atomic_store(&g_quit, 1);
+    psp_sched_stop_all("window closed");
+}
+
 static void *sdl_thread(void *arg) {
     (void)arg;
 
@@ -832,6 +890,7 @@ static void *sdl_thread(void *arg) {
         if (g_mouse_want) mouse_grab(1);
     }
 
+    fprintf(stderr, "present: quit with Ctrl+Shift+Q or hold View + Menu (Select + Start) for 2 seconds\n");
     open_first_controller();
 
     start_publish(1);
@@ -920,34 +979,13 @@ static void *sdl_thread(void *arg) {
 
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            if (quit_key_event(&e)) {
+                fprintf(stderr, "present: keyboard quit shortcut\n");
+                e.type = SDL_QUIT;
+            }
             switch (e.type) {
             case SDL_QUIT:
-                /* What the mixer saw, per channel: frames pushed, dropped
-                 * for a full ring, and the times the ring ran dry -- each
-                 * of those a gap the listener heard. */
-                if (g_audio_dev) {
-                    SDL_LockAudioDevice(g_audio_dev);
-                    for (int ch = 0; ch < MIX_CHANNELS; ch++) {
-                        const mix_ring *m = &g_mix[ch];
-                        if (m->pushed)
-                            fprintf(stderr, "present: audio ch %d  %.1f s pushed over %.1f s  %u dropped  "
-                                            "%u underruns (%.2f s of silence)  longest wait between pushes %llu ms, "
-                                            "%u waits longer than the pre-roll\n",
-                                    ch, m->pushed / 44100.0,
-                                    (m->last_ms - m->first_ms) / 1000.0, m->dropped,
-                                    m->underruns, m->silence / 44100.0,
-                                    (unsigned long long)m->max_gap_ms, m->long_gaps);
-                    }
-                    SDL_UnlockAudioDevice(g_audio_dev);
-                }
-                /* Stop the run the way the host already stops one, rather than
-                 * _exit(0): that killed the process mid-drain and took the
-                 * whole end-of-run report with it. This is not a guest thread,
-                 * so it marks the guest threads dead and wakes the main
-                 * context in psp_sched_drain, which then reports "stopped by
-                 * the host (window closed)" and prints the summary. */
-                atomic_store(&g_quit, 1);
-                psp_sched_stop_all("window closed");
+                close_game_window();
                 return NULL;
             case SDL_CONTROLLERDEVICEADDED: {
                 /* One controller owns this lane.  Opening every connected pad
@@ -1017,6 +1055,11 @@ static void *sdl_thread(void *arg) {
                 publish_pad();
                 break;
             }
+        }
+        if (quit_chord_due(SDL_GetTicks64())) {
+            fprintf(stderr, "present: controller quit shortcut (held 2 seconds)\n");
+            close_game_window();
+            return NULL;
         }
     }
 }

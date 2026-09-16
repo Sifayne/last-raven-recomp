@@ -16,7 +16,7 @@ if [ "${1:-}" = --ui ]; then
     cc -O2 -Wall -Wextra -Werror -std=gnu11 "${FLAGS[@]}" \
         -I "$ROOT/tools/psprecomp/include" \
         "$ROOT/host/settings.c" "$ROOT/host/launcher_tests.c" \
-        "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${LIBS[@]}" $HOST_LIBS \
+        "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${LIBS[@]}" "${HOST_LINK_FLAGS[@]}" \
         -o "$ROOT/build/settings/launcher-tests"
     mkdir -p "$ROOT/build/settings/ui-checks"
     SDL_VIDEODRIVER=dummy "$ROOT/build/settings/launcher-tests" "$ROOT/build/settings/ui-checks"

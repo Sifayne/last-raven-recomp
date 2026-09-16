@@ -130,6 +130,14 @@
 # branch-likely pairs).
 001DFC80   # model animation updater (walk cadence) -- see host/replacements.c
 
+# Optional mission rendering at higher FPS. Original functions remain available;
+# the loop adapter is generated from the user's module by scripts/fps-loop.py.
+00102018   # mission loop
+00259250   # original scanline pacer (bypassed only inside the enhanced loop)
+00045DAC   # skeletal world matrices
+000FF280   # per-view camera update
+0022E800   # HUD update/draw split
+
 # The chase camera's two blends: psp_func_0007467C(ideal, current, r), a
 # general vector lerp -- current + (ideal - current) * (1 - r) -- with eight
 # callers, and psp_func_000746D4(ideal, current, rx, ry, rz), its per-axis

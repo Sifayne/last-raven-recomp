@@ -34,6 +34,8 @@ const lr_option_def lr_options[LR_OPTION_COUNT] = {
     C(MPEG_DECODE,"Intro movie decoding","Advanced","Decode the intro movie. Requires a build with OpenH264. Play presets enable this when supported.","0","0|1","Off|On"),
     C(WINDOW,"Window","Launch","A window also enables real-time pacing. OpenGL always requires a window.","0","0|1","Off|On"),
     C(REALTIME,"Real-time pacing","Launch","Headless real-time pacing. Windowed play always uses real time.","0","0|1","Off|On"),
+    C(HIGH_FPS,"Higher FPS","Graphics","Smooth mission rendering between the game's original simulation ticks. Menus and movies keep their original timing.","0","0|1","Off|On"),
+    {"FPS_CAP","PSPRECOMP_FPS_CAP","FPS cap","Graphics","Maximum mission rendering rate when Higher FPS is on. Enter a custom limit or unlimited. The game keeps its original simulation speed.",LR_INTEGER,"60",NULL,NULL,30,1000,1,"unlimited"},
 };
 #undef C
 #undef N
@@ -137,6 +139,11 @@ void lr_option_label(const lr_settings *s, int id, char *out, size_t size) {
     if (id==LR_DISPLAY) {
         if (s->number[id]<0) snprintf(out,size,"Primary display");
         else snprintf(out,size,"Display %.0f",s->number[id]);
+        return;
+    }
+    if (id==LR_FPS_CAP) {
+        if (s->number[id]<0) snprintf(out,size,"Unlimited");
+        else snprintf(out,size,"%.0f FPS",s->number[id]);
         return;
     }
     if (id==LR_MOVE_DEADZONE || id==LR_LOOK_DEADZONE || id==LR_STICK_OUTER_DEADZONE)

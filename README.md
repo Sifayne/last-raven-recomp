@@ -34,7 +34,14 @@ regenerated rather than committed.
 
 ## Requirements
 
-- CMake ≥ 3.16, a C/C++ compiler, `make`, Python 3
+For the standalone **Linux AppImage** and Steam Deck test
+instructions, see [the packaging guide](docs/PACKAGING.md). It builds without
+a game dump. Use Add Game to prepare your supported PSP ISO locally; the
+package includes its compiler and media dependencies.
+The requirements below apply to the development/game pipeline.
+
+- Linux build: CMake ≥ 3.16, Ninja, a C/C++ compiler, `make`, Python ≥ 3.9,
+  `pkg-config`, `curl`, `tar`/`xz`, `readelf` (binutils), and `patchelf`
 - `zlib` and `openssl` (for `pspdecrypt`)
 - Your own dump of the game as `.iso` in `game/`
 
@@ -47,6 +54,11 @@ git clone --recurse-submodules <this-repo> && cd last-raven
 ```bash
 scripts/build-tools.sh
 ```
+
+This also downloads and builds a checksum-pinned LGPL FFmpeg with the two
+required ATRAC decoders. It installs privately under `build/deps/ffmpeg/`;
+no system FFmpeg installation is needed. Later builds reuse the verified
+dependency. See [the FFmpeg build and distribution guide](docs/FFMPEG.md).
 
 Then drop your dump in `game/` and run the pipeline in order:
 
@@ -79,6 +91,9 @@ scripts/15-settings.sh
 
 Choose **Classic**, **Controller**, or **Mouse & Keyboard**, adjust graphics
 and controls, then **Save & Play**. You can create your own named presets.
+For smoother missions in ACLR, AC3P and ACSL, enable **Graphics → Higher FPS**
+and choose **FPS cap** (including custom limits or unlimited). Simulation stays
+at its original speed; see [the FPS guide](docs/FPS.md) for scope and validation.
 The launcher needs SDL2 and SDL2_ttf; existing command-line and headless
 tools continue to work without the launcher. Settings apply on the next
 launch. See [the settings guide](docs/SETTINGS.md) for navigation, file
@@ -144,6 +159,25 @@ scenario drives it from there — see
 [docs/findings/state.md](docs/findings/state.md) for exactly where it stops
 and why.
 
+### Another title
+
+Every stage is keyed on `GAME`, a profile in `scripts/games/<slug>.sh` (module
+name, emit prefix, expected disc id, window title). Unset, it is Last Raven at
+the paths above. Any other slug -- `ac3p` and `acsl` are checked in, for
+Armored Core 3 Portable and Silent Line Portable -- keeps its own
+`games/<slug>/` (drop the dump there), `build/<slug>/host` and
+`reports/<slug>/`, so two titles never overwrite each other's objects:
+
+```bash
+GAME=ac3p scripts/00-identify.sh && GAME=ac3p scripts/01-extract-decrypt.sh
+```
+
+Native replacements are per title too: `host/replace-<slug>.txt` and
+`host/replacements-<slug>.c`, both empty until a survey says otherwise.
+The launcher (`scripts/15-settings.sh`) shows a tab for every title whose
+module has been emitted, relinks each one's boot host first, and remembers
+the tab you pick; `GAME=<slug>` in the environment opens on that title.
+
 ## Layout
 
 | Path | What |
@@ -154,7 +188,7 @@ and why.
 | `docs/` | [the roadmap](docs/ROADMAP.md), decisions and findings |
 | `tools/psprecomp` | submodule — the recompiler, runtime and interpreter (MIT) |
 | `tools/pspdecrypt` | submodule — decryption, for the mode-9 path psprecomp lacks |
-| `game/`, `reports/` | gitignored working directories |
+| `game/`, `games/`, `reports/` | gitignored working directories (`games/<slug>/` for a title other than Last Raven) |
 
 ## Why PSP and not PS2
 
@@ -172,14 +206,18 @@ process by `scripts/01-extract-decrypt.sh`. That keeps it at arm's length. Do no
 link its code into the host or copy routines out of it without deciding what that
 means for this project's own license first.
 
-Two system libraries are optional and found at build time, never vendored:
-**openh264** (BSD) decodes the intro movie for sceMpeg, and **FFmpeg's
-libavcodec** (LGPL-2.1) decodes ATRAC3+ music for sceAtrac3plus. Both are
-linked dynamically and the build and the headless host work without either.
-One caveat on FFmpeg: a distribution build configured with `--enable-gpl`
-(most are) makes the whole library GPL, and a binary linked against it
-inherits that. Build without it, or against an LGPL-configured FFmpeg, if
-that matters to you.
+**OpenH264** (BSD) is an optional system library for the intro movie's video.
+**FFmpeg's libavcodec and libavutil** decode ATRAC3/ATRAC3+ music and movie
+audio. This project's build scripts use a private, pinned **LGPL-2.1-or-later**
+FFmpeg build, with GPL/nonfree components disabled, and link it dynamically.
+They reject a runtime cache pointing at system FFmpeg; migrate an existing
+checkout by running `scripts/build-tools.sh`.
+
+The [FFmpeg bundle command](docs/FFMPEG.md) stages the shared libraries,
+license notices, exact source archive, and reproduction instructions together.
+Keep those materials with/alongside releases. The launcher's About button
+includes the FFmpeg attribution. The upstream runtime can still be built
+without decoders independently of this project's player build.
 
 ## Upstream
 

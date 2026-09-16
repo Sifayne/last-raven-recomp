@@ -94,3 +94,20 @@ const int lr_adaptive_aspect_available = 1;
 /* This host reads the modern pad's carrier bits (the converter and the pad
  * copy above), so present.c may offer that layout. */
 const int lr_modern_controls_available = 1;
+
+/* Mission rendering at independent FPS: US PSN NPUH10023 1.01. */
+#define FPS_MISSION_LOOP 000E0F10
+#define FPS_PACER        001CD1C4
+#define FPS_BUILD_JOINTS 00104EEC
+#define FPS_REBUILD_AC   00108940
+#define FPS_UPDATE_VIEWS 000E07F0
+#define FPS_PUBLISH_VIEW 0000D5DC
+#define FPS_STOP_QUERY   0017BC48
+#define FPS_VIEW_CONTEXT 0x0024D1C0u
+#define FPS_CAMERA_MODE  0x0046A240u
+#define FPS_PAUSE_BYTE   0x0046A22Fu
+#define FPS_AC_COUNT     0x0048A1D0u
+#define FPS_AC_STRIDE    11968u
+#define FPS_TICK         0x00268780u
+#define FPS_TIMER        0x0048BA54u
+#include "fps_ac3.h"

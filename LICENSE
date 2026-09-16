@@ -32,3 +32,9 @@ you own.
 Vendored dependencies keep their own licenses:
   tools/psprecomp   MIT       (linked into builds)
   tools/pspdecrypt  GPL-3.0   (invoked as a separate process only — see README)
+
+The project build also downloads an unmodified, pinned FFmpeg source release
+and builds shared libavcodec/libavutil under LGPL-2.1-or-later. These outputs
+are not covered by this MIT license. See third_party/ffmpeg/NOTICE.txt and
+docs/FFMPEG.md; generated dependency bundles include FFmpeg's full license
+and corresponding source.

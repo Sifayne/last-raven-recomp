@@ -16,6 +16,13 @@ int main(void) {
     assert(s.width==960 && s.height==544 && s.number[LR_CAMERA_LAG]==-1);
     assert(!strcmp(s.value[LR_WINDOW_MODE],"windowed"));
     assert(!strcmp(s.value[LR_DISPLAY],"primary"));
+    assert(!s.number[LR_HIGH_FPS] && s.number[LR_FPS_CAP]==60);
+    const char *bad_caps[]={"0","29","1001","59.94","nan","inf","60junk"};
+    for (size_t i=0;i<sizeof bad_caps/sizeof bad_caps[0];i++)
+        assert(lr_settings_set(&s,LR_FPS_CAP,bad_caps[i],LR_PRESET,error));
+    assert(!lr_settings_set(&s,LR_FPS_CAP,"unlimited",LR_PRESET,error));
+    assert(s.number[LR_FPS_CAP]==-1);
+    assert(!lr_settings_set(&s,LR_FPS_CAP,"165",LR_PRESET,error));
     assert(lr_settings_set(&s,LR_DISPLAY,"1.5",LR_PRESET,error));
     assert(lr_settings_set(&s,LR_DISPLAY,"0",LR_PRESET,error));
     assert(lr_settings_set(&s,LR_DISPLAY,"65536",LR_PRESET,error));
@@ -43,10 +50,16 @@ int main(void) {
     char dir[]="/tmp/lr-settings-test-XXXXXX"; assert(mkdtemp(dir));
     char path[256]; snprintf(path,sizeof path,"%s/settings.ini",dir);
     lr_presets p, loaded; lr_presets_defaults(&p);
+    assert(!lr_settings_set(&p.presets[1].settings,LR_HIGH_FPS,"1",LR_PRESET,error));
+    assert(!lr_settings_set(&p.presets[1].settings,LR_FPS_CAP,"144",LR_PRESET,error));
     assert(!lr_settings_set(&p.presets[1].settings,LR_WINDOW_MODE,"borderless",LR_PRESET,error));
     assert(!lr_settings_set(&p.presets[1].settings,LR_DISPLAY,"2",LR_PRESET,error));
     assert(!lr_presets_save(&p,path,error)); assert(!lr_presets_load(&loaded,path,error));
     assert(loaded.count==3 && loaded.selected==1);
+    setenv("PSPRECOMP_FPS_CAP","240",1);
+    assert(!lr_settings_load(&s,path,"Controller",error));
+    assert(s.number[LR_HIGH_FPS]==1 && s.number[LR_FPS_CAP]==240 && s.source[LR_FPS_CAP]==LR_ENV);
+    unsetenv("PSPRECOMP_FPS_CAP");
     for (int i=0;i<3;i++) for (int k=0;k<LR_OPTION_COUNT;k++)
         assert(!strcmp(p.presets[i].settings.value[k],loaded.presets[i].settings.value[k]));
     setenv("PSPRECOMP_WINDOW_MODE","windowed",1);
@@ -93,6 +106,7 @@ int main(void) {
     putfile(path,"version=1\nselected=Old\n[preset Old]\nWINDOW_SIZE=1280x720\n");
     assert(!lr_settings_load(&s,path,"Old",error));
     assert(!strcmp(s.value[LR_WINDOW_MODE],"windowed") && s.width==1280 && s.height==720);
+    assert(!s.number[LR_HIGH_FPS] && s.number[LR_FPS_CAP]==60);
     assert(!strcmp(s.value[LR_DISPLAY],"primary"));
     const char *invalid[]={
         "version=2\nselected=A\n[preset A]\n",

@@ -196,6 +196,56 @@ Renderer fixtures passed 430/430 on each backend, and resolution fixtures
 passed 40/40 in each aspect mode on the real display. The offscreen GL driver
 failed two bitmap-font checks, so those resolution results use the real GPU.
 
+## Assembly model previews — 7 September 2026
+
+The part and AC models use inset perspective viewports directly on the display
+target: the captured head viewport is 169×105 and the AC viewport is 181×106.
+They retain their panel aspect. Classifying all perspective geometry as SCENE
+stretched the previews and displaced them relative to the centered menu.
+
+The GE now passes the viewport rectangle as optional backend metadata before
+draws, including CPU-transformed, GPU-model, through and immediate draws. The
+host identifies a preview when an inset display viewport has a matching
+scissor, allowing one pixel for the game's odd-dimension rounding. PREVIEW
+uses the menu's centered placement for geometry and clipping, retaining its
+perspective, depth and stencil behavior. Full-screen cameras and scratch
+targets keep their existing mapping. GPU batches retain their cached viewport
+when a model batch fills; resetting it to SCENE would break PSP-resolution
+previews on wider windows.
+
+```bash
+# Synthetic GE lists to physical pixels; requires a real desktop GL driver.
+scripts/17-preview-tests.sh
+
+# Actual Assembly menus, with controller/mouse input excluded from the replay.
+scripts/09-replay.sh --decode --env PSPRECOMP_REPLAY_LIVE=0 \
+  --env PSPRECOMP_ASPECT=window --env PSPRECOMP_RESOLUTION=window \
+  --env PSPRECOMP_WINDOW_SIZE=1920x720 scenarios/assembly-previews.pad
+```
+
+Validation is in `reports/menu-preview/`:
+
+- 46 synthetic checks pass in each of eight CPU/GPU transform, original/window
+  resolution and original/window aspect combinations. They cover both panel
+  rectangles, clipping, depth clears, depth comparison, GPU batch boundaries,
+  resizing, scratch targets, and full-screen or differently scissored cameras.
+  The original renderer fails 12 checks in the wide PSP-resolution GPU case;
+  restoring only the erroneous viewport reset fails four.
+- The fresh 1920×720 run visits head, core, arms and legs, with the rotating AC
+  visible: 79/79 events through poll 1250, zero bad accesses, no live-input taint.
+  Physical window captures were visually inspected.
+- The six garage/mission/combat captures are pixel-identical to the pre-fix
+  renderer in window-aspect mode. Original-aspect Assembly output is identical
+  on each transform path, and the corrected wide frame repeats identically.
+- Runtime tests pass 24/24; camera checks 35/35; renderer fixtures 430/430 on
+  software and GL; resolution fixtures 40/40 in each aspect mode.
+
+These GPU results use the real display. The offscreen driver's CPU transform
+case passed, but its GPU-model case failed even at original aspect; it is not
+used as the GPU validation result. CPU and GPU captured menu images differ at
+15 of 1,382,400 physical pixels, so this check does not claim exact numerical
+identity between transform implementations.
+
 ## Window-resolution rendering
 
 `PSPRECOMP_RESOLUTION=window` enables physical-resolution display targets in
