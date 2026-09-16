@@ -25,6 +25,7 @@ enum { FPS_CAMERA=0x0043C080u };
 static struct {
     float prev[11],cur[11],saved[11];
     uint8_t mode;
+    unsigned tick;
     int valid,borrowed;
 } fps_camera;
 static const uint32_t fps_camera_offsets[]={16,20,24,48,52,56,32,36,240,244,248};
@@ -44,7 +45,10 @@ void psp_func_000FF280(void) {
     uint8_t mode=psp_read8(FPS_CAMERA);
     psp_func_000FF280__orig();
     fps_camera_read(fps_camera.cur);
-    fps_camera.valid=mode==psp_read8(FPS_CAMERA);
+    /* A pair is only worth blending when it spans consecutive ticks, as the
+     * AC3 adapter requires; a skipped update would otherwise lerp stale poses. */
+    fps_camera.valid=mode==psp_read8(FPS_CAMERA) && fps_camera.tick+1==fps.ticks;
+    fps_camera.tick=fps.ticks;
     for (int i=0;i<11;i++) {
         if (!isfinite(fps_camera.prev[i]) || !isfinite(fps_camera.cur[i])) fps_camera.valid=0;
         if (i<6 && fabsf(fps_camera.prev[i]-fps_camera.cur[i])>50) fps_camera.valid=0;
@@ -65,9 +69,13 @@ static void fps_native_rebuild(uint32_t _entry);
 static void fps_aclr_rebuild(void) {
     uint32_t table=psp_read32(0x0042D6B0u);
     unsigned count=table?psp_read8(table+8):0;
-    if (count>16) count=16;
+    /* The chase camera struct sits 6.14 strides past AC[0], so the array holds
+     * at most six; a larger count is corrupt, not a bigger mission. */
+    if (count>6) count=6;
     for (unsigned i=0;i<count;i++) {
-        r_a0=0x0042D6C0u+i*9744; r_a1=0; fps_native_rebuild(0);
+        const uint32_t ac=0x0042D6C0u+i*9744;
+        if (!psp_mem_ptr(ac,9744)) break;
+        r_a0=ac; r_a1=0; fps_native_rebuild(0);
     }
 }
 static void fps_aclr_render_open(void) {

@@ -191,7 +191,12 @@ static void quit_chord_button(uint8_t button, int down, uint64_t now) {
     if (down) g_quit_chord.buttons |= bit;
     else g_quit_chord.buttons &= ~bit;
     if (g_quit_chord.buttons == 3) {
-        if (!g_quit_chord.timing) { g_quit_chord.since = now; g_quit_chord.timing = 1; }
+        if (!g_quit_chord.timing) {
+            g_quit_chord.since = now; g_quit_chord.timing = 1;
+            /* The window title says so at once (below); this is for the log. */
+            fprintf(stderr, "present: quit chord held -- keep holding Select + Start for %d s to close, release to cancel\n",
+                    QUIT_HOLD_MS / 1000);
+        }
     } else g_quit_chord.timing = 0;
 }
 
@@ -665,8 +670,17 @@ int present_gl_make_current(void) {
         return -1;
     }
     /* Swap on the GE thread's own schedule; the game paces itself and the
-     * frame limiter is the clock's job, not the driver's. */
-    SDL_GL_SetSwapInterval(0);
+     * frame limiter is the clock's job, not the driver's -- except when the
+     * Higher FPS cap is "unlimited", which otherwise has no limiter at all on
+     * this path (the game's pacer is bypassed inside the enhanced loop and
+     * the FPS clock only sleeps toward a positive cap). Unlimited then means
+     * the display's own rate: vertical sync. */
+    {
+        const lr_settings *s = lr_settings_current();
+        const int unlimited = s->number[LR_HIGH_FPS] && s->number[LR_FPS_CAP] < 0;
+        SDL_GL_SetSwapInterval(unlimited ? 1 : 0);
+        if (unlimited) fprintf(stderr, "present: FPS cap unlimited -- pacing by vertical sync\n");
+    }
     return 0;
 }
 
@@ -959,16 +973,24 @@ static void *sdl_thread(void *arg) {
          * wall time, whichever backend rendered them. Set from this thread,
          * which owns the window. */
         {
-            static uint32_t title_t0; static uint64_t title_frames; static char last[96];
+            static uint32_t title_t0; static uint64_t title_frames; static char last[128];
+            static int was_quitting; static double shown_fps;
             const uint32_t now = SDL_GetTicks();
+            /* The quit chord shows in the title the moment it is held, so a
+             * player sees the countdown rather than an unexplained close. */
+            const int quitting = g_quit_chord.timing;
             if (!title_t0) { title_t0 = now; title_frames = atomic_load(&g_frames_rendered); }
-            else if (now - title_t0 >= 1000 && win) {
-                const uint64_t frames = atomic_load(&g_frames_rendered);
-                const double fps = (double)(frames - title_frames) * 1000.0 / (double)(now - title_t0);
-                char title[96];
-                snprintf(title, sizeof title, GAME_TITLE " -- recompiled  |  %.0f fps", fps);
+            else if ((now - title_t0 >= 1000 || quitting != was_quitting) && win) {
+                if (now - title_t0 >= 1000) {
+                    const uint64_t frames = atomic_load(&g_frames_rendered);
+                    shown_fps = (double)(frames - title_frames) * 1000.0 / (double)(now - title_t0);
+                    title_t0 = now; title_frames = frames;
+                }
+                char title[128];
+                snprintf(title, sizeof title, GAME_TITLE " -- recompiled  |  %.0f fps%s", shown_fps,
+                         quitting ? "  |  QUITTING: keep holding Select + Start, release to cancel" : "");
                 if (strcmp(title, last) != 0) { SDL_SetWindowTitle(win, title); snprintf(last, sizeof last, "%s", title); }
-                title_t0 = now; title_frames = frames;
+                was_quitting = quitting;
             }
         }
 

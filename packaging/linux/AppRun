@@ -41,7 +41,10 @@ case "${1:-}" in
     --print-settings|--list-presets|--create-defaults)
         exec "$app_root/usr/bin/settings-tool" --config "$config" "$@" ;;
 esac
-"$app_root/usr/bin/import-game" refresh
+# A corrupt or half-written library record must not stop the launcher, which
+# reports "Cannot read game library" itself and leaves the files untouched.
+"$app_root/usr/bin/import-game" refresh || \
+    printf 'launcher: the game library could not be refreshed; starting anyway\n' >&2
 log="$(mktemp "$state_root/logs/launcher-XXXXXXXX.log")"
 printf 'Armored Core Portable\nApplication: %s\nSettings: %s\n' "$app_root" "$config" > "$log"
 # Each ELF has a relative RUNPATH. Do not override system drivers or prevent

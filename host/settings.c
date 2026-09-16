@@ -35,7 +35,7 @@ const lr_option_def lr_options[LR_OPTION_COUNT] = {
     C(WINDOW,"Window","Launch","A window also enables real-time pacing. OpenGL always requires a window.","0","0|1","Off|On"),
     C(REALTIME,"Real-time pacing","Launch","Headless real-time pacing. Windowed play always uses real time.","0","0|1","Off|On"),
     C(HIGH_FPS,"Higher FPS","Graphics","Smooth mission rendering between the game's original simulation ticks. Menus and movies keep their original timing.","0","0|1","Off|On"),
-    {"FPS_CAP","PSPRECOMP_FPS_CAP","FPS cap","Graphics","Maximum mission rendering rate when Higher FPS is on. Enter a custom limit or unlimited. The game keeps its original simulation speed.",LR_INTEGER,"60",NULL,NULL,30,1000,1,"unlimited"},
+    {"FPS_CAP","PSPRECOMP_FPS_CAP","FPS cap","Graphics","Maximum mission rendering rate when Higher FPS is on. Enter a custom limit, or unlimited to follow the display's refresh with vertical sync. The game keeps its original simulation speed.",LR_INTEGER,"60",NULL,NULL,30,1000,1,"unlimited"},
 };
 #undef C
 #undef N

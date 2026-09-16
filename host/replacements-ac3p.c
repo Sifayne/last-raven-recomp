@@ -108,6 +108,7 @@ const int lr_modern_controls_available = 1;
 #define FPS_PAUSE_BYTE   0x0046A22Fu
 #define FPS_AC_COUNT     0x0048A1D0u
 #define FPS_AC_STRIDE    11968u
+#define FPS_AC_MAX       9u      /* the count word itself sits 9.3 strides past AC[0] */
 #define FPS_TICK         0x00268780u
 #define FPS_TIMER        0x0048BA54u
 #include "fps_ac3.h"

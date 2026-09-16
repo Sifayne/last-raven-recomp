@@ -4,7 +4,8 @@ Normal builds of Last Raven Portable, Armored Core 3 Portable and Silent Line
 Portable support optional mission rendering above 30 FPS. In the launcher,
 open **Graphics**, enable **Higher FPS**, choose **FPS cap**, and save the
 preset. The arrows cycle common rates; Enter accepts a custom whole number
-from 30 to 1000, or `unlimited`. Changes apply on the next launch.
+from 30 to 1000, or `unlimited`, which follows the display's refresh rate with
+vertical sync on the OpenGL renderer. Changes apply on the next launch.
 
 Use `OPT=1 scripts/15-settings.sh` to launch with optimized game builds.
 

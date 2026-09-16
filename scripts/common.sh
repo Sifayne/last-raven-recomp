@@ -31,10 +31,14 @@ if [ -f "$RUNTIME_CACHE" ]; then
                  "AVCODEC_LIBRARY:FILEPATH=$FFMPEG_PREFIX/lib/libavcodec.so" \
                  "AVUTIL_LIBRARY:FILEPATH=$FFMPEG_PREFIX/lib/libavutil.so"; do
         grep -Fxq "$entry" "$RUNTIME_CACHE" || \
-            die "runtime uses a different FFmpeg; run scripts/build-tools.sh to select the bundled LGPL build"
+            die "the runtime in build/psprecomp was configured before the bundled LGPL FFmpeg existed (or against a system one).
+       Run scripts/build-tools.sh once: it downloads the pinned FFmpeg source (see third_party/ffmpeg/source.json),
+       builds only the two ATRAC decoders into build/deps/ffmpeg (a few minutes) and reconfigures the runtime.
+       Offline: place the pinned tarball at build/deps/downloads/ first; the checksum is still verified."
     done
     [ -f "$FFMPEG_PREFIX/lib/libavcodec.so" ] && [ -f "$FFMPEG_PREFIX/lib/libavutil.so" ] || \
-        die "bundled FFmpeg is missing; run scripts/build-tools.sh"
+        die "the bundled FFmpeg under build/deps/ffmpeg is missing; run scripts/build-tools.sh (downloads the pinned
+       source and builds the two ATRAC decoders; offline, pre-place the tarball in build/deps/downloads/)"
     HOST_LINK_FLAGS+=("$FFMPEG_PREFIX/lib/libavcodec.so" "$FFMPEG_PREFIX/lib/libavutil.so"
         '-Wl,-rpath,$ORIGIN/lib:$ORIGIN/../deps/ffmpeg/lib')
 fi

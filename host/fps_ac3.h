@@ -57,11 +57,19 @@ void AC3_FN(FPS_UPDATE_VIEWS)(void) {
     if (fps_camera.view) for (int i=0;i<16;i++) fps_camera.pose.cur[0][i]=fps_read_float(fps_camera.view+4*i);
     if (fps_ac3_paused()) fps_ac3_history_reset();
 }
+#ifndef FPS_AC_MAX
+#define FPS_AC_MAX 16u
+#endif
 static void fps_ac3_rebuild(void) {
     unsigned count=psp_read32(FPS_AC_COUNT);
-    if (count>16) count=16;
+    /* FPS_AC_MAX is each title's real array bound (host/replacements-*.c);
+     * a larger count is corrupt. Every AC is also checked to be mapped before
+     * the rebuild runs on it. */
+    if (count>FPS_AC_MAX) count=FPS_AC_MAX;
     for (unsigned i=0;i<count;i++) {
-        r_a0=AC3_PLAYER_AC+i*FPS_AC_STRIDE;
+        const uint32_t ac=AC3_PLAYER_AC+i*FPS_AC_STRIDE;
+        if (!psp_mem_ptr(ac,FPS_AC_STRIDE)) break;
+        r_a0=ac;
         fps_native_rebuild(0);
     }
 }

@@ -210,8 +210,12 @@ means for this project's own license first.
 **FFmpeg's libavcodec and libavutil** decode ATRAC3/ATRAC3+ music and movie
 audio. This project's build scripts use a private, pinned **LGPL-2.1-or-later**
 FFmpeg build, with GPL/nonfree components disabled, and link it dynamically.
-They reject a runtime cache pointing at system FFmpeg; migrate an existing
-checkout by running `scripts/build-tools.sh`.
+They reject a runtime cache pointing at system FFmpeg, so a checkout built
+before the bundle existed stops at every script until it is migrated: run
+`scripts/build-tools.sh` once. That step downloads the pinned FFmpeg source
+and builds it, which takes a few minutes; to do it offline, place the pinned
+tarball named in `third_party/ffmpeg/source.json` under `build/deps/downloads/`
+first, and its checksum is still verified.
 
 The [FFmpeg bundle command](docs/FFMPEG.md) stages the shared libraries,
 license notices, exact source archive, and reproduction instructions together.

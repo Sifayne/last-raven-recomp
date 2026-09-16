@@ -125,6 +125,7 @@ const int lr_modern_controls_available = 1;
 #define FPS_PAUSE_BYTE   0x00459930u
 #define FPS_AC_COUNT     0x00459B10u
 #define FPS_AC_STRIDE    8896u
+#define FPS_AC_MAX       12u     /* the camera table sits 12.1 strides past AC[0] */
 #define FPS_TICK         0x00280DF0u
 #define FPS_TIMER        0x00498200u
 #include "fps_ac3.h"
