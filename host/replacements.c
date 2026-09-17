@@ -156,16 +156,34 @@ static void f32_write(uint32_t addr, float v) {
  * menu and model-preview cameras, and there are no entries into its interior.
  *
  * The guest framebuffer cannot become window-sized: movies, 2D drawing, CPU
- * reads and alpha-backed stencil all depend on its 480x272 layout. In adaptive
- * mode we therefore lend the original routine a *virtual* width for exactly
- * the duration of the call and restore the descriptor before returning. The
- * height stays 272, preserving vertical FOV; a wider drawable expands the
- * horizontal view and a narrower one contracts it. */
+ * reads and alpha-backed stencil all depend on its 480x272 layout. What the
+ * GE draws wider is decided by one number, the shared scene aspect at
+ * 0x00421040+268: missions rebuild the GE projection from it through
+ * 0000100C -> 002588D0, the garage copies the display camera's +724 into it
+ * in 00154C80, and 00088F6C builds the horizontal cull planes from it. So
+ * adaptive mode writes that aspect, and +724 as its garage source, as
+ * virtual_w/272, and otherwise lets the rebuild run against the real 480x272
+ * descriptor. The height stays 272, preserving vertical FOV; a wider drawable
+ * expands the horizontal view and a narrower one contracts it.
+ *
+ * The rebuild must not see the virtual width itself. Its focal length,
+ * (width/2)/tan(fov/2), goes into the camera's own projection at +64 and the
+ * combined matrices after it, which the GE never sees: the game projects
+ * with them on the CPU to place the lock box, the lock-on reticle and every
+ * other HUD element that tracks a world position. An earlier version lent
+ * the rebuild the virtual width for the duration of the call, and that
+ * scaled this projection by wide/480 in BOTH axes (reports/aspect-reticle,
+ * 32:9: P00 289.7 -> 583.6, P11 144.9 -> 291.8) while the GE scene widened
+ * horizontally only -- the targeting box grew past the screen edges and the
+ * reticle ran off its target. The GL backend places HUD draws 1:1 in the
+ * centred 480 columns, which is the scene's own pixel scale, so the HUD
+ * projection has to be the native one. */
 enum {
     RENDER_SYSTEM = 0x0043D8D0u,
     RENDER_ACTIVE = 260,
     RENDER_WIDTH = 12,
     RENDER_HEIGHT = 16,
+    CAMERA_ASPECT = 724,
     SCENE_CAMERA = 0x00421040u,
     SCENE_ASPECT = 268,
 };
@@ -176,11 +194,10 @@ void psp_func_000889B4(void) {
         return;
     }
 
+    const uint32_t camera = r_a0;
     const uint32_t render = psp_read32(RENDER_SYSTEM + RENDER_ACTIVE);
-    const uint32_t width_addr = render + RENDER_WIDTH;
-    const uint32_t height_addr = render + RENDER_HEIGHT;
-    const uint32_t old_w = render ? psp_read32(width_addr) : 0;
-    const uint32_t old_h = render ? psp_read32(height_addr) : 0;
+    const uint32_t old_w = render ? psp_read32(render + RENDER_WIDTH) : 0;
+    const uint32_t old_h = render ? psp_read32(render + RENDER_HEIGHT) : 0;
     /* Only the full display camera. Scratch previews and the inset Assembly
      * cameras keep their own aspect. GL places the latter in the centered
      * menu area using their viewport/scissor, on both transform paths. */
@@ -194,27 +211,21 @@ void psp_func_000889B4(void) {
      * agree. At the native 480:272 ratio it is exactly 480, so enabling the
      * option without resizing remains bit-for-bit on the original path. */
     const uint32_t virtual_w = (uint32_t)present_aspect_wide_width();
-    /* The garage copies camera+724 into its rendering camera in 00154C80.
-     * Missions instead rebuild the shared camera at 00421040 through
-     * 0000100C -> 002588D0, whose aspect at +268 otherwise stays 480/272.
-     * 00088F6C also reads that shared aspect for the horizontal cull planes.
-     * Keep both consumers in step with the display camera, including when
-     * resizing back to native width (before the identity-path return). */
-    f32_write(SCENE_CAMERA + SCENE_ASPECT, (float)virtual_w / (float)old_h);
-    if (virtual_w == old_w) {
-        psp_func_000889B4__orig();
-        return;
-    }
-
-    psp_write32(width_addr, virtual_w);
+    const float aspect = (float)virtual_w / (float)old_h;
+    /* Before the rebuild, because 00088F6C reads it for the cull planes;
+     * also when resizing back to native width, so the planes contract. */
+    f32_write(SCENE_CAMERA + SCENE_ASPECT, aspect);
     psp_func_000889B4__orig();
-    psp_write32(width_addr, old_w);
+    if (virtual_w == old_w) return;
+    /* After it: the rebuild stored 480/272 there, and the garage's 00154C80
+     * copies this field into the shared camera before projecting. */
+    f32_write(camera + CAMERA_ASPECT, aspect);
 
     static uint32_t last_virtual_w;
     if (virtual_w != last_virtual_w) {
         int draw_w = 0, draw_h = 0;
         present_gl_drawable_size(&draw_w, &draw_h);
-        printf("      aspect    drawable %dx%d, virtual camera %ux%u\n",
+        printf("      aspect    drawable %dx%d, scene %ux%u wide, HUD projection 480x272\n",
                draw_w, draw_h, (unsigned)virtual_w, (unsigned)old_h);
         last_virtual_w = virtual_w;
     }

@@ -1,6 +1,7 @@
 /* Exercise the game's camera code: renderer fixtures alone cannot detect a
- * mission projection that still uses the PSP aspect. Requires the local ELF
- * and generated module, but no window, ISO, save, or recorded RAM snapshot. */
+ * mission projection that still uses the PSP aspect, or a HUD projection
+ * that follows the window. Requires the local ELF and generated module, but
+ * no window, ISO, save, or recorded RAM snapshot. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,6 +87,18 @@ int main(int argc, char **argv) {
     check(near(psp_read_f32(SCENE + 192), px * 480 / 640),
           "mission horizontal projection follows drawable");
     check(psp_read_f32(SCENE + 212) == py, "vertical projection unchanged");
+    /* The camera's own matrices place the lock box and reticle on the CPU;
+     * the GL backend draws that HUD 1:1, so they must stay at 480x272. The
+     * width-derived fields +716/+720 stay native for the same reason; only
+     * the aspect the garage copies into the shared camera widens. */
+    check(!memcmp(native + 64, psp_mem_ptr(CAMERA + 64, 256), 256),
+          "HUD projection matrices stay native");
+    check(psp_read_f32(CAMERA + 716) == 1.0f && psp_read_f32(CAMERA + 720) == 1.0f,
+          "camera width and height scales stay native");
+    check(!memcmp(native, psp_mem_ptr(CAMERA, 448), 448) &&
+          !memcmp(native + 544, psp_mem_ptr(CAMERA + 544, 724 - 544), 724 - 544),
+          "only the cull planes at +448 and the aspect at +724 differ from native");
+    check(near(psp_read_f32(CAMERA + 724), 640.0f / 272.0f), "garage aspect follows drawable");
     check(near(fabsf(psp_read_f32(CAMERA + 456) / psp_read_f32(CAMERA + 448)),
                side * 640 / 480), "horizontal culling expands with projection");
     check(psp_read_f32(CAMERA + 724) == psp_read_f32(SCENE + 268),

@@ -515,7 +515,7 @@ static struct {
     GLuint   stage_fbo, stage_tex;
     int      stage_w, stage_h;
     uint64_t class_scene, class_hud, class_preview, hud_flushes, wide_allocs, wide_retired;
-    uint64_t hud_hazard_depth, hud_hazard_stencil, hud_hazard_dst_alpha;
+    uint64_t hud_depth_tests, hud_hazard_stencil, hud_hazard_dst_alpha;
     uint64_t hud_depth_func[8], hud_depth_writes;
     /* PSPRECOMP_ASPECT_LOG: what the HUD class holds, per texture. */
     struct { uint32_t addr; int w, h; uint64_t batches, tested; float z0, z1; } hud_by_tex[48];
@@ -2655,17 +2655,22 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
                 if (v[i].x > max_x) max_x = v[i].x;
             }
             const int full = min_x <= PSP_SUBPX && max_x >= (g.w - 1) * PSP_SUBPX;
-            /* A screen-space draw that tests depth reads the scene's depth
-             * and sits where the scene put its subject: the lock-on reticle
-             * is one, at the target's projected x. It belongs to the scene
-             * mapping, or it would miss both the target and the walls. */
-            const int reads_depth = g.z_test && g.z_func != 1;
-            if (ss && !full && !reads_depth) cls = CLASS_HUD;
-            if (ss && !full && reads_depth && getenv("PSPRECOMP_ASPECT_LOG")) {
+            /* Every other screen-space draw is HUD, including the ones that
+             * test depth (the lock-on reticle: two 64x64 sprites, GREATER).
+             * The game projects those on the CPU with the display camera's
+             * own matrices, which the camera replacement keeps at the native
+             * 480x272 focal length; a target d pixels from the centre gets
+             * its reticle d guest pixels from x=240, and the HUD mapping
+             * puts that at wide/2 + d -- the same target pixel the scene
+             * mapping gave the target (vertical FOV, so pixel scale, is
+             * unchanged). Its depth test therefore meets the target's own
+             * depth. The scene mapping would multiply d by wide/480 again. */
+            if (ss && !full) cls = CLASS_HUD;
+            if (ss && !full && g.z_test && g.z_func != 1 && getenv("PSPRECOMP_ASPECT_LOG")) {
                 static int said;
                 if (said++ < 16)
                     fprintf(stderr, "aspect: screen-space draw tests depth (func %d)"
-                                    " -> scene: %d verts, x %.1f..%.1f, tex %08X %dx%d,"
+                                    " -> HUD: %d verts, x %.1f..%.1f, tex %08X %dx%d,"
                                     " at present %llu\n",
                             g.z_func, count, (float)min_x / PSP_SUBPX,
                             (float)max_x / PSP_SUBPX,
@@ -2966,12 +2971,15 @@ static void flush(void) {
     if (r->wide && g.batch_class == CLASS_HUD) {
         p_glViewport(rt_off(r), 0, r->guest_w, r->h);
         g.hud_flushes++;
-        /* A HUD batch reading depth, stencil or destination alpha would meet
-         * scene pixels placed by the other mapping. Counted, not handled:
-         * this game's HUD is expected never to do it, and the report says. */
+        /* A HUD batch that tests depth is the lock-on reticle, and it meets
+         * its target's depth: both sit at the native pixel offset from the
+         * centre (see the classification). Counted for the report. A HUD
+         * batch reading stencil or destination alpha at an arbitrary place
+         * would meet scene pixels placed by the other mapping; counted, not
+         * handled: this game's HUD is expected never to do it. */
         if (g.z_test) {
             g.hud_depth_func[g.z_func & 7]++;
-            if (g.z_func != 1) g.hud_hazard_depth++;   /* ALWAYS reads nothing */
+            if (g.z_func != 1) g.hud_depth_tests++;   /* ALWAYS reads nothing */
         }
         if (getenv("PSPRECOMP_ASPECT_LOG")) {
             const uint32_t key = g.tex_enable ? g.tex.addr : 0u;
@@ -3709,13 +3717,13 @@ void render_gl_report(FILE *out) {
                 (unsigned long long)g.glyph_draws);
     if (g.adaptive_aspect)
         fprintf(out, "\n          aspect: virtual width %d (x%.4f), %llu scene draw(s),"
-                     " %llu HUD draw(s) in %llu batch(es), HUD hazards depth %llu"
-                     " stencil %llu dst-alpha %llu, %llu wide allocation(s), %llu retired,"
+                     " %llu HUD draw(s) in %llu batch(es), %llu HUD batch(es) depth-tested,"
+                     " HUD hazards stencil %llu dst-alpha %llu, %llu wide allocation(s), %llu retired,"
                      " %llu preview draw(s)",
                 g.wide_w, (double)g.wide_w / (double)g.w,
                 (unsigned long long)g.class_scene, (unsigned long long)g.class_hud,
                 (unsigned long long)g.hud_flushes,
-                (unsigned long long)g.hud_hazard_depth,
+                (unsigned long long)g.hud_depth_tests,
                 (unsigned long long)g.hud_hazard_stencil,
                 (unsigned long long)g.hud_hazard_dst_alpha,
                 (unsigned long long)g.wide_allocs, (unsigned long long)g.wide_retired,
@@ -3726,7 +3734,7 @@ void render_gl_report(FILE *out) {
                 (unsigned long long)g.hud_by_tex[k].batches,
                 (unsigned long long)g.hud_by_tex[k].tested,
                 g.hud_by_tex[k].z0, g.hud_by_tex[k].z1);
-    if (g.adaptive_aspect && (g.hud_hazard_depth || g.hud_depth_writes)) {
+    if (g.adaptive_aspect && (g.hud_depth_tests || g.hud_depth_writes)) {
         fprintf(out, "\n          HUD depth: %llu write(s); tests by func",
                 (unsigned long long)g.hud_depth_writes);
         for (int f = 0; f < 8; f++)

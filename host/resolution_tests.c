@@ -13,6 +13,10 @@ enum { W = 480, H = 272, STRIDE = 512 };
 #define A 0x04000000u
 #define B 0x04088000u
 #define SCRATCH 0x04154000u
+/* present.c offers the adaptive aspect only to a title with a camera
+ * replacement; the fixture stands in for host/replacements.c here, or its
+ * window-aspect configurations would silently run the original view. */
+const int lr_adaptive_aspect_available = 1;
 static const psp_render_backend *be;
 static unsigned checks, failures;
 static void check(int yes, const char *why) {

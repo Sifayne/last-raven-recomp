@@ -1,5 +1,7 @@
 /* Synthetic GE lists to physical GL pixels: inset perspective views must
- * share menu placement, scissor and depth clears on both transform paths. */
+ * share menu placement, scissor and depth clears on both transform paths,
+ * and a depth-tested screen-space sprite (the lock-on reticle) must be
+ * placed with the HUD. */
 #include "present.h"
 #include "render_gl.h"
 #include "psprecomp/hle.h"
@@ -14,6 +16,10 @@
 #define SCRATCH 0x04154000u
 #define LIST 0x08800000u
 #define VERTS 0x08810000u
+/* present.c offers the adaptive aspect only to a title with a camera
+ * replacement; the fixture stands in for host/replacements.c here, or its
+ * window-aspect configurations would silently run the original view. */
+const int lr_adaptive_aspect_available = 1;
 static const psp_render_backend *be;
 static unsigned pc, va, checks, failures;
 static double scene_scale, ui_scale, yscale, ui_offset;
@@ -119,6 +125,21 @@ static void scene_views(void) {
     model(0xFF0000FF, 0.4f, -2); end();
     expect(FB, 378, 107, 0, 0x0000FF, "inset viewport requires matching scissor");
 }
+static void hud_views(void) {
+    /* The lock-on reticle: a screen-space sprite that tests depth. The game
+     * projects it with the display camera's native focal length, so the
+     * centred 1:1 HUD placement is where its target is; spreading it with
+     * the scene would multiply its offset from the centre a second time. */
+    begin(FB, 512); clear(4, 65535);
+    cmd(0xDE, 7); /* GEQUAL: passes against the cleared depth. */
+    cmd(0x12, (7 << 2) | (3 << 7) | (1 << 23)); cmd(0x01, va & 0xFFFFFF);
+    vertex(300, 100, 65535, 0xFFFF00FF); vertex(316, 116, 65535, 0xFFFF00FF);
+    cmd(0x04, (6 << 16) | 2);
+    end();
+    expect(FB, 308, 108, 1, 0xFF00FF, "depth-tested screen-space sprite is placed with the HUD");
+    if (ui_offset > 0 || fabs(scene_scale - ui_scale) > 0.01)
+        expect(FB, 308, 108, 0, 0, "depth-tested screen-space sprite is not spread with the scene");
+}
 static void set_size(int dw, int dh) {
     present_request_window_size(dw, dh);
     int w = 0, h = 0;
@@ -146,7 +167,7 @@ int main(void) {
     present_want_gl(); if (present_start() || be->init(480, 272)) return 2;
     const int sizes[][2] = {{1920,720},{960,544},{1440,544}};
     for (unsigned i = 0; i < sizeof sizes/sizeof sizes[0]; i++) {
-        set_size(sizes[i][0], sizes[i][1]); inset_views(); scene_views();
+        set_size(sizes[i][0], sizes[i][1]); inset_views(); scene_views(); hud_views();
     }
     begin(SCRATCH, 256); viewport(16, 16, 96, 64); scissor(16,16,111,79);
     clear(4, 65535); model(0xFF00FF00, 4, -2); end();

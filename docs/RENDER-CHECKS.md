@@ -168,7 +168,10 @@ separate shared camera through `0000100C -> 002588D0`. Its aspect at
 across the wider output even though the HUD was centered. The camera
 replacement now updates that shared aspect before rebuilding. `00088F6C`
 uses the same value for horizontal culling. Resizing back to native width
-restores it before taking the native-width fast path.
+restores it before taking the native-width fast path. (Since 17 September
+those two aspect fields are the only thing the replacement changes; see
+"Targeting HUD at wide aspect" below for why the rebuild itself must run at
+480x272.)
 
 ```bash
 # Actual recompiled camera/projection/culling code, without SDL or a full boot.
@@ -347,6 +350,71 @@ assuming later lists' memory survived. Captures also omit initial depth and
 GPU allocation history; the selected frames perform depth clears, but they
 are not proof of arbitrary history-dependent rendering. Software remains a
 useful differential oracle, not a substitute for PSP/PPSSPP reference checks.
+
+## Targeting HUD at wide aspect — 17 September 2026
+
+Sif reported the targeting UI leaving the screen on wide windows. Reproduced
+with `yaw-sweep.pad` in a 2560x720 window (32:9, virtual width 967): the
+yellow lock box was twice its size in both axes, its top and bottom past the
+screen edges, and in the poll-2220 cutscene lock the red reticle sat twice as
+far from the centre as its target. `reports/aspect-reticle/` holds the
+frames (`native-*`, `wide32-*` before, `fixed32-*`/`fixed21-*` after) and RAM
+snapshots.
+
+Cause: the camera rebuild `000889B4` computes a focal length
+`(width/2)/tan(fov/2)` from the render descriptor's width and builds the
+display camera's own projection at `camera+64` (and the combined matrices
+after it) from it. The GE never sees those matrices; the game projects with
+them on the CPU to place the lock box, the lock-on reticle and the other
+HUD elements that track a world position. Lending the rebuild the virtual
+width scaled that projection by `wide/480` in both axes -- the 32:9
+snapshots show P00 289.7 -> 583.6 and P11 144.9 -> 291.8 -- while the GE
+scene, rebuilt from the shared aspect with a constant vertical FOV, widened
+horizontally only. On top of that the renderer spread the depth-tested
+reticle sprites with the scene mapping, multiplying their horizontal offset
+by `wide/480` a second time.
+
+Fix: the replacement runs the rebuild against the real 480x272 descriptor
+and writes only the two aspect consumers, `0x00421040+268` (mission GE
+projection and cull planes) and `camera+724` (the garage's copy), as
+`virtual_w/272`. The camera's own matrices and `+716/+720` stay native. The
+GL backend now places every non-full-width screen-space draw with the HUD,
+the depth-tested reticle included: a target `d` native pixels from the
+centre gets its reticle at guest `240+d`, the HUD mapping puts that at
+`wide/2+d`, and that is the target's own pixel under the scene mapping, so
+the depth test meets the target's depth. The report's "HUD hazards depth"
+counter became "HUD batches depth-tested"; it counts the reticle.
+
+Measured on the window images, in PSP pixels from the screen centre
+(`native` is a 1440x816 window at the original aspect):
+
+| Frame | native | 32:9 before | 32:9 after | 21.5:9 after |
+| --- | --- | --- | --- | --- |
+| Red lock box + reticle, poll ~2220: x range | -14..121 | -27..122 (clipped) | -12..121 | -11..122 |
+| Same: y range | -87..41 | -38..82 | -87..42 | -86..42 |
+| Yellow lock box, poll ~2340: width x height | 198 x 215 | 260 x 223 (clipped) | 198 x 215 | 198 x 214 |
+
+Known limit: a locked target in the wide bands beyond the centred 480
+columns projects to guest x outside 0..480 and the game does not draw its
+reticle there; the box and reticle are exact within the native area.
+
+```bash
+# Camera code: the HUD projection stays native while the scene widens (39 checks).
+scripts/14-aspect-tests.sh
+
+# Synthetic GE lists: a depth-tested screen-space sprite lands with the HUD.
+scripts/17-preview-tests.sh
+```
+
+Both GL fixtures had been running their window-aspect configurations at the
+original aspect since 7 September: `present.c` offers the adaptive aspect
+only when a title's replacement defines `lr_adaptive_aspect_available`, and
+the fixtures do not link one. They now define it themselves; the preview
+fixture passes 49 checks at the original aspect and 51 in window aspect on
+each transform path, the resolution fixture 40 in each mode, renderer
+fixtures 430/430 on both backends. Fresh 2560x720 and 1720x720 `yaw-sweep`
+runs deliver 117/117 events over 3100 polls with zero bad accesses; each
+reports 848 depth-tested HUD batches, the two 64x64 reticle textures.
 
 ## Self-contained tests
 
