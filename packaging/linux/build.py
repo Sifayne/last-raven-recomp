@@ -157,6 +157,12 @@ def main():
             env={**os.environ, "SDL_AUDIODRIVER": "dummy"})
     ui = BUILD / "ui-checks"
     ui.mkdir()
+    run([obj / "savedata-tests"])
+    for mode in ("software", "controller", "gl"):
+        run(["xvfb-run", "-a", "-s", "-screen 0 1280x800x24",
+             obj / "save-dialog-tests", mode, ui],
+            env={**os.environ, "SDL_AUDIODRIVER": "dummy",
+                 "PSPRECOMP_UI_FONT": str(font / "ttf/DejaVuSans.ttf")})
     run([obj / "launcher-tests", ui, font / "ttf/DejaVuSans.ttf"],
         env={**os.environ, "SDL_VIDEODRIVER": "dummy"})
     print("Staging only app binaries, dependencies, font and notices...", flush=True)
@@ -185,6 +191,7 @@ def main():
     squash = unpack("squashfuse-0.5.2.tar.gz", "squashfuse")
     notices = [(ROOT / "LICENSE", "last-raven/LICENSE"),
         (ROOT / "tools/psprecomp/LICENSE", "psprecomp/LICENSE"),
+        (ROOT / "third_party/stb/LICENSE", "stb/LICENSE"),
         (sdl / "LICENSE.txt", "SDL/LICENSE.txt"), (ttf / "LICENSE.txt", "SDL_ttf/LICENSE.txt"),
         (ttf / "external/freetype/docs/FTL.TXT", "FreeType/FTL.TXT"),
         (h264 / "LICENSE", "OpenH264/LICENSE"), (font / "LICENSE", "DejaVu/LICENSE"),

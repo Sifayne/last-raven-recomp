@@ -59,6 +59,7 @@ class Library:
             self.game_builds[profile["slug"]] = fingerprint
         self.record = self.data / "installed.json"
         self.env = os.environ.copy()
+        self.env.setdefault("PSPRECOMP_UI_FONT", str(self.resources / "DejaVuSans.ttf"))
         for key in ("CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH"):
             self.env.pop(key, None)
         self.env["ZIG_GLOBAL_CACHE_DIR"] = str(self.data / "compiler-cache")

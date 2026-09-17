@@ -64,8 +64,11 @@ files are byte-exact; `sceAtrac3plus` decodes through libavcodec, and so does
 the movie's audio substream. Reverb and the noise generator are the only
 pieces not built, deliberately.
 
-Saves: the game writes a real save to `ms0:` and loads it back — M4's gate,
-passed 3 Sep.
+Saves: the game writes a real save to `ms0:` and loads it back — M4's original
+gate, passed 3 Sep. Interactive slot selection is implemented (16 Sep) and drawn
+to the PSP utility's own layout from real-hardware captures (17 Sep); player
+acceptance on the trilogy is still open. See
+[the shared save-dialog implementation plan](SAVEDATA-UI.md).
 
 **Sibling titles (7 Sep).** Armored Core 3 Portable (NPUH10023) and Silent
 Line Portable (NPUH10025) go through the same pipeline unmodified:
@@ -350,6 +353,15 @@ for it now.
 
 ## M4 — Saves ✅ 3 Sep
 
+**Shared dialog implemented, 16 Sep; reviewed and restyled, 17 Sep:** slot
+selection, confirmation/cancellation and selected deletion live in the shared
+runtime and host; the overlay follows the PSP utility's layout (the save's own
+PIC1 as backdrop, an icon column, the game's title/date/detail text, Cross and
+Circle prompts) measured from real-hardware captures. Focused runtime,
+software/GL and packaged UI checks pass. The [save-dialog plan](SAVEDATA-UI.md)
+records evidence, the review's fixes and open items, and the remaining trilogy,
+physical-controller and Deck acceptance checks.
+
 **Gate — passed.** Save in the garage, quit, relaunch, load. `utility/savedata`
 worked targeted.
 
@@ -370,40 +382,23 @@ item 43.
 - `ms0:` as a host directory, a PARAM.SFO writer, the savedata modes the game
   uses (measured from the HLE log, not the enum), the result codes, and the
   five `sceIo` directory calls from M1 made real.
-- No dialog UI. The dialog auto-completes, as it does now.
-- **One save slot, for now** (decided 3 Sep). "No dialog UI" above is about
-  not drawing Sony's system dialog -- a list of slots with icons and a
-  confirm prompt, firmware UI this project has no layer for. Choosing a slot
-  is a separate matter that the phrase hid. Where the game names the slot in
-  `param.saveName` we honour it and any number of slots work; AUTOSAVE
-  already walks `saveNameList` for the first free one. The single slot is
-  what is left when a caller leaves `saveName` empty and delegates the choice
-  to the dialog: we take the first list entry every time.
-
-  **Deferred, not dismissed.** The parameter block carries `focus`, which
-  says which entry hardware's dialog would highlight -- first, latest,
-  oldest, first empty, last empty. Reading it, together with the list,
-  picks the slot the dialog would have defaulted to without drawing
-  anything: about forty lines in `hle/utility.c`, where the offset is
-  already defined and unread. Do it when a save appears that the game
-  cannot reach, or before anyone calls this feature-complete.
-
-  Whether this game is even affected is still open, though less so since
-  Sif saved from the garage in a windowed run on 3 Sep: the game wrote
-  `ms0:/PSP/SAVEDATA/NPUH10024ACLRSAVELIST00/` complete with 28K of save
-  data, a well-formed PARAM.SFO naming the title, the pilot and the AC, and
-  the game's own ICON0 and PIC1. So the writing half of the gate is met, by
-  the game rather than by the suite. The slot-indexed name suggests the game
-  numbers its own slots and passes each explicitly, which is the harmless
-  case -- but a LISTSAVE whose list begins with that name produces the same
-  directory, so it is not settled. Saving once more with
-  `PSPRECOMP_SAVEDATA_LOG=1` prints the mode and whether `saveName` is set,
-  and settles it in one line.
-
-  **What is left of the gate: the load.** No scenario reaches it -- the
-  garage recording starts a new game every time, so a replay only ever makes
-  the boot free-space call. It wants a windowed relaunch that picks continue
-  or load, or a recording that does.
+- The original dialog auto-completed. Its list-save default and ignored focus
+  have been replaced by explicit selection using the game's allowed slots.
+- **Shared UI implemented (16 Sep).** Static inspection confirms list-save,
+  list-load and latest-save focus setup in Last Raven, AC3 and Silent Line.
+  The original temporary-card probe found false-success list-load and bulk
+  list-delete behavior. Both now use a selection/confirmation lifecycle with
+  error results and deletion of only the selected save.
+- A better automatic default is insufficient for playing multiple saves.
+  Keep PSP semantics and file operations in `tools/psprecomp/src/hle/utility.c`;
+  put the overlay in new `host/save_dialog.c` / `.h`, with input/software
+  presentation in `host/present.c` and GL composition in `host/render_gl.c`.
+- **New gate:** save two distinct slots, relaunch and load each, cancel a save,
+  decline overwrite, and delete only the selected slot. Validate all three
+  titles, both renderers, real controller input, deterministic dialog tests
+  and the packaged launcher-to-game path. Existing boot/garage replays do not
+  exercise these decisions. Full sequence and acceptance matrix:
+  [SAVEDATA-UI.md](SAVEDATA-UI.md).
 
 ## M5 — A GPU backend, and real time
 

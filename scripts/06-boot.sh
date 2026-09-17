@@ -45,6 +45,8 @@ cmake --build "$ROOT/build/psprecomp" -j"$(nproc)" >/dev/null
 PRESENT=""
 SDL_DEF=""
 if pkg-config --exists sdl2 2>/dev/null; then
+    pkg-config --exists SDL2_ttf 2>/dev/null ||
+        die "SDL2 is installed but SDL2_ttf is not: the in-game save dialog needs it (install sdl2_ttf), or remove SDL2 to build a headless host"
     SDL_DEF="-DHAVE_SDL2"
 else
     info "no SDL2 -- building headless only"
@@ -79,15 +81,18 @@ done
 if [ -n "$SDL_DEF" ]; then
     info "compiling presentation layer (SDL2)"
     # The window is titled after the profile's TITLE.
-    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2) -DGAME_TITLE="\"$TITLE\"" \
+    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) -DGAME_TITLE="\"$TITLE\"" \
        -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
        -c "$ROOT/host/present.c" -o "$OUT/present.o"
     # The GL backend is compiled here rather than with the runtime: it needs a
     # window and a GL context, and the core stays dependency-free on purpose.
-    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2) \
+    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
        -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
        -c "$ROOT/host/render_gl.c" -o "$OUT/render_gl.o"
-    PRESENT="$OUT/present.o $OUT/render_gl.o $(pkg-config --libs sdl2)"
+    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
+       -I "$ROOT/tools/psprecomp/include" \
+       -c "$ROOT/host/save_dialog.c" -o "$OUT/save_dialog.o"
+    PRESENT="$OUT/present.o $OUT/save_dialog.o $OUT/render_gl.o $(pkg-config --libs sdl2 SDL2_ttf)"
 fi
 
 # Without SDL2 there is no window, so render_gl.c compiles to its
@@ -102,7 +107,7 @@ fi
 # host because it shares the presentation layer -- the gl backend needs a
 # window wherever it runs.
 info "compiling gereplay"
-cc -O2 -std=gnu11 $SDL_DEF ${SDL_DEF:+$(pkg-config --cflags sdl2)} \
+cc -O2 -std=gnu11 $SDL_DEF ${SDL_DEF:+$(pkg-config --cflags sdl2 SDL2_ttf)} \
    -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
    -c "$ROOT/host/gereplay.c" -o "$OUT/gereplay.o"
 

@@ -48,6 +48,6 @@ def compile_game(app, profile, module, output, jobs, env, log):
     run([*cc, '-O2', '-DHAVE_SDL2', '-c', host / profile['replacements'], '-o', obj / 'replacements.o'])
     print('Finishing game setup...', flush=True)
     run([*cc, '-O2', *sorted(obj.glob('*.o')), resources / f'libhost-{slug}.a',
-         resources / 'libruntime.a', '-L', app / 'usr/lib', '-lSDL2', '-lopenh264', '-lavcodec', '-lavutil',
+         resources / 'libruntime.a', '-L', app / 'usr/lib', '-lSDL2', '-lSDL2_ttf', '-lopenh264', '-lavcodec', '-lavutil',
          '-lm', '-lpthread', '-Wl,-rpath,$ORIGIN/lib', '-o', output])
     run([output, '--print-settings'])

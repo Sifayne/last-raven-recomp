@@ -16,6 +16,7 @@
 #include "present.h"
 #include "controls.h"
 #include "settings.h"
+#include "save_dialog.h"
 
 #include "psprecomp/clock.h"
 #include "psprecomp/hle.h"
@@ -329,6 +330,9 @@ static void set_button(uint8_t b, int down) {
 static _Atomic uint8_t  g_pad_rx = 128, g_pad_ry = 128;
 static int              g_mouse_want;       /* PSPRECOMP_MOUSE=1 */
 static int              g_mouse_grabbed;
+static int              g_dialog_block_input;
+static Uint64           g_dialog_closed_at;
+static int              g_dialog_mouse_was_grabbed;
 
 static uint8_t axis_byte(int16_t value) {
     /* Preserve the complete SDL range here.  The selected control profile
@@ -380,6 +384,11 @@ static void mouse_grab(int on) {
 /* Publish the whole pad state after any change, so a guest poll between two
  * events of one press never sees the press half-applied. Cheap. */
 static void publish_pad(void) {
+    if (g_dialog_block_input || save_dialog_active()) {
+        psp_ctrl_set(0, 128, 128);
+        psp_ctrl_set_look(128, 128);
+        return;
+    }
     const uint8_t kax = atomic_load(&g_key_ax), kay = atomic_load(&g_key_ay);
     const uint32_t buttons = atomic_load(&g_key_buttons) |
                              atomic_load(&g_mouse_buttons) |
@@ -737,6 +746,7 @@ void *present_gl_proc(const char *name) { return SDL_GL_GetProcAddress(name); }
 
 /* Window close and both shortcuts share the scheduler's normal shutdown. */
 static void close_game_window(void) {
+    save_dialog_shutdown();
     /* What the mixer saw, per channel: frames pushed, dropped
      * for a full ring, and the times the ring ran dry -- each
      * of those a gap the listener heard. */
@@ -907,6 +917,10 @@ static void *sdl_thread(void *arg) {
     fprintf(stderr, "present: quit with Ctrl+Shift+Q or hold View + Menu (Select + Start) for 2 seconds\n");
     open_first_controller();
 
+    if (save_dialog_init() != 0)
+        fprintf(stderr, "present: in-game save dialog unavailable (%s); interactive save/load requests will be cancelled\n",
+                save_dialog_error() ? save_dialog_error() : "unknown reason");
+
     start_publish(1);
 
     for (;;) {
@@ -994,8 +1008,42 @@ static void *sdl_thread(void *arg) {
             }
         }
 
+        const int was_dialog = save_dialog_active();
+        save_dialog_update(g_controller);
+        if (save_dialog_active() && !was_dialog) {
+            g_dialog_block_input = 1;
+            g_dialog_closed_at = 0;
+            g_dialog_mouse_was_grabbed = g_mouse_grabbed;
+            mouse_grab(0);
+            clear_keys();
+            clear_controller();
+            g_mouse_down = 0;
+            atomic_store(&g_mouse_buttons, 0);
+            psp_ctrl_clear_mouse();
+            publish_pad();
+        } else if (!save_dialog_active() && g_dialog_block_input) {
+            /* Game input resumes once the dialog's own controls are released,
+             * or after a second regardless: a key or button whose release
+             * SDL never reports must not leave the game deaf. */
+            const Uint64 now = SDL_GetTicks64();
+            if (!g_dialog_closed_at) g_dialog_closed_at = now;
+            const int neutral = save_dialog_input_neutral(g_controller);
+            if (neutral || now - g_dialog_closed_at >= 1000) {
+                if (!neutral)
+                    fprintf(stderr, "present: input still held a second after the save dialog closed; resuming game input\n");
+                g_dialog_block_input = 0;
+                g_dialog_closed_at = 0;
+                clear_keys();
+                clear_controller();
+                sample_controller();
+                publish_pad();
+                if (g_dialog_mouse_was_grabbed) mouse_grab(1);
+                g_dialog_mouse_was_grabbed = 0;
+            }
+        }
         if (tex) {
             SDL_RenderCopy(ren, tex, NULL, NULL);
+            save_dialog_draw_software(ren);
             SDL_RenderPresent(ren);
         }
 
@@ -1004,6 +1052,16 @@ static void *sdl_thread(void *arg) {
             if (quit_key_event(&e)) {
                 fprintf(stderr, "present: keyboard quit shortcut\n");
                 e.type = SDL_QUIT;
+            }
+            if (save_dialog_event(&e, g_controller_id) ||
+                (g_dialog_block_input && (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP ||
+                 e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP ||
+                 e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP ||
+                 e.type == SDL_CONTROLLERAXISMOTION))) {
+                if ((e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP) &&
+                    e.cbutton.which == g_controller_id)
+                    quit_chord_button(e.cbutton.button, e.cbutton.state, SDL_GetTicks64());
+                continue;
             }
             switch (e.type) {
             case SDL_QUIT:

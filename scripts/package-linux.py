@@ -111,6 +111,9 @@ def copy_inputs(dest):
              "host/settings_tool.c", "host/settings_tests.c", "host/launcher_tests.c",
              "host/boot.c", "host/present.c", "host/present.h", "host/render_gl.c", "host/render_gl.h",
              "host/present_tests.c", "scripts/test_present.sh",
+             "host/save_dialog.c", "host/save_dialog.h",
+             "host/save_dialog_tests.c", "scripts/test_savedata.sh", "docs/SAVEDATA-UI.md",
+             "tools/psprecomp/tests/test_savedata.c",
              "host/controls.h", "host/stick.h", "host/ac3_controls.h",
              "host/fps.h", "host/fps_clock.h", "host/fps_aclr.h", "scripts/fps-loop.py",
              "host/fps_joints.h", "host/fps_ac3.h",
@@ -126,6 +129,7 @@ def copy_inputs(dest):
         shutil.copy2(ROOT / name, target)
     shutil.copytree(RECIPE, dest / "packaging/linux", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copytree(ROOT / "third_party/ffmpeg", dest / "third_party/ffmpeg")
+    shutil.copytree(ROOT / "third_party/stb", dest / "third_party/stb")
     runtime = ROOT / "tools/psprecomp"
     if not (runtime / "src/cpu.c").is_file():
         raise ValueError("tools/psprecomp runtime source is missing; initialize the submodule first")

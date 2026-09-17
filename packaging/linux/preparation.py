@@ -87,7 +87,7 @@ def stage_tools(b, tools, obj):
     b.run([b.APP / "usr/python/bin/python3.12", "-I", "-B", "-c",
            "import json, hashlib, subprocess, concurrent.futures, fcntl; print(hashlib.sha256(b'check').hexdigest())"])
     abis = {}
-    for name in ("SDL2", "openh264", "avcodec", "avutil"):
+    for name in ("SDL2", "SDL2_ttf", "openh264", "avcodec", "avutil"):
         dynamic = b.capture(["readelf", "-d", b.APP / f"usr/lib/lib{name}.so"])
         soname = re.findall(r"\(SONAME\).*\[(.*?)\]", dynamic)
         if len(soname) != 1:

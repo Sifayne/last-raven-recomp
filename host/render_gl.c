@@ -43,6 +43,8 @@ int render_gl_resolution_mode(void) {
 
 #ifdef HAVE_SDL2
 
+#include "save_dialog.h"
+#include "psprecomp/savedata.h"
 #include <SDL_opengl.h>
 #include <pthread.h>
 
@@ -1870,6 +1872,7 @@ static int claim(void) {
 }
 
 /* ---- the interface ---------------------------------------------------------- */
+static int gl_dialog_redraw(void);
 
 static int gl_init(int w, int h) {
     /* No GL here on purpose: this runs on boot.c's thread, not the GE's. */
@@ -1879,10 +1882,12 @@ static int gl_init(int w, int h) {
     g.resolution = render_gl_resolution_mode();
     if (g.resolution < 0) return -1;
     g.adaptive_aspect = present_adaptive_aspect();
+    psp_savedata_set_redraw(gl_dialog_redraw);
     return 0;
 }
 
 static void gl_shutdown(void) {
+    psp_savedata_set_redraw(NULL);
     if (g_rb.async) readback_complete(-1);
     psp_mem_set_vram_access_observer(NULL, 0, 0);
     psp_mem_set_write_observer(NULL);
@@ -3243,10 +3248,10 @@ static void note_frame_time(void) {
  * dumps in boot.c and display.c read guest memory, which in this backend is
  * the readback -- never the drawable. This is the only view of what the
  * window actually shows, and it is what a text-sharpness claim rests on. */
-static void gl_shot(int draw_w, int draw_h) {
+static void gl_shot(int draw_w, int draw_h, int dialog) {
     static const char *prefix;
     static int every = -1;
-    static unsigned n;
+    static unsigned counters[2]; /* game presents, dialog redraws: numbered apart */
     if (every < 0) {
         prefix = getenv("PSPRECOMP_GL_SHOT");
         if (prefix && !*prefix) prefix = NULL;
@@ -3255,7 +3260,7 @@ static void gl_shot(int draw_w, int draw_h) {
         if (every < 1) every = 1;
     }
     if (!prefix || draw_w <= 0 || draw_h <= 0) return;
-    const unsigned idx = n++;
+    const unsigned idx = counters[dialog ? 1 : 0]++;
     if (idx % (unsigned)every) return;
     uint8_t *px = malloc((size_t)draw_w * (size_t)draw_h * 4u);
     uint8_t *row = malloc((size_t)draw_w * 3u);
@@ -3263,7 +3268,7 @@ static void gl_shot(int draw_w, int draw_h) {
         p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         p_glReadPixels(0, 0, draw_w, draw_h, GL_RGBA, GL_UNSIGNED_BYTE, px);
         char path[512];
-        snprintf(path, sizeof path, "%s-%04u.ppm", prefix, idx / (unsigned)every);
+        snprintf(path, sizeof path, "%s%s-%04u.ppm", prefix, dialog ? "-dialog" : "", idx / (unsigned)every);
         FILE *f = fopen(path, "wb");
         if (f) {
             fprintf(f, "P6\n%d %d\n255\n", draw_w, draw_h);
@@ -3283,13 +3288,68 @@ static void gl_shot(int draw_w, int draw_h) {
     free(row);
 }
 
-static void gl_present(void) {
-    if (claim() != 0) return;
-    g.presents++;
-    flush_ends(FB_PRESENT); flush();
-    /* Count deferred alpha/stencil transfers inside the GPU frame timer. */
-    for (int i = 0; i < g.n_rts; i++) stencil_to_alpha(&g.rts[i]);
-
+/* Overlay GL resources and calls belong exclusively to the GE owner thread. */
+static GLuint dialog_program, dialog_texture, dialog_vao;
+static uint64_t dialog_revision;
+static uint32_t dialog_pixels[SAVE_DIALOG_W * SAVE_DIALOG_H];
+static int dialog_failed;
+/* The utility replaces the picture: the overlay is fitted into the game's
+ * picture box, and the box is blacked out first so a wider game image does
+ * not show beside the 480:272 dialog. */
+static void gl_dialog_overlay(int x, int y, int width, int height) {
+    uint64_t previous=dialog_revision;
+    if (!save_dialog_copy_pixels(dialog_pixels,&dialog_revision) || dialog_failed) return;
+    GLint old_program,old_texture,old_vao,viewport[4];
+    p_glGetIntegerv(GL_CURRENT_PROGRAM,&old_program);
+    p_glGetIntegerv(GL_TEXTURE_BINDING_2D,&old_texture);
+    p_glGetIntegerv(GL_VERTEX_ARRAY_BINDING,&old_vao);
+    p_glGetIntegerv(GL_VIEWPORT,viewport);
+    if (!dialog_program) {
+        GLuint vs=compile(GL_VERTEX_SHADER,
+            "#version 330 core\n"
+            "out vec2 uv; void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);"
+            "gl_Position=vec4(p*2.-1.,0,1);uv=vec2(p.x,1.-p.y);}","savedata vertex");
+        GLuint fs=compile(GL_FRAGMENT_SHADER,
+            "#version 330 core\n"
+            "in vec2 uv; uniform sampler2D tex; out vec4 color;"
+            "void main(){color=texture(tex,uv);}","savedata fragment");
+        if (!vs || !fs) { dialog_failed=1; return; }
+        dialog_program=p_glCreateProgram();
+        p_glAttachShader(dialog_program,vs); p_glAttachShader(dialog_program,fs);
+        p_glLinkProgram(dialog_program); p_glDeleteShader(vs); p_glDeleteShader(fs);
+        GLint ok=0; p_glGetProgramiv(dialog_program,GL_LINK_STATUS,&ok);
+        if (!ok) { dialog_failed=1; return; }
+        p_glGenVertexArrays(1,&dialog_vao); p_glGenTextures(1,&dialog_texture);
+        p_glBindTexture(GL_TEXTURE_2D,dialog_texture);
+        p_glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+        p_glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+        p_glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+        p_glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        p_glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,SAVE_DIALOG_W,SAVE_DIALOG_H,0,GL_RGBA,GL_UNSIGNED_BYTE,dialog_pixels);
+    } else {
+        p_glBindTexture(GL_TEXTURE_2D,dialog_texture);
+        if (previous!=dialog_revision)
+            p_glTexSubImage2D(GL_TEXTURE_2D,0,0,0,SAVE_DIALOG_W,SAVE_DIALOG_H,GL_RGBA,GL_UNSIGNED_BYTE,dialog_pixels);
+    }
+    int w=width,h=(int)((int64_t)width*SAVE_DIALOG_H/SAVE_DIALOG_W);
+    if (h>height) { h=height; w=(int)((int64_t)h*SAVE_DIALOG_W/SAVE_DIALOG_H); }
+    p_glEnable(GL_SCISSOR_TEST); p_glScissor(x,y,width,height);
+    p_glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
+    p_glClearColor(0.0f,0.0f,0.0f,1.0f); p_glClear(GL_COLOR_BUFFER_BIT);
+    p_glViewport(x+(width-w)/2,y+(height-h)/2,w,h);
+    p_glDisable(GL_DEPTH_TEST); p_glDisable(GL_STENCIL_TEST); p_glDisable(GL_SCISSOR_TEST);
+    p_glDisable(GL_CULL_FACE); p_glEnable(GL_BLEND);
+    p_glBlendEquation(GL_FUNC_ADD); p_glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+    p_glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
+    p_glUseProgram(dialog_program); p_glBindVertexArray(dialog_vao);
+    p_glDrawArrays(GL_TRIANGLES,0,3);
+    p_glUseProgram((GLuint)old_program); p_glBindVertexArray((GLuint)old_vao);
+    p_glBindTexture(GL_TEXTURE_2D,(GLuint)old_texture);
+    p_glViewport(viewport[0],viewport[1],viewport[2],viewport[3]);
+    /* Both draw paths reapply their PSP state; model draws normally cache it. */
+    g.mu.disturbed=1;
+}
+static void gl_compose(int dialog_redraw) {
     /* The current target, scaled into the window's physical GL drawable. SDL
      * window sizes are logical pixels on a high-DPI desktop; blitting to the
      * fixed 960x544 logical size therefore occupied only the lower-left
@@ -3300,8 +3360,6 @@ static void gl_present(void) {
     if (draw_w <= 0) draw_w = g.w * 2;
     if (draw_h <= 0) draw_h = g.h * 2;
     if (rt_prepare(g.cur_rt) != 0) {
-        gpu_query_end_frame();
-        gpu_query_poll();
         return;
     }
     rendertarget *shown = &g.rts[g.cur_rt];
@@ -3331,7 +3389,42 @@ static void gl_present(void) {
     p_glBlitFramebuffer(0, shown->h-src_h, src_w, shown->h,
                         out_x, out_y, out_x + out_w, out_y + out_h,
                         GL_COLOR_BUFFER_BIT, GL_LINEAR);
-    gl_shot(draw_w, draw_h);
+    gl_dialog_overlay(out_x,out_y,out_w,out_h);
+    gl_shot(draw_w,draw_h,dialog_redraw);
+}
+/* Called from the guest's SavedataUpdate while the dialog is open, so the
+ * window keeps showing it even when the game presents no new frames. Only
+ * the GL owner thread may draw: another thread skips (0) rather than fails
+ * (-1), so a title that polls the utility from a second thread keeps its
+ * dialog through the game's own presents. Composes are paced to the display
+ * so a busy poll loop does not spend the scheduler token on swaps. */
+static int gl_dialog_redraw(void) {
+    if (dialog_failed || g.failed) return -1;
+    if (!g.ready) return 0;
+    if (g.thread!=this_thread()) return 0;
+    static double last_us;
+    const double now_us = rings_now_us();
+    if (last_us && now_us - last_us < 15000.0) return 0;
+    last_us = now_us;
+    GLint viewport[4]; p_glGetIntegerv(GL_VIEWPORT,viewport);
+    gl_compose(1); present_gl_swap();
+    p_glViewport(viewport[0],viewport[1],viewport[2],viewport[3]);
+    if (g.rts[g.cur_rt].configured)
+        p_glBindFramebuffer(GL_FRAMEBUFFER,g.rts[g.cur_rt].fbo);
+    /* The compose rebound framebuffers, scissor, masks and the clear colour
+     * whether or not the overlay drew: the model path must reapply. */
+    g.mu.disturbed=1;
+    return dialog_failed ? -1 : 0;
+}
+
+static void gl_present(void) {
+    if (claim() != 0) return;
+    g.presents++;
+    flush_ends(FB_PRESENT); flush();
+    /* Count deferred alpha/stencil transfers inside the GPU frame timer. */
+    for (int i = 0; i < g.n_rts; i++) stencil_to_alpha(&g.rts[i]);
+
+    gl_compose(0);
     gpu_query_end_frame();
     present_gl_swap();
     rings_fence();

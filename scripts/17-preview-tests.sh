@@ -5,11 +5,12 @@ set -euo pipefail
 OUT="$ROOT/build/render-tests"
 mkdir -p "$OUT"
 cmake --build "$ROOT/build/psprecomp" --target psprecomp -j"$(nproc)" >/dev/null
-read -r -a SDL_FLAGS <<< "$(pkg-config --cflags sdl2)"
-read -r -a SDL_LIBS <<< "$(pkg-config --libs sdl2)"
+pkg-config --exists sdl2 SDL2_ttf || die "preview checks require SDL2 and SDL2_ttf"
+read -r -a SDL_FLAGS <<< "$(pkg-config --cflags sdl2 SDL2_ttf)"
+read -r -a SDL_LIBS <<< "$(pkg-config --libs sdl2 SDL2_ttf)"
 cc -O2 -Wall -Wextra -Werror -std=gnu11 -DHAVE_SDL2 "${SDL_FLAGS[@]}" \
     -I "$ROOT/tools/psprecomp/include" \
-    "$ROOT/host/settings.c" "$ROOT/host/preview_tests.c" "$ROOT/host/render_gl.c" "$ROOT/host/present.c" \
+    "$ROOT/host/settings.c" "$ROOT/host/preview_tests.c" "$ROOT/host/render_gl.c" "$ROOT/host/present.c" "$ROOT/host/save_dialog.c" \
     "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${SDL_LIBS[@]}" $HOST_LIBS \
     -o "$OUT/preview-tests"
 for resolution in psp window; do
