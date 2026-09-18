@@ -26,8 +26,9 @@ both software and GL presentation. Automatic operations remain automatic.
 
 The runtime owns the PSP contract and save operations. The host owns drawing
 and physical input. Use the runtime checkout inside this repository,
-`tools/psprecomp`, for runtime changes; `/home/sif/Projects/psprecomp` is its
-separate source repository, not the checkout built by the current host.
+`tools/psprecomp`, for runtime changes; a separate standalone clone of
+[the fork](https://github.com/Sifayne/psprecomp) is not the checkout built by
+the current host.
 
 | File or area | Responsibility |
 | --- | --- |

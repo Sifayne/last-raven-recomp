@@ -561,8 +561,8 @@ scenario frame dumps).
 
 ## M6 — Ship shape
 
-- Publish the fork and point `.gitmodules` at it (`FORK-NOTES.md` in the
-  fork has the three commands). Until then a fresh clone cannot build.
+- The fork is published at [Sifayne/psprecomp](https://github.com/Sifayne/psprecomp),
+  and `.gitmodules` points at its public HTTPS URL for recursive clones.
 - Windows: `src/os.c`'s Win32 half has never been compiled. `mingw-w64-gcc`
   is packaged on this machine and not installed; compile-check it, then a CI
   matrix.

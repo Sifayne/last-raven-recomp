@@ -1,6 +1,6 @@
 [submodule "tools/psprecomp"]
 	path = tools/psprecomp
-	url = /home/sif/Projects/psprecomp
+	url = https://github.com/Sifayne/psprecomp.git
 [submodule "tools/pspdecrypt"]
 	path = tools/pspdecrypt
 	url = https://github.com/John-K/pspdecrypt.git

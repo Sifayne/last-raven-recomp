@@ -1,4 +1,4 @@
-# last-raven
+# last-raven-recomp
 
 A static recompilation of **Armored Core: Last Raven Portable** (PSP) — turning
 the game's Allegrex MIPS code into C ahead of time, linked against a native
@@ -48,7 +48,8 @@ The requirements below apply to the development/game pipeline.
 ## Quick start
 
 ```bash
-git clone --recurse-submodules <this-repo> && cd last-raven
+git clone --recurse-submodules https://github.com/Sifayne/last-raven-recomp.git
+cd last-raven-recomp
 ```
 
 ```bash

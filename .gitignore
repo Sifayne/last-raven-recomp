@@ -87,3 +87,23 @@ host/__test*.txt
 
 # GE captures: guest memory images, tens of megabytes, and game data
 *.gcap
+
+# Local credentials and agent state are not project sources.
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+.claude/
+.codex/
+
+# Additional extracted media and player data.
+*.pmf
+*.pkb
+*.pkh
+*.sgb
+*.wav
+*.ppm
+*.SFO
+*.sfo

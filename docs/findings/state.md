@@ -1829,15 +1829,14 @@ git -C tools/psprecomp log \
 have not silently diverged from upstream -- is now `git log upstream/main..`,
 which answers the same question better.
 
-**Not yet pushed**, so `.gitmodules` points at `/home/sif/Projects/psprecomp` --
-the fork's actual location. That works on this machine and nowhere else, which
-is the honest state of a fork that has not been published; pointing it at
-upstream instead would be worse, since upstream does not have the SHA recorded
-here. Changing it is one command, in the fork's `FORK-NOTES.md`, and until then
-the submodule's remotes are the conventional pair:
+The fork is published at [Sifayne/psprecomp](https://github.com/Sifayne/psprecomp),
+and `.gitmodules` uses its public HTTPS URL. A recursive clone fetches the
+runtime commit recorded by the parent repository without a local source clone.
+Developers can add the original project as an `upstream` remote:
 
-    origin    /home/sif/Projects/psprecomp
-    upstream  https://github.com/sp00nznet/psprecomp.git
+```bash
+git -C tools/psprecomp remote add upstream https://github.com/sp00nznet/psprecomp.git
+```
 
 ## The regression checks, with the numbers they should produce
 
