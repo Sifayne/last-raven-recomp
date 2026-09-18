@@ -87,6 +87,14 @@ and cannot be overwritten from the screen. Saves write and flush a temporary
 file in the same directory before replacing the destination; failed writes
 leave the previous file intact.
 
+**Save location.** Save & Play runs the game from
+`~/.local/share/last-raven/saves/<slug>/ms/PSP/SAVEDATA/` (under
+`$XDG_DATA_HOME` when that is set), the same folder the packaged AppImage
+uses, so one folder holds the saves however the game was built; the launcher
+prints the path on each launch. Direct runs such as `scripts/06-boot.sh` keep
+using their working directory as the memory stick. To play from more than one
+computer, sync that folder: see [the save sync guide](SAVE-SYNC.md).
+
 The versioned INI format stores named sections such as `[preset Controller]`,
 with `version=1` and `selected=Controller` at the top. Option keys match their
 environment suffixes, such as `RESOLUTION=window` and `INPUT=dual`. The

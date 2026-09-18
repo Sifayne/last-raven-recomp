@@ -396,6 +396,55 @@ static void modal_accept(launcher *a) {
     changed(a); close_modal(a);
 }
 
+/* The game runs from a per-title save folder, <data root>/saves/<slug>, so a
+ * source build and the packaged AppImage write saves to the same place and
+ * one folder can be synced between computers (docs/SAVE-SYNC.md). The data
+ * root follows AppRun's rule: $LR_DATA_ROOT, else $XDG_DATA_HOME/last-raven,
+ * else ~/.local/share/last-raven; relative values are ignored. A run without
+ * a title slug (bare --boot/--module) keeps the launcher's own directory. */
+static int data_root(char *out,size_t cap) {
+    const char *given=getenv("LR_DATA_ROOT"),*xdg=getenv("XDG_DATA_HOME"),*home=getenv("HOME");
+    int n;
+    if (given && given[0]=='/') n=snprintf(out,cap,"%s",given);
+    else if (xdg && xdg[0]=='/') n=snprintf(out,cap,"%s/last-raven",xdg);
+    else if (home && home[0]=='/') n=snprintf(out,cap,"%s/.local/share/last-raven",home);
+    else return -1;
+    return n>0 && (size_t)n<cap?0:-1;
+}
+/* Empty when no title is selected; -1 when no data root can be found. */
+static int game_save_root(launcher *a,char *out,size_t cap) {
+    char root[4096]; out[0]=0;
+    if (!a->game_count) return 0;
+    if (data_root(root,sizeof root)) return -1;
+    int n=snprintf(out,cap,"%s/saves/%s",root,a->games[a->game].slug);
+    return n>0 && (size_t)n<cap?0:-1;
+}
+static int make_directories(const char *path) {
+    char work[4096]; size_t len=strlen(path);
+    if (!len || len>=sizeof work) { errno=ENAMETOOLONG; return -1; }
+    memcpy(work,path,len+1);
+    for (char *p=work+1;*p;p++) if (*p=='/') {
+        *p=0; if (mkdir(work,0755) && errno!=EEXIST) return -1; *p='/';
+    }
+    if (mkdir(work,0755) && errno!=EEXIST) return -1;
+    struct stat st;
+    if (stat(path,&st)) return -1;
+    if (!S_ISDIR(st.st_mode)) { errno=ENOTDIR; return -1; }
+    return 0;
+}
+/* A launch path in absolute form, so it still resolves after the child
+ * changes directory. Nothing is canonicalised; the spelling is kept. */
+static int absolute(const char *path,char *out,size_t cap) {
+    int n;
+    if (path[0]=='/') n=snprintf(out,cap,"%s",path);
+    else {
+        char cwd[4096];
+        if (!getcwd(cwd,sizeof cwd)) return -1;
+        n=snprintf(out,cap,"%s/%s",cwd,path);
+    }
+    return n>0 && (size_t)n<cap?0:-1;
+}
+
 static void launch_game(launcher *a) {
     refresh(a);
     if (!a->valid || a->load_failed) return;
@@ -410,6 +459,18 @@ static void launch_game(launcher *a) {
     }
     if (a->effective.render==3) { strcpy(a->status,"The null renderer is for diagnostics. Select OpenGL or software before playing."); return; }
     if (save(a)) return;
+    char save_root[4096],boot[4096],module[4096],iso[4096],config[4096];
+    if (game_save_root(a,save_root,sizeof save_root)) {
+        strcpy(a->status,"Cannot find the save folder: LR_DATA_ROOT, XDG_DATA_HOME or HOME must be an absolute path."); return;
+    }
+    if (*save_root && make_directories(save_root)) {
+        snprintf(a->status,sizeof a->status,"Cannot create the save folder %s: %s",save_root,strerror(errno)); return;
+    }
+    if (absolute(a->boot,boot,sizeof boot) || absolute(a->module,module,sizeof module) ||
+        (a->iso && absolute(a->iso,iso,sizeof iso)) || absolute(a->path,config,sizeof config)) {
+        strcpy(a->status,"Cannot launch: a game path is too long."); return;
+    }
+    if (*save_root) fprintf(stderr,"launcher: saves %s\n",save_root);
     int pipes[2];
     if (pipe(pipes)) { snprintf(a->status,sizeof a->status,"Cannot launch: %s",strerror(errno)); return; }
     fflush(NULL);
@@ -418,17 +479,19 @@ static void launch_game(launcher *a) {
     if (!child) {
         close(pipes[0]); dup2(pipes[1],STDERR_FILENO); close(pipes[1]);
         const char *args[12]; int n=0;
-        args[n++]=a->boot; args[n++]=a->module; if (a->iso) args[n++]=a->iso;
-        args[n++]="--config"; args[n++]=a->path;
+        args[n++]=boot; args[n++]=module; if (a->iso) args[n++]=iso;
+        args[n++]="--config"; args[n++]=config;
         args[n++]="--preset"; args[n++]=a->book.presets[a->book.selected].name;
         args[n++]="--window"; args[n]=NULL;
-        execv(a->boot,(char *const *)args);
         /* Only async-signal-safe operations between fork and exec: SDL may
          * have other threads with libc locks held at the fork boundary. */
-        const char message[]="Could not execute the game host. Check its path and permissions.\n";
-        size_t sent=0;
-        while (sent<sizeof message-1) {
-            ssize_t n=write(STDERR_FILENO,message+sent,sizeof message-1-sent);
+        static const char exec_failed[]="Could not execute the game host. Check its path and permissions.\n",
+                          chdir_failed[]="Could not enter the save folder. Check its permissions.\n";
+        const char *message=exec_failed; size_t sent=0,total=sizeof exec_failed-1;
+        if (*save_root && chdir(save_root)) { message=chdir_failed; total=sizeof chdir_failed-1; }
+        else execv(boot,(char *const *)args);
+        while (sent<total) {
+            ssize_t n=write(STDERR_FILENO,message+sent,total-sent);
             if (n>0) sent+=(size_t)n;
             else if (n<0 && errno==EINTR) continue;
             else break;

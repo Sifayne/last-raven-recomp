@@ -53,6 +53,9 @@ static void shot(launcher *a,const char *dir,const char *name) {
 int main(int argc,char **argv) {
     assert(argc==2 || argc==3);
     for (int k=0;k<LR_OPTION_COUNT;k++) unsetenv(lr_options[k].env);
+    /* Launches with a title run from <data root>/saves/<slug>; keep that
+     * inside the fixture directory rather than the user's real one. */
+    setenv("LR_DATA_ROOT",argv[1],1);
     launcher a={0}; a.running=1; a.focus=a.selected_row=LR_RESOLUTION; a.movie_available=1;
     snprintf(a.path,sizeof a.path,"%s/presets with spaces.ini",argv[1]);
     assert(!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMECONTROLLER)); assert(!TTF_Init());
@@ -150,7 +153,8 @@ int main(int argc,char **argv) {
     snprintf(module,sizeof module,"%s/game dump.elf",argv[1]);
     snprintf(arguments,sizeof arguments,"%s/arguments.txt",argv[1]);
     FILE *f=fopen(child,"w"); assert(f);
-    fputs("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$LR_LAUNCH_TEST_ARGS\"\n",f); fclose(f); assert(!chmod(child,0700));
+    /* The fake boot records its working directory first, then its arguments. */
+    fputs("#!/bin/sh\nprintf '%s\\n' \"$(pwd -P)\" \"$@\" > \"$LR_LAUNCH_TEST_ARGS\"\n",f); fclose(f); assert(!chmod(child,0700));
     f=fopen(module,"w"); assert(f); fclose(f);
     setenv("LR_LAUNCH_TEST_ARGS",arguments,1);
     a.boot=child; a.module=module;
@@ -159,6 +163,9 @@ int main(int argc,char **argv) {
     assert(!a.child && !a.running);
     char contents[12000]={0}; f=fopen(arguments,"r"); assert(f);
     fread(contents,1,sizeof contents-1,f); fclose(f);
+    /* No title selected: the game keeps the launcher's own directory. */
+    char cwd[4096]; assert(getcwd(cwd,sizeof cwd));
+    assert(!strncmp(contents,cwd,strlen(cwd)) && contents[strlen(cwd)]=='\n');
     assert(strstr(contents,module) && strstr(contents,a.path));
     assert(strstr(contents,"--preset\nDesk & controller\n--window\n"));
     assert(!lr_presets_load(&disk,a.path,error));
@@ -185,6 +192,11 @@ int main(int argc,char **argv) {
     assert(!a.child && !a.running);
     contents[0]=0; f=fopen(arguments,"r"); assert(f); fread(contents,1,sizeof contents-1,f); fclose(f);
     assert(strstr(contents,module) && strstr(contents,"--preset\nDesk & controller\n--window\n"));
+    /* The selected title ran from <data root>/saves/<slug>, created on demand. */
+    char save_root[4096],save_root_real[4096]; struct stat save_st;
+    snprintf(save_root,sizeof save_root,"%s/saves/ac3p",argv[1]);
+    assert(!stat(save_root,&save_st) && S_ISDIR(save_st.st_mode) && realpath(save_root,save_root_real));
+    assert(!strncmp(contents,save_root_real,strlen(save_root_real)) && contents[strlen(save_root_real)]=='\n');
     /* Imported games keep release order, retain the saved selection, and
      * reject a truncated library without losing the current launch targets. */
     char library[4096], importer[4096], browser[4096], iso_fixture[4096];
@@ -233,6 +245,7 @@ int main(int argc,char **argv) {
     unlink(library); unlink(importer); unlink(iso_fixture); rmdir(browser);
     a.game_count=0;
     unlink(child); unlink(module); unlink(arguments);
+    assert(!rmdir(save_root)); snprintf(save_root,sizeof save_root,"%s/saves",argv[1]); assert(!rmdir(save_root));
     TTF_CloseFont(a.body); TTF_CloseFont(a.small); TTF_CloseFont(a.heading);
     SDL_DestroyRenderer(a.renderer); SDL_DestroyWindow(a.window); TTF_Quit(); SDL_Quit();
     /* Also exercise the real CLI entry point, loading the file we just saved.

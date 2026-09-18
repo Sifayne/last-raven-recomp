@@ -112,7 +112,7 @@ def copy_inputs(dest):
              "host/boot.c", "host/present.c", "host/present.h", "host/render_gl.c", "host/render_gl.h",
              "host/present_tests.c", "scripts/test_present.sh",
              "host/save_dialog.c", "host/save_dialog.h",
-             "host/save_dialog_tests.c", "scripts/test_savedata.sh", "docs/SAVEDATA-UI.md",
+             "host/save_dialog_tests.c", "scripts/test_savedata.sh", "docs/SAVEDATA-UI.md", "docs/SAVE-SYNC.md",
              "tools/psprecomp/tests/test_savedata.c",
              "host/controls.h", "host/stick.h", "host/ac3_controls.h",
              "host/fps.h", "host/fps_clock.h", "host/fps_aclr.h", "scripts/fps-loop.py",

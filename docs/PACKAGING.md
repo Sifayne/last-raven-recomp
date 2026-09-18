@@ -134,7 +134,9 @@ Default persistent paths:
 | Game save data | `~/.local/share/last-raven/saves/<slug>/ms/PSP/SAVEDATA/` |
 | Import, launcher and game logs | `~/.local/state/last-raven/logs/` |
 
-Absolute XDG base-directory overrides are supported. First packaged launch
+Absolute XDG base-directory overrides are supported. A source build started
+through `scripts/15-settings.sh` uses the same save folder; to play from more
+than one computer, see [the save sync guide](SAVE-SYNC.md). First packaged launch
 copies legacy SDL settings from `~/.local/share/Last Raven/settings.ini` only
 when the new settings file is absent. Moving or replacing the AppImage leaves
 user files intact. Developer scripts and explicit `--config` / `--preset`

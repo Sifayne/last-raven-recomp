@@ -47,6 +47,12 @@ Default persistent locations (XDG overrides are supported):
   Saves:    ~/.local/share/last-raven/saves/<game>/ms/PSP/SAVEDATA
   Logs:     ~/.local/state/last-raven/logs
 
+To play from more than one computer, keep the Saves folder the same on each
+with any folder-sync tool (Syncthing runs on the Deck in Gaming Mode through
+the Decky Syncthing plugin). Ignore the names .pending-*, .backup-* and
+.savedata-lock, and play on one machine at a time. Steps: docs/SAVE-SYNC.md
+in the source archive.
+
 For Gaming Mode, add the AppImage as a non-Steam game after Desktop Mode setup.
 Use the native Linux executable; no Proton compatibility override is needed.
 The launcher and game accept Steam Input's virtual gamepad automatically.

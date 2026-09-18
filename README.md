@@ -97,7 +97,9 @@ at its original speed; see [the FPS guide](docs/FPS.md) for scope and validation
 The launcher needs SDL2 and SDL2_ttf; existing command-line and headless
 tools continue to work without the launcher. Settings apply on the next
 launch. See [the settings guide](docs/SETTINGS.md) for navigation, file
-locations, environment overrides and headless inspection.
+locations, environment overrides and headless inspection. Saves go to
+`~/.local/share/last-raven/saves/`, the same folder the AppImage uses; to play
+from more than one computer, see [the save sync guide](docs/SAVE-SYNC.md).
 
 For the current dual-stick controls directly in a window:
 
