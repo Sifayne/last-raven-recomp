@@ -459,7 +459,13 @@ PIC1 for unused slots. Evidence, 17 Sep:
 - [x] Save/load entry points and list-focus setup traced in all three titles.
 - [x] Phases 1–2: synthetic runtime/session/file-operation checks passed.
 - [ ] Phase 3: both renderers and live input gate passed (presentation
-  redrawn to the hardware layout 17 Sep; live input still open).
+  redrawn to the hardware layout 17 Sep; live input still open). The first
+  live test, 17 Sep evening with a Steam Controller, stalled on the Load
+  screen: the dialog armed only once SDL reported nothing held, and a thumb
+  resting on the controller's trackpad reads as a mouse button, so it never
+  armed and ignored every press. It now also arms 300 ms after opening;
+  accept and cancel act on press edges, which a button held since before the
+  dialog cannot produce. Two sessions then loaded, saved and played through.
 - [x] Phase 4: deterministic response, mismatch, EOF, and headless-cancel checks passed.
 - [ ] Phase 5: package and trilogy player acceptance gates passed.
 

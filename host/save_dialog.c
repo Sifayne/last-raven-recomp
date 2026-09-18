@@ -31,6 +31,7 @@ static TTF_Font *f_title, *f_banner, *f_body, *f_small;
 static SDL_Texture *texture;
 static uint64_t uploaded;
 static int initialized,active,armed,focused=1,pending,held_direction,held_side,key_direction,confirm_no;
+static Uint64 opened_at;
 static uint64_t repeat_at;
 /* The icon column slides: the drawn selection chases the real one. */
 static double scroll_pos, scroll_target;
@@ -519,8 +520,16 @@ void save_dialog_update(SDL_GameController *pad) {
     if (!was || ui.session!=session) {
         armed=0; pending=0; held_direction=held_side=key_direction=0;
         scroll_pos=scroll_target=ui.selected; scrolling=0;
+        opened_at=SDL_GetTicks64();
     }
-    if (!armed && focused && save_dialog_input_neutral(pad)) armed=1;
+    /* Arm once nothing is held, so the press that opened the dialog cannot
+     * act on it -- or after a moment regardless. Accept and cancel act on
+     * press edges, which a button held since before the dialog cannot
+     * produce, so the delay risks only a held stick scrolling; without it a
+     * pad that keeps reporting something (a thumb resting on a Steam
+     * Controller's trackpad reads as a mouse button) never arms and the
+     * dialog ignores every press, which is how the first live test went. */
+    if (!armed && focused && (save_dialog_input_neutral(pad) || SDL_GetTicks64()-opened_at>=300)) armed=1;
     if (state==2) {
         pending=0; confirm_no=0; scroll_target=ui.selected;
         if (ui.stage!=PSP_SAVEDATA_LIST) { scroll_pos=scroll_target; scrolling=0; }
