@@ -99,6 +99,10 @@ const int lr_modern_controls_available = 1;
 
 /* The adaptive aspect is this title's own camera rebuild, below. */
 const int lr_adaptive_aspect_available = 1;
+/* Off-screen HUD draws may go to the wide bands: this title's menus, garage
+ * and missions were audited (reports/aspect-reticle, 17 Sep) and only the
+ * lock-on rings and the lock marker ever draw there. */
+const int lr_hud_bands_available = 1;
 
 /* Button layout is independently overridable so the analog work can be
  * compared with the PSP buttons, or the modern buttons can be used with the
@@ -214,8 +218,7 @@ void psp_func_000889B4(void) {
     const float aspect = (float)virtual_w / (float)old_h;
     /* Before the rebuild, because 00088F6C reads it for the cull planes;
      * also when resizing back to native width, so the planes contract. */
-    f32_write(SCENE_CAMERA + SCENE_ASPECT, aspect);
-    psp_func_000889B4__orig();
+    f32_write(SCENE_CAMERA + SCENE_ASPECT, aspect);    psp_func_000889B4__orig();
     if (virtual_w == old_w) return;
     /* After it: the rebuild stored 480/272 there, and the garage's 00154C80
      * copies this field into the shared camera before projecting. */
@@ -229,6 +232,41 @@ void psp_func_000889B4(void) {
                draw_w, draw_h, (unsigned)virtual_w, (unsigned)old_h);
         last_virtual_w = virtual_w;
     }
+}
+
+/* ---- the lock target's on-screen test ------------------------------------
+ *
+ * psp_func_001FBDF8(out) projects the lock target's position at 0x4D4B40
+ * through the render system's screen matrix (00255B14/00255B2C), stores the
+ * pixel position in out[0..1] and returns 1 when it lies within the render
+ * descriptor's rectangle at +40..+52 -- (0,0,480,272) for the display; with
+ * no target (the word at 0x4D4B5C clear) it returns 0 at once. The
+ * mission loop (00102018) records the point and sets the marker flag only
+ * then; 0000356C -> 00003630 -> 001FC6A8 draws the lock marker at the recorded
+ * point wherever it is, and the GL backend places a HUD draw beyond the 480
+ * columns in the bands of a wide target. So in adaptive mode the horizontal
+ * bounds grow by the band width on each side: the target stays "on screen"
+ * for as long as the wide window shows it. Vertical bounds, the behind-the-
+ * camera test and the no-target case are the original's. */
+enum { LOCK_TARGET_STATE = 0x004D4B50u };   /* +12: a target is held */
+
+void psp_func_001FBDF8(void) {
+    const uint32_t out = r_a0;
+    psp_func_001FBDF8__orig();
+    if (r_v0 != 0 || !present_adaptive_aspect()) return;
+    const int32_t band = (present_aspect_wide_width() - 480) / 2;
+    if (band <= 0) return;
+    /* The original said no. Not for want of a target or a point in front of
+     * the camera: those leave out[] unconverted, and stay no. */
+    if (psp_read32(LOCK_TARGET_STATE + 12) == 0) return;
+    if ((int32_t)psp_read32(out + 8) < -4096) return;
+    const uint32_t render = psp_read32(RENDER_SYSTEM + RENDER_ACTIVE);
+    if (!render) return;
+    const int32_t x0 = (int32_t)psp_read32(render + 40), y0 = (int32_t)psp_read32(render + 44);
+    const int32_t w = (int32_t)psp_read32(render + 48), h = (int32_t)psp_read32(render + 52);
+    const int32_t px = (int32_t)psp_read32(out), py = (int32_t)psp_read32(out + 4);
+    if (px < x0 - band || px > x0 + w + band || py < y0 || py > y0 + h) return;
+    r_v0 = 1;
 }
 
 /* stick2, input_tuning, input_tune(), stick_radial(), stick_look(): host/stick.h,

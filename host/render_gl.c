@@ -509,7 +509,7 @@ static struct {
      * width, latched once per frame; g.w means the identity. batch_class is
      * the placement of the geometry now in the batch. The staging target
      * downsamples a wide attachment to guest width for the readback. */
-    int      wide_w, batch_class, batch_glyph;
+    int      wide_w, batch_class, batch_band, batch_glyph;
     float    viewport_x, viewport_y, viewport_w, viewport_h;
     uint64_t glyph_draws;
     GLuint   stage_fbo, stage_tex;
@@ -518,7 +518,7 @@ static struct {
     uint64_t hud_depth_tests, hud_hazard_stencil, hud_hazard_dst_alpha;
     uint64_t hud_depth_func[8], hud_depth_writes;
     /* PSPRECOMP_ASPECT_LOG: what the HUD class holds, per texture. */
-    struct { uint32_t addr; int w, h; uint64_t batches, tested; float z0, z1; } hud_by_tex[48];
+    struct { uint32_t addr; int w, h; uint64_t batches, tested; float z0, z1, x0, x1; } hud_by_tex[48];
     int      hud_by_tex_n;
 
     texcache_entry cache[TEXCACHE_MAX];
@@ -548,6 +548,7 @@ static struct {
 } g = { .gpu_query_active = -1 };
 
 enum { FLOATS_PER_VERT = 13 };  /* x,y,z, r,g,b,a, u,v, fog, 1/w, texture q, lod16 */
+static unsigned shot_counters[2]; /* window images: game presents, dialog redraws, numbered apart */
 
 static void flush(void);
 /* Why a pending model batch is about to end. The multi-draw batches only as
@@ -1377,6 +1378,12 @@ static int rt_for(uint32_t addr) {
  * Both are viewports, not vertex transforms: the shader still maps guest x over
  * the guest width, so nothing is requantised. With wide_w == 480 every mapping
  * is the identity and the run is bit-identical to native. */
+/* Weak, like present.c's lr_adaptive_aspect_available: only a title whose
+ * replacements define it places off-screen HUD draws in the wide bands. */
+extern const int lr_hud_bands_available __attribute__((weak));
+static int hud_bands_available(void) {
+    return &lr_hud_bands_available && lr_hud_bands_available;
+}
 static double rt_off(const rendertarget *r) {
     if (!r->wide) return 0;
     return g.resolution ? (r->visible_w - g.w * r->ui_scale) * 0.5
@@ -2574,12 +2581,20 @@ static void push_sprite(const psp_vertex *v) {
 /* Explicit pixel quads avoid GL's implementation-dependent native line/point
  * coverage. The shared walker defines coverage only; these fragments still
  * pass through the normal texture, alpha, depth, stencil and blend pipeline. */
+/* How far, in guest pixels, a band batch may reach past the screen on
+ * either side: the wide target's extra columns, halved. */
+static int band_reach(const rendertarget *r) {
+    if (!r->wide || !g.batch_band) return 0;
+    const double guest_visible = g.resolution ? r->visible_w / r->ui_scale : (double)r->wide_w;
+    return (int)floor((guest_visible - g.w) / 2);
+}
 static void push_point_sample(const psp_vertex *v, void *opaque) {
     psp_vertex a = *v, b = *v, c = *v, d = *v;
     a.precise = b.precise = c.precise = d.precise = 0;
     const int x = (int)floorf((float)v->x / PSP_SUBPX);
     const int y = (int)floorf((float)v->y / PSP_SUBPX);
-    if (x < 0 || y < 0 || x >= g.rts[g.cur_rt].guest_w || y >= g.rts[g.cur_rt].guest_h) return;
+    const int reach = band_reach(&g.rts[g.cur_rt]);
+    if (x < -reach || y < 0 || x >= g.rts[g.cur_rt].guest_w + reach || y >= g.rts[g.cur_rt].guest_h) return;
     a.x = d.x = x * PSP_SUBPX; b.x = c.x = a.x + PSP_SUBPX;
     a.y = b.y = y * PSP_SUBPX; c.y = d.y = a.y + PSP_SUBPX;
     const int lod16 = *(const int *)opaque;
@@ -2644,7 +2659,7 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
      * class is batch state, so a change flushes like any other state does. */
     if (g.adaptive_aspect) {
         if (rt_prepare(g.cur_rt) != 0) return;
-        int cls = CLASS_SCENE;
+        int cls = CLASS_SCENE, band = 0;
         if (menu_preview(&g.rts[g.cur_rt])) {
             cls = CLASS_PREVIEW;
         } else if (g.rts[g.cur_rt].wide && count > 0) {
@@ -2666,19 +2681,63 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
              * unchanged). Its depth test therefore meets the target's own
              * depth. The scene mapping would multiply d by wide/480 again. */
             if (ss && !full) cls = CLASS_HUD;
+            /* World-tracking HUD -- the lock marker, the lock-on rings -- is
+             * drawn wherever its target projects, off the 480 columns
+             * included (the PSP's scissor removed those; a run logs ring x
+             * from -31580 to 1380). On a wide target such a draw is placed in
+             * the bands beside the centred area: same HUD mapping, with a
+             * viewport and scissor spanning the whole target. Backdrops run
+             * into the stride padding too and must stay out of the bands as
+             * on the PSP: the menus tile one as 64x64 pieces whose last
+             * column spans x 448..512, and others are pieces taller than the
+             * screen at 478..512. So the band mapping is for a draw that lies
+             * entirely off the screen -- a piece that starts on the screen is
+             * clipped at its edge as before -- or that tests depth (the
+             * rings, whose scene-depth test no 2D backdrop has), and that is
+             * shorter than the screen. The screen's right edge is x = 480
+             * exclusive: a quad ending there is on screen, not beyond it. */
+            const int beyond = min_x < 0 || max_x > g.w * PSP_SUBPX;
+            const int outside = min_x >= g.w * PSP_SUBPX || max_x <= 0;
+            int min_y = v[0].y, max_y = v[0].y;
+            for (int i = 0; i < count; i++) { if (v[i].y < min_y) min_y = v[i].y; if (v[i].y > max_y) max_y = v[i].y; }
+            /* Per title: a title's replacements define lr_hud_bands_available
+             * once its menus, garage and missions are audited for 2D parked
+             * off the screen (Last Raven draws none; AC3 Portable's menus
+             * draw thousands of untextured pieces there). */
+            /* Lines too, straddling or not: Last Raven's lock box is drawn as
+             * lines and slides past the edge with its target, and no other
+             * HUD line of this title crosses it (audit, reports/aspect-reticle). */
+            const int lines = prim == PSP_PRIM_LINES || prim == PSP_PRIM_LINE_STRIP;
+            band = hud_bands_available() && cls == CLASS_HUD &&
+                   (outside || (beyond && (lines || (g.z_test && g.z_func != 1)))) &&
+                   max_y - min_y < g.h * PSP_SUBPX;
+            if (cls == CLASS_HUD && beyond && getenv("PSPRECOMP_ASPECT_LOG")) {
+                static int said2;
+                if (said2++ < 64 || atoi(getenv("PSPRECOMP_ASPECT_LOG")) >= 2)
+                    fprintf(stderr, "aspect: 2D draw beyond the screen%s: prim %d, %d verts, x %.1f..%.1f,"
+                                    " y %.1f..%.1f, rgba %08X, tex %08X %dx%d, at present %llu, window image %u\n",
+                            band ? " (band)" : "", prim, count, (float)min_x / PSP_SUBPX, (float)max_x / PSP_SUBPX,
+                            (float)min_y / PSP_SUBPX, (float)max_y / PSP_SUBPX, v[0].rgba,
+                            g.tex_enable ? g.tex.addr : 0u, g.tex.w, g.tex.h,
+                            (unsigned long long)g.presents, shot_counters[0]);
+            }
             if (ss && !full && g.z_test && g.z_func != 1 && getenv("PSPRECOMP_ASPECT_LOG")) {
+                /* PSPRECOMP_ASPECT_LOG=2: every such draw, not the first 16. */
                 static int said;
-                if (said++ < 16)
+                if (said++ < 16 || atoi(getenv("PSPRECOMP_ASPECT_LOG")) >= 2)
                     fprintf(stderr, "aspect: screen-space draw tests depth (func %d)"
-                                    " -> HUD: %d verts, x %.1f..%.1f, tex %08X %dx%d,"
-                                    " at present %llu\n",
-                            g.z_func, count, (float)min_x / PSP_SUBPX,
+                                    " -> HUD%s: %d verts, x %.1f..%.1f, tex %08X %dx%d,"
+                                    " at present %llu, window image %u\n",
+                            g.z_func, band ? " (band)" : "", count, (float)min_x / PSP_SUBPX,
                             (float)max_x / PSP_SUBPX,
                             g.tex_enable ? g.tex.addr : 0u, g.tex.w, g.tex.h,
-                            (unsigned long long)g.presents);
+                            (unsigned long long)g.presents, shot_counters[0]);
             }
         }
-        if (cls != g.batch_class) { flush_ends(FB_CLASS); flush(); g.batch_class = cls; g.mu.state_gen++; }
+        if (cls != g.batch_class || band != g.batch_band) {
+            flush_ends(FB_CLASS); flush();
+            g.batch_class = cls; g.batch_band = band; g.mu.state_gen++;
+        }
         if (cls == CLASS_PREVIEW) g.class_preview++;
         else if (cls == CLASS_HUD) g.class_hud++; else g.class_scene++;
     }
@@ -2692,9 +2751,12 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
     case PSP_PRIM_LINES:
     case PSP_PRIM_LINE_STRIP: {
         const rendertarget *r = &g.rts[g.cur_rt];
-        const int x0 = g.sc_valid && g.sc_x0 > 0 ? g.sc_x0 : 0;
+        /* A band batch under the game's whole-screen scissor (0..479) walks
+         * into the bands; the scissor stage lets those pixels through too. */
+        const int reach = g.sc_valid && g.sc_x0 <= 0 && g.sc_x1 >= g.w - 1 ? band_reach(r) : 0;
+        const int x0 = reach ? -reach : g.sc_valid && g.sc_x0 > 0 ? g.sc_x0 : 0;
         const int y0 = g.sc_valid && g.sc_y0 > 0 ? g.sc_y0 : 0;
-        const int x1 = g.sc_valid && g.sc_x1 < r->guest_w - 1 ? g.sc_x1 : r->guest_w - 1;
+        const int x1 = reach ? g.w - 1 + reach : g.sc_valid && g.sc_x1 < r->guest_w - 1 ? g.sc_x1 : r->guest_w - 1;
         const int y1 = g.sc_valid && g.sc_y1 < r->guest_h - 1 ? g.sc_y1 : r->guest_h - 1;
         for (int i = 0; i + 1 < count; i += prim == PSP_PRIM_LINES ? 2 : 1) {
             int lod16 = psp_render_line_lod16(&g.tex, &v[i], &v[i + 1]);
@@ -2863,6 +2925,9 @@ static void apply_state(void) {
             x1 = (int)ceil((g.sc_x1+1)*sx+off);
             y0 = g.sc_y0; y1 = g.sc_y1+1;
         }
+        /* A band batch under the game's whole-screen scissor may use the
+         * whole target; a narrower scissor still applies where it maps. */
+        if (hud && g.batch_band && g.sc_x0 <= 0 && g.sc_x1 >= g.w - 1) { x0 = 0; x1 = r->w; }
         p_glScissor(x0, r->h-y1, x1>x0?x1-x0:0, y1>y0?y1-y0:0);
     } else {
         p_glDisable(GL_SCISSOR_TEST);
@@ -2945,6 +3010,13 @@ static void apply_placement(const rendertarget *r) {
         p_glUniform2f(g.u->viewport, (float)r->w, (float)r->h);
         p_glUniform3f(g.u->placement, hud?r->ui_scale:r->sx,
                       hud?r->ui_scale:r->sy, hud?rt_off(r):0);
+    } else if (hud && g.batch_band) {
+        /* The HUD mapping x -> x + off as a shader translation over the
+         * whole target instead of a viewport origin, so geometry beyond
+         * the 480 columns is not clipped away with the viewport. */
+        p_glViewport(0, 0, r->w, r->h);
+        p_glUniform2f(g.u->viewport, (float)r->w, (float)r->h);
+        p_glUniform3f(g.u->placement, 1, 1, (float)rt_off(r));
     } else {
         p_glViewport(hud?(int)rt_off(r):0, 0, hud?r->guest_w:rt_scene_w(r), r->h);
         p_glUniform2f(g.u->viewport, (float)r->guest_w, (float)r->guest_h);
@@ -2989,14 +3061,18 @@ static void flush(void) {
                 g.hud_by_tex_n++;
                 g.hud_by_tex[k].addr = key; g.hud_by_tex[k].w = g.tex.w; g.hud_by_tex[k].h = g.tex.h;
                 g.hud_by_tex[k].z0 = 1e9f; g.hud_by_tex[k].z1 = -1e9f;
+                g.hud_by_tex[k].x0 = 1e9f; g.hud_by_tex[k].x1 = -1e9f;
             }
             if (k < 48) {
                 g.hud_by_tex[k].batches++;
                 if (g.z_test && g.z_func != 1) g.hud_by_tex[k].tested++;
                 for (size_t i = 0; i < g.batch_n; i++) {
                     const float z = g.batch[i * FLOATS_PER_VERT + 2];
+                    const float x = g.batch[i * FLOATS_PER_VERT + 0];
                     if (z < g.hud_by_tex[k].z0) g.hud_by_tex[k].z0 = z;
                     if (z > g.hud_by_tex[k].z1) g.hud_by_tex[k].z1 = z;
+                    if (x < g.hud_by_tex[k].x0) g.hud_by_tex[k].x0 = x;
+                    if (x > g.hud_by_tex[k].x1) g.hud_by_tex[k].x1 = x;
                 }
             }
         }
@@ -3252,24 +3328,29 @@ static void note_frame_time(void) {
 }
 
 /* PSPRECOMP_GL_SHOT=<prefix> writes every Nth presented *window* image as
- * <prefix>-NNNN.ppm, N from PSPRECOMP_GL_SHOT_EVERY (default 30). The frame
- * dumps in boot.c and display.c read guest memory, which in this backend is
- * the readback -- never the drawable. This is the only view of what the
- * window actually shows, and it is what a text-sharpness claim rests on. */
+ * <prefix>-NNNN.ppm, N from PSPRECOMP_GL_SHOT_EVERY (default 30), starting
+ * at window image PSPRECOMP_GL_SHOT_FROM (default 0). The frame dumps in
+ * boot.c and display.c read guest memory, which in this backend is the
+ * readback -- never the drawable. This is the only view of what the window
+ * actually shows, and it is what a text-sharpness claim rests on. The
+ * aspect log names the window image a draw lands in by this count, which is
+ * not the present count: a present need not render a new image. */
 static void gl_shot(int draw_w, int draw_h, int dialog) {
     static const char *prefix;
     static int every = -1;
-    static unsigned counters[2]; /* game presents, dialog redraws: numbered apart */
+    static unsigned from;
     if (every < 0) {
         prefix = getenv("PSPRECOMP_GL_SHOT");
         if (prefix && !*prefix) prefix = NULL;
         const char *e = getenv("PSPRECOMP_GL_SHOT_EVERY");
         every = e && *e ? atoi(e) : 30;
         if (every < 1) every = 1;
+        const char *f = getenv("PSPRECOMP_GL_SHOT_FROM");
+        from = f && *f ? (unsigned)strtoul(f, NULL, 0) : 0;
     }
     if (!prefix || draw_w <= 0 || draw_h <= 0) return;
-    const unsigned idx = counters[dialog ? 1 : 0]++;
-    if (idx % (unsigned)every) return;
+    const unsigned idx = shot_counters[dialog ? 1 : 0]++;
+    if (idx < from || idx % (unsigned)every) return;
     uint8_t *px = malloc((size_t)draw_w * (size_t)draw_h * 4u);
     uint8_t *row = malloc((size_t)draw_w * 3u);
     if (px && row) {
@@ -3729,11 +3810,12 @@ void render_gl_report(FILE *out) {
                 (unsigned long long)g.wide_allocs, (unsigned long long)g.wide_retired,
                 (unsigned long long)g.class_preview);
     for (int k = 0; k < g.hud_by_tex_n; k++)
-        fprintf(out, "\n          HUD tex %08X %dx%d: %llu batch(es), %llu depth-tested, z %.4f..%.4f",
+        fprintf(out, "\n          HUD tex %08X %dx%d: %llu batch(es), %llu depth-tested, z %.4f..%.4f, x %.1f..%.1f",
                 g.hud_by_tex[k].addr, g.hud_by_tex[k].w, g.hud_by_tex[k].h,
                 (unsigned long long)g.hud_by_tex[k].batches,
                 (unsigned long long)g.hud_by_tex[k].tested,
-                g.hud_by_tex[k].z0, g.hud_by_tex[k].z1);
+                g.hud_by_tex[k].z0, g.hud_by_tex[k].z1,
+                g.hud_by_tex[k].x0, g.hud_by_tex[k].x1);
     if (g.adaptive_aspect && (g.hud_depth_tests || g.hud_depth_writes)) {
         fprintf(out, "\n          HUD depth: %llu write(s); tests by func",
                 (unsigned long long)g.hud_depth_writes);

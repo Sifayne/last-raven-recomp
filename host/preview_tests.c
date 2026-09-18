@@ -20,6 +20,7 @@
  * replacement; the fixture stands in for host/replacements.c here, or its
  * window-aspect configurations would silently run the original view. */
 const int lr_adaptive_aspect_available = 1;
+const int lr_hud_bands_available = 1;
 static const psp_render_backend *be;
 static unsigned pc, va, checks, failures;
 static double scene_scale, ui_scale, yscale, ui_offset;
@@ -139,6 +140,77 @@ static void hud_views(void) {
     expect(FB, 308, 108, 1, 0xFF00FF, "depth-tested screen-space sprite is placed with the HUD");
     if (ui_offset > 0 || fabs(scene_scale - ui_scale) > 0.01)
         expect(FB, 308, 108, 0, 0, "depth-tested screen-space sprite is not spread with the scene");
+    if (ui_offset <= 0) return;
+    /* A marker or ring whose target sits in the bands beside the centred 480
+     * columns: the game draws it there (beyond the stride too), and it must
+     * show -- a ring with its depth test even while it straddles the edge,
+     * a marker once it lies entirely off the screen. Backdrop pieces that
+     * start on the screen and run into the stride padding, tiled 64x64 or
+     * taller than the screen, stay clipped at the edge as the PSP kept them. */
+    begin(FB, 512); scissor(0, 0, 479, 271); clear(4, 65535);
+    cmd(0xDE, 7);
+    cmd(0x12, (7 << 2) | (3 << 7) | (1 << 23)); cmd(0x01, va & 0xFFFFFF);
+    vertex(520, 100, 65535, 0xFFFF00FF); vertex(536, 116, 65535, 0xFFFF00FF);
+    cmd(0x04, (6 << 16) | 2); /* one sprite per draw, as the game issues them */
+    cmd(0x01, va & 0xFFFFFF);
+    vertex(-40, 100, 65535, 0xFF00FFFF); vertex(-24, 116, 65535, 0xFF00FFFF);
+    cmd(0x04, (6 << 16) | 2);
+    cmd(0x01, va & 0xFFFFFF);
+    vertex(470, 180, 65535, 0xFF00FFFF); vertex(500, 196, 65535, 0xFF00FFFF);
+    cmd(0x04, (6 << 16) | 2);
+    cmd(0xDE, 1); cmd(0x01, va & 0xFFFFFF);
+    vertex(520, 140, 65535, 0xFFFFFF00); vertex(536, 156, 65535, 0xFFFFFF00);
+    cmd(0x04, (6 << 16) | 2);
+    cmd(0x01, va & 0xFFFFFF);
+    vertex(448, 200, 65535, 0xFF00FF00); vertex(512, 264, 65535, 0xFF00FF00);
+    cmd(0x04, (6 << 16) | 2);
+    cmd(0x01, va & 0xFFFFFF);
+    vertex(478, 0, 65535, 0xFF0000FF); vertex(512, 512, 65535, 0xFF0000FF);
+    cmd(0x04, (6 << 16) | 2);
+    end();
+    begin(FB, 512); scissor(0, 0, 479, 271); clear(4, 65535);
+    cmd(0xDE, 7);
+    cmd(0x12, (7 << 2) | (3 << 7) | (1 << 23)); cmd(0x01, va & 0xFFFFFF);
+    vertex(520, 100, 65535, 0xFFFF00FF); vertex(536, 116, 65535, 0xFFFF00FF);
+    cmd(0x04, (6 << 16) | 2); /* one sprite per draw, as the game issues them */
+    cmd(0x01, va & 0xFFFFFF);
+    vertex(-40, 100, 65535, 0xFF00FFFF); vertex(-24, 116, 65535, 0xFF00FFFF);
+    cmd(0x04, (6 << 16) | 2);
+    cmd(0x01, va & 0xFFFFFF);
+    vertex(470, 180, 65535, 0xFF00FFFF); vertex(500, 196, 65535, 0xFF00FFFF);
+    cmd(0x04, (6 << 16) | 2);
+    cmd(0xDE, 1); cmd(0x01, va & 0xFFFFFF);
+    vertex(520, 140, 65535, 0xFFFFFF00); vertex(536, 156, 65535, 0xFFFFFF00);
+    cmd(0x04, (6 << 16) | 2);
+    cmd(0x01, va & 0xFFFFFF);
+    vertex(448, 200, 65535, 0xFF00FF00); vertex(512, 264, 65535, 0xFF00FF00);
+    cmd(0x04, (6 << 16) | 2);
+    cmd(0x01, va & 0xFFFFFF);
+    vertex(478, 0, 65535, 0xFF0000FF); vertex(512, 512, 65535, 0xFF0000FF);
+    cmd(0x04, (6 << 16) | 2);
+    end();
+    expect(FB, 528, 108, 1, 0xFF00FF, "depth-tested sprite beyond the right edge shows in the band");
+    expect(FB, -32, 108, 1, 0x00FFFF, "depth-tested sprite beyond the left edge shows in the band");
+    expect(FB, 495, 188, 1, 0x00FFFF, "depth-tested sprite straddling the edge shows past it");
+    expect(FB, 528, 148, 1, 0xFFFF00, "2D marker entirely beyond the right edge shows in the band");
+    expect(FB, 470, 232, 1, 0x00FF00, "backdrop tile shows up to the screen edge");
+    expect(FB, 490, 232, 1, 0, "backdrop tile stays clipped at the screen edge");
+    expect(FB, 500, 100, 1, 0, "backdrop piece taller than the screen stays out of the band");
+    /* The lock box is lines: a line entirely past the edge, and one that
+     * crosses it, both reach into the band. */
+    begin(FB, 512); scissor(0, 0, 479, 271); clear(4, 65535);
+    cmd(0x12, (7 << 2) | (3 << 7) | (1 << 23)); cmd(0x01, va & 0xFFFFFF);
+    vertex(490, 60, 0, 0xFF00FFFF); vertex(530, 60, 0, 0xFF00FFFF);
+    cmd(0x04, (1 << 16) | 2);
+    cmd(0x01, va & 0xFFFFFF);
+    vertex(460, 80, 0, 0xFF00FFFF); vertex(530, 80, 0, 0xFF00FFFF);
+    cmd(0x04, (1 << 16) | 2);
+    end();
+    /* Sample the one-pixel lines at their centre row: at window resolution
+     * row 80 begins at a fractional physical row. */
+    expect(FB, 510, 60.5f, 1, 0x00FFFF, "line entirely past the right edge shows in the band");
+    expect(FB, 510, 80.5f, 1, 0x00FFFF, "line crossing the right edge continues into the band");
+    expect(FB, 470, 80.5f, 1, 0x00FFFF, "line crossing the right edge keeps its on-screen part");
 }
 static void set_size(int dw, int dh) {
     present_request_window_size(dw, dh);

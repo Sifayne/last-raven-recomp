@@ -1,0 +1,6 @@
+# Utility decisions for lock-band-hand.pad: the recorder cannot see the save
+# dialog, which reads the pad itself, so the load Sif performed is answered
+# here. First dialog of the run, load mode, the one slot on the card.
+1 4 NPUH10024 ACLRSAVELIST00 select
+1 4 NPUH10024 ACLRSAVELIST00 accept
+1 4 NPUH10024 ACLRSAVELIST00 accept

@@ -17,6 +17,7 @@ enum { W = 480, H = 272, STRIDE = 512 };
  * replacement; the fixture stands in for host/replacements.c here, or its
  * window-aspect configurations would silently run the original view. */
 const int lr_adaptive_aspect_available = 1;
+const int lr_hud_bands_available = 1;
 static const psp_render_backend *be;
 static unsigned checks, failures;
 static void check(int yes, const char *why) {

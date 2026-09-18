@@ -394,15 +394,44 @@ Measured on the window images, in PSP pixels from the screen centre
 | Same: y range | -87..41 | -38..82 | -87..42 | -86..42 |
 | Yellow lock box, poll ~2340: width x height | 198 x 215 | 260 x 223 (clipped) | 198 x 215 | 198 x 214 |
 
-Known limit: a locked target in the wide bands beyond the centred 480
-columns projects to guest x outside 0..480 and the game does not draw its
-reticle there; the box and reticle are exact within the native area.
+The bands beside the centred 480 columns. The lock marker (the red circle
+and LOCK label, `001FC6A8`, drawn from a point the mission loop records)
+and the two depth-tested lock-on rings (`001FBF58`) are drawn wherever their
+target projects, off the 480 columns too (a run logs ring x from -31580 to
+1380; the PSP's scissor removed those). Two things kept them out of the
+bands of a wide target. The host's HUD viewport and scissor clipped them:
+a HUD batch beyond the 480 columns now keeps the HUD mapping but as a
+shader translation over the whole target, with the whole-target scissor
+when the game's scissor is the whole screen. Backdrops reach into the
+stride padding as well and must stay out, as on the PSP -- the menus tile
+one as 64x64 pieces whose last column spans x 448..512, others are pieces
+taller than the screen at 478..512 -- so the band path is for a draw that
+lies entirely off the screen, or that tests depth, or that is a line, and
+that is shorter than the screen; a piece that starts on the screen is
+clipped at its edge as before. Lines are the lock box itself: with camera
+smoothing the box slides past the edge with its target, and the GL backend
+rasterises lines through its own walker, clamped to the screen, so a band
+line batch under the game's whole-screen scissor now walks into the bands.
+Sif's hand-recorded AC Test session (`scenarios/lock-band-hand.pad`, with
+`lock-band-hand.dialog` answering the save dialog the recorder cannot see)
+replayed at 2560x720 shows the box continuing into the right band. The path is per title (`lr_hud_bands_available`, defined by a
+title's replacements): Last Raven's menus, garage and missions were audited
+and only the rings and the marker draw off the screen, while a replay of
+AC3 Portable's menus showed some 26,000 untextured pieces parked there --
+black in that run, but unaudited, so that title keeps the centred clip. And the mission loop keeps the marker only while `001FBDF8`, the lock
+target's on-screen test, says the point lies within the render descriptor's
+480x272 rectangle: replaced (`host/replace.txt`), it now also says yes in
+the band width on either side. The rings pass a depth test against their
+target, so a target behind terrain shows none; `PSPRECOMP_ASPECT_LOG=2`
+logs every ring draw with the window image it lands in.
 
 ```bash
-# Camera code: the HUD projection stays native while the scene widens (39 checks).
+# Camera code: the HUD projection stays native while the scene widens, and the
+# lock target's on-screen test accepts the bands (73 checks).
 scripts/14-aspect-tests.sh
 
-# Synthetic GE lists: a depth-tested screen-space sprite lands with the HUD.
+# Synthetic GE lists: screen-space sprites and lines land with the HUD, in the
+# bands too; backdrop pieces that start on the screen stay clipped at its edge.
 scripts/17-preview-tests.sh
 ```
 

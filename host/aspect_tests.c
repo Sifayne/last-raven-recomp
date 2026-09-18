@@ -112,6 +112,48 @@ int main(int argc, char **argv) {
     check(!memcmp(native, psp_mem_ptr(CAMERA, sizeof native), sizeof native),
           "resize back restores native culling and camera");
 
+    /* The lock target's on-screen test. The render system's screen matrix at
+     * +400 is the identity here; the projector scales by 16 into fixed point
+     * and the test converts x>>4 - 2048 + 240 and y>>3 - 4096 + 136 to
+     * pixels, so a point is written as x = px + 1808, y = (py + 3960) / 2. */
+    enum { TARGET = 0x004D4B40u, HELD = 0x004D4B50u + 12, OUT = PSP_RAM_BASE + 0x3000, MATRIX = RENDER + 400 };
+    psp_write32(HELD, 1);
+    for (int i = 0; i < 16; i++) psp_write_f32(MATRIX + 4 * i, i % 5 == 0 ? 1.0f : 0.0f);
+    psp_write32(DESCRIPTOR + 40, 0); psp_write32(DESCRIPTOR + 44, 0);
+    psp_write32(DESCRIPTOR + 48, 480); psp_write32(DESCRIPTOR + 52, 272);
+    struct { int px, py, z; int native, wide; const char *name; } const points[] = {
+        { 240, 136,  100, 1, 1, "centre is on screen either way" },
+        { 500, 136,  100, 0, 1, "right band counts as on screen only when wide" },
+        { -70, 136,  100, 0, 1, "left band counts as on screen only when wide" },
+        { 570, 136,  100, 0, 0, "beyond the right band stays off screen" },
+        { -90, 136,  100, 0, 0, "beyond the left band stays off screen" },
+        { 500, 300,  100, 0, 0, "below the screen stays off screen in the band" },
+        { 500, 136, -5000, 0, 0, "behind the camera stays off screen in the band" },
+    };
+    memset(&psp_cpu, 0, sizeof psp_cpu); psp_cpu_reset_fp();
+    for (unsigned i = 0; i < sizeof points / sizeof points[0]; i++) {
+        for (int pass = 0; pass < 2; pass++) {
+            adaptive = pass; wide = pass ? 640 : 480;
+            psp_write_f32(TARGET + 0, (float)(points[i].px + 1808));
+            psp_write_f32(TARGET + 4, (float)(points[i].py + 3960) / 2);
+            psp_write_f32(TARGET + 8, (float)points[i].z);
+            psp_write_f32(TARGET + 12, 1.0f);
+            r_v0 = 0xBAD;
+            call(psp_func_001FBDF8, OUT);
+            const int want = pass ? points[i].wide : points[i].native;
+            check((int)r_v0 == want, points[i].name);
+            if (want && points[i].z > -4096)
+                check(psp_read32(OUT) == (uint32_t)points[i].px &&
+                      psp_read32(OUT + 4) == (uint32_t)points[i].py, "on-screen test leaves the pixel position");
+        }
+    }
+    psp_write32(HELD, 0); adaptive = 1; wide = 640;
+    psp_write_f32(TARGET + 0, (float)(500 + 1808));
+    r_v0 = 0xBAD;
+    call(psp_func_001FBDF8, OUT);
+    check(r_v0 == 0, "no lock target stays off screen in the band");
+    adaptive = 0; wide = 480;
+
     seed(256, 128);
     call(psp_func_000889B4__orig, CAMERA);
     memcpy(original, psp_mem_ptr(CAMERA, sizeof original), sizeof original);
