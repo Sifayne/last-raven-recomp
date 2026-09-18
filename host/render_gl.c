@@ -29,6 +29,7 @@
 #include "settings.h"
 #include "psprecomp/render.h"
 #include "psprecomp/mem.h"
+#include "psprecomp/hle.h"
 #include "psprecomp/os.h"
 
 #include <math.h>
@@ -3510,6 +3511,20 @@ static void gl_present(void) {
     if (claim() != 0) return;
     g.presents++;
     flush_ends(FB_PRESENT); flush();
+    /* PSPRECOMP_GL_FRAME_LOG=1: what each presented frame drew, as deltas of
+     * the run counters -- the way an inserted high-FPS frame is compared with
+     * the simulated one before it. */
+    if (getenv("PSPRECOMP_GL_FRAME_LOG")) {
+        static uint64_t d, sc, hu, md, mb, gl_, gc, gv;
+        const uint64_t cmds = psp_ge_command_count(), vtx = psp_ge_vertex_count();
+        fprintf(stderr, "frame-log present %llu: ge cmds %llu verts %llu; draws %llu scene %llu hud %llu model %llu/%llu glyph %llu\n",
+                (unsigned long long)g.presents, (unsigned long long)(cmds - gc), (unsigned long long)(vtx - gv),
+                (unsigned long long)(g.draws - d),
+                (unsigned long long)(g.class_scene - sc), (unsigned long long)(g.class_hud - hu),
+                (unsigned long long)(g.model_draws - md), (unsigned long long)(g.mu.batches - mb),
+                (unsigned long long)(g.glyph_draws - gl_));
+        d = g.draws; sc = g.class_scene; hu = g.class_hud; md = g.model_draws; mb = g.mu.batches; gl_ = g.glyph_draws; gc = cmds; gv = vtx;
+    }
     /* Count deferred alpha/stencil transfers inside the GPU frame timer. */
     for (int i = 0; i < g.n_rts; i++) stencil_to_alpha(&g.rts[i]);
 

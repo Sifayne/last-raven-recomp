@@ -56,7 +56,16 @@ def generate(source, slug):
                     f'        goto fps_tick_top;\n'
                     f'    }}\n    fps_{adapter}_frame_log();\n')
     if slug == 'aclr':
-        for target in ('002230D8', '00107A3C', '000EFEB4', '00222974', '00229D6C', '0008F43C', '0008D8BC', '0022DCAC'):
+        # Tick-only helpers: stop-state writers, the HUD lifecycle and the layer
+        # dispatcher. 0008D8BC is deliberately NOT among them: it is the render
+        # system's frame begin (0008B890 viewport/projection, 0008CECC/0008CF58/
+        # 0008D100 view setup, and through them the display-list kick). With it
+        # suppressed an inserted frame executed 1,737 GE commands instead of
+        # 22,000 -- no world, only the HUD and the full-screen passes over the
+        # previous frame's colour, which dimmed a little more on each inserted
+        # frame (reports/aspect-reticle, 17 Sep). It advances no simulation
+        # state that the stock-versus-enhanced replay comparison can see.
+        for target in ('002230D8', '00107A3C', '000EFEB4', '00222974', '00229D6C', '0008F43C', '0022DCAC'):
             pattern = rf'(    )(\{{ uint32_t _spc = r_sp; psp_func_{target}\(\); PSP_SP_CALL\(0x{target}u, _spc, r_sp\); \}})'
             body, count = re.subn(pattern, r'\1if (!fps.inserted) \2', body)
             if count != 1:

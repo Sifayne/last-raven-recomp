@@ -45,6 +45,18 @@ widget lifecycle from HUD drawing: advancing that lifecycle on an inserted
 frame could clear a lock-on flag and change firing behavior. The HUD still
 draws every frame, and its lifecycle also runs on catch-up ticks.
 
+The render system's frame begin (`0008D8BC`: viewport and projection, view
+setup and, through them, the display-list kick) must run on every rendered
+frame. Until 17 September the ACLR generator suppressed it with the tick-only
+helpers, so an inserted frame executed 1,737 GE commands instead of 22,000:
+no world, only the HUD and the full-screen passes drawn over the previous
+frame's colour, which dimmed a little more on each inserted frame -- at a cap
+of 90 a 30 Hz flicker between a normal frame and two dimmer ones, and menus
+and the mission intro reduced to their sky gradient. `PSPRECOMP_GL_FRAME_LOG=1`
+prints each present's GE command and draw counts, which is how it was found.
+With it restored, every frame draws the full list and the stock-versus-
+enhanced comparison still matches all 2,713 control records at caps 30 and 90.
+
 | Adapter | Mission loop | Bone builder | Camera update |
 | --- | --- | --- | --- |
 | ACLR | `00102018` | `00045DAC` | `000FF280` |
