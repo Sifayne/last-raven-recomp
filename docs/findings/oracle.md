@@ -33,7 +33,7 @@ had no interpreter. Phase 1 wrote one.
 | Allegrex interpreter | patch `0003` → `tools/allegrexrecomp/interp.{c,h}` |
 | CLI | `allegrexrecomp interp <elf> [--from] [--trace] [--regs]` |
 | Unit tests | `tests/test_interp.c` — 12 cases, hand-written encodings |
-| Differential harness | `host/oracle_diff.c` |
+| Differential harness | `tools/psprecomp/tools/oracle/oracle_diff.c` (in this repo until 2026-10-04) |
 | Triage | `scripts/06-triage.py` — clusters divergences by signature |
 
 The property that makes it work: both sides share the decoder, CPU state,

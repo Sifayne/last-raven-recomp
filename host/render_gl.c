@@ -44,7 +44,7 @@ int render_gl_resolution_mode(void) {
 
 #ifdef HAVE_SDL2
 
-#include "save_dialog.h"
+#include "psprecomp/host/save_dialog.h"
 #include "psprecomp/savedata.h"
 #include <SDL_opengl.h>
 #include <pthread.h>

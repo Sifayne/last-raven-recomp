@@ -1,7 +1,7 @@
 /* Exercise the real SDL event loop and GL owner handoff on a disposable card. */
 #include "present.h"
 #include "render_gl.h"
-#include "save_dialog.h"
+#include "psprecomp/host/save_dialog.h"
 #include "settings.h"
 #include "psprecomp/hle.h"
 #include <assert.h>

@@ -29,11 +29,11 @@ foreach(name fps-tests fps-pose-tests)
     target_link_libraries(${name} PRIVATE m)
 endforeach()
 target_compile_options(launcher PRIVATE -Wall -Wextra -Werror)
-add_executable(present-tests "${ROOT}/host/present_tests.c" "${ROOT}/host/save_dialog.c" "${ROOT}/host/settings.c")
+add_executable(present-tests "${ROOT}/host/present_tests.c" "${ROOT}/tools/psprecomp/src/host/save_dialog.c" "${ROOT}/host/settings.c")
 target_compile_definitions(present-tests PRIVATE HAVE_SDL2)
 target_compile_options(present-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_link_libraries(present-tests PRIVATE runtime PkgConfig::SDL)
-add_executable(save-dialog-tests "${ROOT}/host/save_dialog_tests.c" "${ROOT}/host/save_dialog.c"
+add_executable(save-dialog-tests "${ROOT}/host/save_dialog_tests.c" "${ROOT}/tools/psprecomp/src/host/save_dialog.c"
     "${ROOT}/host/present.c" "${ROOT}/host/render_gl.c" "${ROOT}/host/settings.c")
 target_compile_definitions(save-dialog-tests PRIVATE HAVE_SDL2)
 target_compile_options(save-dialog-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
@@ -58,7 +58,7 @@ foreach(slug ac3p acsl aclr)
     # These are original host objects only. The user's generated game objects
     # and replacements requiring generated headers are linked on their device.
     add_library(host-${slug} STATIC "${ROOT}/host/boot.c" "${ROOT}/host/settings.c"
-        "${ROOT}/host/present.c" "${ROOT}/host/save_dialog.c" "${ROOT}/host/render_gl.c"
+        "${ROOT}/host/present.c" "${ROOT}/tools/psprecomp/src/host/save_dialog.c" "${ROOT}/host/render_gl.c"
         "${RECOMP}/loader.c" "${RECOMP}/container.c" "${RECOMP}/decode.c")
     target_include_directories(host-${slug} PRIVATE "${RECOMP}")
     target_compile_definitions(host-${slug} PRIVATE HAVE_SDL2 GAME_TITLE="${TITLE}")

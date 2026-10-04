@@ -191,7 +191,7 @@ def main():
     squash = unpack("squashfuse-0.5.2.tar.gz", "squashfuse")
     notices = [(ROOT / "LICENSE", "last-raven/LICENSE"),
         (ROOT / "tools/psprecomp/LICENSE", "psprecomp/LICENSE"),
-        (ROOT / "third_party/stb/LICENSE", "stb/LICENSE"),
+        (ROOT / "tools/psprecomp/third_party/stb/LICENSE", "stb/LICENSE"),
         (sdl / "LICENSE.txt", "SDL/LICENSE.txt"), (ttf / "LICENSE.txt", "SDL_ttf/LICENSE.txt"),
         (ttf / "external/freetype/docs/FTL.TXT", "FreeType/FTL.TXT"),
         (h264 / "LICENSE", "OpenH264/LICENSE"), (font / "LICENSE", "DejaVu/LICENSE"),

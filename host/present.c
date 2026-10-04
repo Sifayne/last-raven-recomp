@@ -16,7 +16,7 @@
 #include "present.h"
 #include "controls.h"
 #include "settings.h"
-#include "save_dialog.h"
+#include "psprecomp/host/save_dialog.h"
 
 #include "psprecomp/clock.h"
 #include "psprecomp/hle.h"

@@ -91,7 +91,7 @@ if [ -n "$SDL_DEF" ]; then
        -c "$ROOT/host/render_gl.c" -o "$OUT/render_gl.o"
     cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
        -I "$ROOT/tools/psprecomp/include" \
-       -c "$ROOT/host/save_dialog.c" -o "$OUT/save_dialog.o"
+       -c "$ROOT/tools/psprecomp/src/host/save_dialog.c" -o "$OUT/save_dialog.o"
     PRESENT="$OUT/present.o $OUT/save_dialog.o $OUT/render_gl.o $(pkg-config --libs sdl2 SDL2_ttf)"
 fi
 

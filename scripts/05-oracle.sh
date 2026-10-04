@@ -61,7 +61,7 @@ done
 info "building oracle_diff"
 cc -c -O1 -I "$ROOT/tools/psprecomp/include" \
          -I "$ROOT/tools/psprecomp/tools/allegrexrecomp" \
-         -o "$GEN_OBJ/oracle_diff.o" "$ROOT/host/oracle_diff.c"
+         -o "$GEN_OBJ/oracle_diff.o" "$ROOT/tools/psprecomp/tools/oracle/oracle_diff.c"
 
 # Replacements are linked here too, because the emitted objects reference their
 # symbols. Note what that means for a comparison: this harness runs
