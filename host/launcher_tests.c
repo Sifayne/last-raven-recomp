@@ -22,6 +22,17 @@ static const char *test_display_name(int index) {
 #include <pthread.h>
 #include <sys/stat.h>
 
+/* The host's own pads stay out: the startup run opens the first game
+ * controller, and a press on it can close the launcher (B cancels) before the
+ * quit event below is pushed. SDL keeps HIDAPI devices closed and passes only
+ * VID/PID 0, the ID SDL_JoystickAttachVirtual gives a virtual pad. Override
+ * priority, because a same-named environment variable would win over
+ * SDL_SetHint. SDL_Quit clears hints, so each SDL_Init needs this first. */
+static void ignore_host_controllers(void) {
+    assert(SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI,"0",SDL_HINT_OVERRIDE));
+    assert(SDL_SetHintWithPriority(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x0000/0x0000",SDL_HINT_OVERRIDE));
+}
+
 static void *close_startup(void *unused) {
     (void)unused;
     SDL_Delay(500);
@@ -58,6 +69,7 @@ int main(int argc,char **argv) {
     setenv("LR_DATA_ROOT",argv[1],1);
     launcher a={0}; a.running=1; a.focus=a.selected_row=LR_RESOLUTION; a.movie_available=1;
     snprintf(a.path,sizeof a.path,"%s/presets with spaces.ini",argv[1]);
+    ignore_host_controllers();
     assert(!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMECONTROLLER)); assert(!TTF_Init());
     a.window=SDL_CreateWindow("Settings UI checks",0,0,UI_W,UI_H,SDL_WINDOW_HIDDEN);
     assert(a.window); a.renderer=SDL_CreateRenderer(a.window,-1,SDL_RENDERER_SOFTWARE); assert(a.renderer);
@@ -250,6 +262,7 @@ int main(int argc,char **argv) {
     SDL_DestroyRenderer(a.renderer); SDL_DestroyWindow(a.window); TTF_Quit(); SDL_Quit();
     /* Also exercise the real CLI entry point, loading the file we just saved.
      * The event thread closes it normally, without touching user preferences. */
+    ignore_host_controllers();
     pthread_t closer; assert(!pthread_create(&closer,NULL,close_startup,NULL));
     char *startup[]={"launcher","--config",a.path,"--font",argc==3?argv[2]:NULL,NULL};
     assert(!launcher_entry(argc==3?5:3,startup)); assert(!pthread_join(closer,NULL));

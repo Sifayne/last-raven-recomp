@@ -173,9 +173,20 @@ static void controller(const char *out) {
     SDL_GameControllerClose(pad); SDL_JoystickDetachVirtual(index);
     save_dialog_shutdown(); SDL_DestroyWindow(win); SDL_Quit();
 }
+/* The host's own pads stay out: the presentation thread opens the first game
+ * controller it finds, and its stick or d-pad moved the first save list.
+ * SDL keeps HIDAPI devices closed and passes only VID/PID 0, the ID
+ * SDL_JoystickAttachVirtual gives the controller mode's virtual pad. Override
+ * priority, because a same-named environment variable would win over
+ * SDL_SetHint. */
+static void ignore_host_controllers(void) {
+    assert(SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI,"0",SDL_HINT_OVERRIDE));
+    assert(SDL_SetHintWithPriority(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x0000/0x0000",SDL_HINT_OVERRIDE));
+}
 int main(int argc,char **argv) {
     assert(argc==3);
     assert(mkdtemp(root));
+    ignore_host_controllers();
     assert(!psp_mem_init()); psp_cpu_reset(); psp_hle_init(); psp_io_set_root(root);
     if (!strcmp(argv[1],"controller")) controller(argv[2]);
     else if (!strcmp(argv[1],"nofont")) nofont();
