@@ -11,6 +11,9 @@
 enum { W = 512, H = 272 };
 #define FB 0x04000000u
 #define AUX 0x04140000u
+/* The depth buffer is guest VRAM, as on the PSP, and starts at the VRAM base:
+ * left there, depth writes would land in FB. Put it after FB instead. */
+#define ZB 0x04088000u
 static const psp_render_backend *be;
 static psp_blend_state bs;
 static unsigned checks, failures;
@@ -138,7 +141,10 @@ static void test_lines(void) {
     expect(11,22,0x44332211,"point does not fill interval");
     expect(12,22,0x4400FF00,"point last endpoint");
 
-    /* Perspective texture interpolation on a scissored line. */
+    /* Perspective texture interpolation on a scissored line, read at each
+     * pixel's centre and divided by w there, as through-mode lines read
+     * on fw 6.60 (psprecomp docs/RENDERER.md, "Texture coordinates on
+     * sprites and lines"): u = 8t/(2-t), t = (x+1/2)/8. */
     const uint32_t addr=0x08800000;
     for (unsigned i=0; i<8; i++) psp_write32(addr+i*4,0xFF000010+i);
     psp_tex_state tex={.addr=addr,.stride=8,.w=8,.h=1,.fmt=3,.func=3,.tcc_rgba=1};
@@ -148,8 +154,8 @@ static void test_lines(void) {
     be->draw(PSP_PRIM_LINES,v,2);
     expect(1,26,0x44332211,"line scissor excludes left");
     expect(2,26,0x44000011,"line perspective texture at clipped start");
-    expect(4,26,0x44000012,"line perspective texture midpoint");
-    expect(5,26,0x44000013,"line perspective texture at clipped end");
+    expect(4,26,0x44000013,"line perspective texture midpoint");
+    expect(5,26,0x44000014,"line perspective texture at clipped end");
     expect(6,26,0x44332211,"line scissor excludes right");
     tex=(psp_tex_state){0}; be->set_texture(&tex);
     be->set_scissor(0,0,W-1,H-1);
@@ -185,6 +191,7 @@ int main(int argc, char **argv) {
     if (psp_render_select(argv[1])) return 2;
     be=psp_render_current(); if (be->init(W,H)) return 2;
     be->set_target(FB,W,3); be->set_scissor(0,0,W-1,H-1);
+    psp_render_set_depth_buffer(ZB,W);
     psp_tex_state tex={0}; be->set_texture(&tex); be->set_fog(0,0);
     test_stencil(); test_lines(); test_target_texture_alpha();
     be->finish(); be->present();

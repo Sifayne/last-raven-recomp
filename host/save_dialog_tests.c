@@ -33,6 +33,9 @@ static void request(int mode,int circle) {
     string(param+256,"Save Data 01");
     string(param+384,"Player: Test player\nPlay time: 12:34:56\nProgress: 30％");
     string(data,"independent progress"); psp_write32(param+116,data);
+    /* A game key: fw 6.60 refuses a SAVE-family request with the zero key
+     * (psprecomp tests/test_savedata.c, saveprobe step 1). */
+    for (unsigned i=0;i<16;i++) psp_write8(param+1500+i,(uint8_t)i);
     psp_write32(param+120,128); psp_write32(param+124,21);
     assert(call(0x50C4CD57,param)==0);
     assert(call(0x8874DBE0,0)==1); assert(call(0x8874DBE0,0)==2);
@@ -49,9 +52,13 @@ static void key(SDL_Keycode k) {
     e.type=SDL_KEYUP; e.key.state=SDL_RELEASED; assert(SDL_PushEvent(&e)==1);
     settle();
 }
+/* Polled back to back after ShutdownStart, fw 6.60 reads 4 until the caller
+ * waits; a vblank wait lets the shutdown finish (saveprobe steps 77-78). */
 static void finish(void) {
     assert(call(0x8874DBE0,0)==3); assert(call(0x9790B33C,0)==0);
-    assert(call(0x8874DBE0,0)==4); assert(call(0x8874DBE0,0)==0);
+    assert(call(0x8874DBE0,0)==4); assert(call(0x8874DBE0,0)==4);
+    call(0x984C27E7,0); /* sceDisplayWaitVblankStart */
+    assert(call(0x8874DBE0,0)==0);
     SDL_Delay(100);
 }
 static void capture(const char *dir,const char *name) {
