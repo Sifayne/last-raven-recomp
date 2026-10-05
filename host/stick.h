@@ -36,11 +36,11 @@ typedef struct {
 static const input_tuning *input_tune(void) {
     static input_tuning t;
     if (!t.init) {
-        t.move_dead = (float)lr_settings_current()->number[LR_MOVE_DEADZONE];
+        t.move_dead = (float)psp_settings_current()->number[LR_MOVE_DEADZONE];
         t.move_enter = fminf(t.move_dead + 0.03f, 0.55f);
-        t.look_dead = (float)lr_settings_current()->number[LR_LOOK_DEADZONE];
-        t.outer_dead = (float)lr_settings_current()->number[LR_STICK_OUTER_DEADZONE];
-        t.look_expo = (float)lr_settings_current()->number[LR_LOOK_EXPO];
+        t.look_dead = (float)psp_settings_current()->number[LR_LOOK_DEADZONE];
+        t.outer_dead = (float)psp_settings_current()->number[LR_STICK_OUTER_DEADZONE];
+        t.look_expo = (float)psp_settings_current()->number[LR_LOOK_EXPO];
         t.init = 1;
         if (input_mode() != INPUT_CLASSIC)
             printf("      sticks    radial -- move %.0f/%.0f%% exit/enter, "

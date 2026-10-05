@@ -34,8 +34,8 @@ typedef struct {
     SDL_Renderer *renderer;
     TTF_Font *small, *body, *heading;
     SDL_GameController *pad;
-    lr_presets book;
-    lr_settings effective;
+    psp_presets book;
+    psp_settings effective;
     char path[4096];
     const char *boot, *module, *iso;
     game_entry games[MAX_GAMES]; int game_count, game;
@@ -47,10 +47,10 @@ typedef struct {
     char import_line[1024],import_status[1024]; size_t import_used;
     int page, scroll, selected_row, focus, dirty, running, valid, movie_available;
     int load_failed; /* A malformed file must never be overwritten by defaults. */
-    char status[LR_ERROR_SIZE], validation[LR_ERROR_SIZE];
+    char status[PSP_SETTINGS_ERROR], validation[PSP_SETTINGS_ERROR];
     hit hits[96]; int hit_count;
     int modal, edit_id, select_text;
-    char edit[LR_VALUE_SIZE], modal_error[LR_ERROR_SIZE];
+    char edit[PSP_SETTINGS_VALUE], modal_error[PSP_SETTINGS_ERROR];
     pid_t child; int child_error_fd;
     char child_error[2048]; size_t child_error_len;
     Uint32 stick_repeat;
@@ -88,11 +88,11 @@ static void button(launcher *a,int id,int x,int y,int w,int h,const char *s,int 
     label(a,a->body,x+12,y+(h-24)/2,w-24,s,primary?BG:TEXT);
     add_hit(a,id,r);
 }
-static lr_settings *editing(launcher *a) { return &a->book.presets[a->book.selected].settings; }
+static psp_settings *editing(launcher *a) { return &a->book.presets[a->book.selected].settings; }
 static int overridden(int id) { const char *v=getenv(lr_options[id].env); return v && *v; }
 static int unavailable(launcher *a,int id) { return id==LR_MPEG_DECODE && !a->movie_available; }
-static void display_label(const lr_settings *s,char *out,size_t size) {
-    lr_option_label(s,LR_DISPLAY,out,size);
+static void display_label(const psp_settings *s,char *out,size_t size) {
+    psp_option_label(s,LR_DISPLAY,out,size);
     int screen=(int)s->number[LR_DISPLAY];
     if (screen<0) return;
     if (screen>SDL_GetNumVideoDisplays()) {
@@ -104,8 +104,8 @@ static void display_label(const lr_settings *s,char *out,size_t size) {
 }
 static void refresh(launcher *a) {
     a->effective=*editing(a); a->validation[0]=0;
-    a->valid=!lr_settings_env(&a->effective,a->validation) &&
-             !lr_settings_resolve(&a->effective,a->validation);
+    a->valid=!psp_settings_env(&a->effective,a->validation) &&
+             !psp_settings_resolve(&a->effective,a->validation);
     if (a->valid && !a->movie_available && a->effective.number[LR_MPEG_DECODE]) {
         strcpy(a->validation,"Intro decoding is unavailable in this build. Turn it off or remove its environment override.");
         a->valid=0;
@@ -168,7 +168,7 @@ static void draw(launcher *a) {
     refresh(a); a->hit_count=0;
     box(a,(SDL_Rect){0,0,UI_W,UI_H},BG);
     label(a,a->small,28,22,800,"ARMORED CORE  /  PC SETTINGS",ACCENT);
-    char heading[LR_VALUE_SIZE]; snprintf(heading,sizeof heading,"%s",game_title(a));
+    char heading[PSP_SETTINGS_VALUE]; snprintf(heading,sizeof heading,"%s",game_title(a));
     for (char *c=heading;*c;c++) *c=(char)toupper((unsigned char)*c);
     label(a,a->heading,26,48,a->importer?770:930,heading,TEXT);
     if (a->importer) button(a,ADD_GAME,822,44,138,40,"Add Game",1);
@@ -222,7 +222,7 @@ static void draw(launcher *a) {
         label(a,a->body,310,y+5,300,lr_options[id].label,locked||disabled?MUTED:TEXT);
         label(a,a->small,310,y+29,360,locked?"Environment override":missing?
               (disabled?"Not available in this build":"Decoder unavailable; switch off"):"Applies on next launch",locked?ACCENT:MUTED);
-        char value[LR_VALUE_SIZE]; lr_option_label(&a->effective,id,value,sizeof value);
+        char value[PSP_SETTINGS_VALUE]; psp_option_label(&a->effective,id,value,sizeof value);
         if (id==LR_DISPLAY) display_label(&a->effective,value,sizeof value);
         SDL_Rect clip={662,y,330,50}; SDL_RenderSetClipRect(a->renderer,&clip);
         label(a,a->body,668,y+13,600,value,locked?ACCENT:TEXT);
@@ -287,8 +287,8 @@ static void draw(launcher *a) {
         if (a->modal<=MODAL_VALUE) {
             char hint[256];
             if (a->modal==MODAL_VALUE) {
-                const lr_option_def *d=&lr_options[a->edit_id];
-                if (d->type==LR_SIZE) snprintf(hint,sizeof hint,"%s: WIDTHxHEIGHT",d->label);
+                const psp_option_def *d=&lr_options[a->edit_id];
+                if (d->type==PSP_OPTION_SIZE) snprintf(hint,sizeof hint,"%s: WIDTHxHEIGHT",d->label);
                 else snprintf(hint,sizeof hint,"%s: %g to %g%s%s",d->label,d->min,d->max,
                               d->special?", or ":"",d->special?d->special:"");
             } else strcpy(hint,"Preset name (up to 63 UTF-8 bytes)");
@@ -312,7 +312,7 @@ static void draw(launcher *a) {
 
 static int save(launcher *a) {
     if (a->load_failed) return -1;
-    if (lr_presets_save(&a->book,a->path,a->status)) return -1;
+    if (psp_presets_save(&a->book,a->path,a->status)) return -1;
     a->dirty=0; snprintf(a->status,sizeof a->status,"Saved preset: %.63s",a->book.presets[a->book.selected].name);
     return 0;
 }
@@ -322,10 +322,10 @@ static void adjust(launcher *a,int id,int direction) {
     if (id<0 || id>=LR_OPTION_COUNT) return;
     a->focus=id; show_row(a,id);
     if (overridden(id)) return;
-    lr_settings *s=editing(a); const lr_option_def *d=&lr_options[id]; char value[LR_VALUE_SIZE];
+    psp_settings *s=editing(a); const psp_option_def *d=&lr_options[id]; char value[PSP_SETTINGS_VALUE];
     if (unavailable(a,id)) {
         /* A preset from a decoder-equipped build can still be repaired here. */
-        if (s->number[id] && !lr_settings_set(s,id,"0",LR_PRESET,a->status)) changed(a);
+        if (s->number[id] && !psp_settings_set(s,id,"0",PSP_SOURCE_PRESET,a->status)) changed(a);
         return;
     }
     if (id==LR_FPS_CAP) {
@@ -343,13 +343,13 @@ static void adjust(launcher *a,int id,int direction) {
         pick=(pick+direction+count+1)%(count+1);
         if (!pick) snprintf(value,sizeof value,"primary");
         else snprintf(value,sizeof value,"%d",pick);
-    } else if (d->type==LR_CHOICE) {
+    } else if (d->type==PSP_OPTION_CHOICE) {
         int count=1; for (const char *v=d->choices;*v;v++) if (*v=='|') count++;
         if (id==LR_RENDER) count--; /* Null is useful in files/CLI, not for play. */
         int pick=((int)s->number[id]+direction+count)%count;
         const char *v=d->choices; while (pick--) v=strchr(v,'|')+1;
         size_t n=strcspn(v,"|"); memcpy(value,v,n); value[n]=0;
-    } else if (d->type==LR_SIZE) {
+    } else if (d->type==PSP_OPTION_SIZE) {
         const char *sizes[]={"960x544","1280x720","1600x900","1920x1080","2560x1440","3840x2160"};
         int pick=0; for (int i=0;i<6;i++) if (!strcmp(sizes[i],s->value[id])) pick=i;
         snprintf(value,sizeof value,"%s",sizes[(pick+direction+6)%6]);
@@ -360,38 +360,38 @@ static void adjust(launcher *a,int id,int direction) {
         if (n<d->min && d->special) snprintf(value,sizeof value,"%s",d->special);
         else snprintf(value,sizeof value,"%.9g",fmin(d->max,fmax(d->min,n)));
     }
-    if (!lr_settings_set(s,id,value,LR_PRESET,a->status)) changed(a);
+    if (!psp_settings_set(s,id,value,PSP_SOURCE_PRESET,a->status)) changed(a);
 }
 
 static void modal_accept(launcher *a) {
     int kind=a->modal;
     if (kind==MODAL_NEW || kind==MODAL_DUPLICATE) {
-        lr_settings s;
+        psp_settings s;
         if (kind==MODAL_DUPLICATE) s=*editing(a);
         else {
-            lr_settings_defaults(&s);
-            lr_settings_set(&s,LR_WINDOW,"1",LR_PRESET,a->modal_error);
-            lr_settings_set(&s,LR_RENDER,"gl",LR_PRESET,a->modal_error);
-            lr_settings_set(&s,LR_MPEG_DECODE,a->movie_available?"1":"0",LR_PRESET,a->modal_error);
+            psp_settings_defaults(&s);
+            psp_settings_set(&s,LR_WINDOW,"1",PSP_SOURCE_PRESET,a->modal_error);
+            psp_settings_set(&s,LR_RENDER,"gl",PSP_SOURCE_PRESET,a->modal_error);
+            psp_settings_set(&s,LR_MPEG_DECODE,a->movie_available?"1":"0",PSP_SOURCE_PRESET,a->modal_error);
         }
-        if (lr_presets_add(&a->book,a->edit,&s,a->modal_error)) return;
+        if (psp_presets_add(&a->book,a->edit,&s,a->modal_error)) return;
         a->book.selected=a->book.count-1;
     } else if (kind==MODAL_RENAME) {
-        int existing=lr_presets_find(&a->book,a->edit);
-        if (!lr_presets_name_valid(a->edit) || (existing>=0 && existing!=a->book.selected)) {
+        int existing=psp_presets_find(&a->book,a->edit);
+        if (!psp_presets_name_valid(a->edit) || (existing>=0 && existing!=a->book.selected)) {
             strcpy(a->modal_error,"Use a unique name without brackets, =, ; or #."); return;
         }
         strcpy(a->book.presets[a->book.selected].name,a->edit);
     } else if (kind==MODAL_VALUE) {
-        if (lr_settings_set(editing(a),a->edit_id,a->edit,LR_PRESET,a->modal_error)) return;
+        if (psp_settings_set(editing(a),a->edit_id,a->edit,PSP_SOURCE_PRESET,a->modal_error)) return;
     } else if (kind==MODAL_DELETE) {
         if (a->book.count==1) { strcpy(a->modal_error,"Keep at least one preset."); return; }
         int at=a->book.selected;
-        memmove(a->book.presets+at,a->book.presets+at+1,(size_t)(a->book.count-at-1)*sizeof(lr_preset));
+        memmove(a->book.presets+at,a->book.presets+at+1,(size_t)(a->book.count-at-1)*sizeof(psp_preset));
         a->book.count--; if (at>=a->book.count) a->book.selected=a->book.count-1;
     } else if (kind==MODAL_RESET) {
-        lr_settings_defaults(editing(a));
-        lr_settings_set(editing(a),LR_WINDOW,"1",LR_PRESET,a->modal_error);
+        psp_settings_defaults(editing(a));
+        psp_settings_set(editing(a),LR_WINDOW,"1",PSP_SOURCE_PRESET,a->modal_error);
     } else if (kind==MODAL_CANCEL_DIRTY) { a->running=0; close_modal(a); return; }
     changed(a); close_modal(a);
 }
@@ -525,16 +525,16 @@ static void activate(launcher *a,int id) {
     if (id>=0 && id<LR_OPTION_COUNT) {
         a->selected_row=a->focus=id;
         if (overridden(id) || (unavailable(a,id) && !editing(a)->number[id])) return;
-        if (lr_options[id].type==LR_CHOICE || id==LR_DISPLAY) adjust(a,id,1);
+        if (lr_options[id].type==PSP_OPTION_CHOICE || id==LR_DISPLAY) adjust(a,id,1);
         else { a->edit_id=id; open_modal(a,MODAL_VALUE,editing(a)->value[id]); }
         return;
     }
-    char name[LR_NAME_SIZE];
+    char name[PSP_SETTINGS_NAME];
     switch (id) {
     case NEW: case DUPLICATE:
         for (int n=1;;n++) {
             snprintf(name,sizeof name,"%s %d",id==NEW?"Preset":"Copy",n);
-            if (lr_presets_find(&a->book,name)<0) break;
+            if (psp_presets_find(&a->book,name)<0) break;
         }
         open_modal(a,id==NEW?MODAL_NEW:MODAL_DUPLICATE,name); break;
     case RENAME: open_modal(a,MODAL_RENAME,a->book.presets[a->book.selected].name); break;
@@ -640,7 +640,7 @@ static void event(launcher *a,const SDL_Event *e) {
         if (a->select_text) a->edit[0]=0;
         a->select_text=0;
         size_t n=strlen(a->edit), add=strlen(e->text.text);
-        size_t max=a->modal==MODAL_VALUE?LR_VALUE_SIZE:LR_NAME_SIZE;
+        size_t max=a->modal==MODAL_VALUE?PSP_SETTINGS_VALUE:PSP_SETTINGS_NAME;
         if (n+add<max) memcpy(a->edit+n,e->text.text,add+1);
     }
     if (e->type==SDL_MOUSEBUTTONDOWN && e->button.button==SDL_BUTTON_LEFT) {
@@ -756,7 +756,7 @@ int main(int argc,char **argv) {
                 spec=bar?bar+1:NULL;
             }
             if (!g.slug || !*g.slug || !g.title || !*g.title || !g.boot || !*g.boot || !g.module || !*g.module ||
-                !lr_presets_name_valid(g.slug)) {
+                !psp_presets_name_valid(g.slug)) {
                 fprintf(stderr,"--game needs SLUG|TITLE|BOOT|MODULE[|ISO], got: %s\n",argv[i]); return 2;
             }
             a.games[a.game_count++]=g;
@@ -775,15 +775,15 @@ int main(int argc,char **argv) {
     }
     a.movie_available=psp_mpeg_decoding_available();
     if (access(a.path,F_OK)==0 || errno!=ENOENT) {
-        if (lr_presets_load(&a.book,a.path,a.status)) a.load_failed=1;
+        if (psp_presets_load(&a.book,a.path,a.status)) a.load_failed=1;
     } else a.dirty=1;
     if (!a.book.count) {
-        lr_presets_defaults(&a.book);
+        psp_presets_defaults(&a.book);
         if (!a.movie_available) for (int i=0;i<a.book.count;i++)
-            lr_settings_set(&a.book.presets[i].settings,LR_MPEG_DECODE,"0",LR_PRESET,a.validation);
+            psp_settings_set(&a.book.presets[i].settings,LR_MPEG_DECODE,"0",PSP_SOURCE_PRESET,a.validation);
     }
     if (preset) {
-        int at=lr_presets_find(&a.book,preset);
+        int at=psp_presets_find(&a.book,preset);
         if (at<0) { fprintf(stderr,"preset does not exist: %s\n",preset); return 2; }
         if (a.book.selected!=at) a.dirty=1;
         a.book.selected=at;

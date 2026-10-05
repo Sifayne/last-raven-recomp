@@ -74,7 +74,7 @@ int main(int argc,char **argv) {
     a.window=SDL_CreateWindow("Settings UI checks",0,0,UI_W,UI_H,SDL_WINDOW_HIDDEN);
     assert(a.window); a.renderer=SDL_CreateRenderer(a.window,-1,SDL_RENDERER_SOFTWARE); assert(a.renderer);
     SDL_RenderSetLogicalSize(a.renderer,UI_W,UI_H); assert(!fonts(&a,argc==3?argv[2]:NULL));
-    lr_presets_defaults(&a.book); shot(&a,argv[1],"graphics");
+    psp_presets_defaults(&a.book); shot(&a,argv[1],"graphics");
     a.focus=a.selected_row=LR_WINDOW_MODE;
     pad_press(&a,SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
     assert(!strcmp(editing(&a)->value[LR_WINDOW_MODE],"borderless"));
@@ -86,7 +86,7 @@ int main(int argc,char **argv) {
     assert(editing(&a)->number[LR_DISPLAY]==1);
     draw(&a); click(&a,700,394);
     assert(editing(&a)->number[LR_DISPLAY]==2 && a.modal==MODAL_NONE);
-    char screen[LR_VALUE_SIZE]; display_label(editing(&a),screen,sizeof screen);
+    char screen[PSP_SETTINGS_VALUE]; display_label(editing(&a),screen,sizeof screen);
     assert(strstr(screen,"2: Side monitor"));
     shot(&a,argv[1],"display-selection");
     press(&a,SDLK_RIGHT); assert(editing(&a)->number[LR_DISPLAY]==-1);
@@ -132,8 +132,8 @@ int main(int argc,char **argv) {
     assert(a.effective.number[LR_MOUSE_SENS]==3);
     activate(&a,PAGE_BASE+1); a.focus=a.selected_row=LR_MOUSE_SENS;
     shot(&a,argv[1],"override");
-    assert(!save(&a)); lr_presets disk; char error[LR_ERROR_SIZE];
-    assert(!lr_presets_load(&disk,a.path,error));
+    assert(!save(&a)); psp_presets disk; char error[PSP_SETTINGS_ERROR];
+    assert(!psp_presets_load(&disk,a.path,error));
     assert(disk.presets[disk.selected].settings.number[LR_MOUSE_SENS]==saved);
     assert(!strcmp(disk.presets[disk.selected].settings.value[LR_WINDOW_MODE],"borderless"));
     assert(disk.presets[disk.selected].settings.number[LR_DISPLAY]==2);
@@ -155,7 +155,7 @@ int main(int argc,char **argv) {
     assert(a.modal==MODAL_VALUE && *a.modal_error); shot(&a,argv[1],"invalid-value");
     press(&a,SDLK_ESCAPE);
     a.movie_available=0;
-    lr_settings_set(editing(&a),LR_MPEG_DECODE,"1",LR_PRESET,error);
+    psp_settings_set(editing(&a),LR_MPEG_DECODE,"1",PSP_SOURCE_PRESET,error);
     adjust(&a,LR_MPEG_DECODE,1); assert(!editing(&a)->number[LR_MPEG_DECODE]);
     adjust(&a,LR_MPEG_DECODE,1); assert(!editing(&a)->number[LR_MPEG_DECODE]);
     a.movie_available=1;
@@ -180,7 +180,7 @@ int main(int argc,char **argv) {
     assert(!strncmp(contents,cwd,strlen(cwd)) && contents[strlen(cwd)]=='\n');
     assert(strstr(contents,module) && strstr(contents,a.path));
     assert(strstr(contents,"--preset\nDesk & controller\n--window\n"));
-    assert(!lr_presets_load(&disk,a.path,error));
+    assert(!psp_presets_load(&disk,a.path,error));
     assert(!strcmp(disk.presets[disk.selected].name,"Desk & controller"));
     /* Cancel with edits asks once; rejecting the dialog keeps edits intact. */
     a.running=1; a.dirty=1; activate(&a,CANCEL); assert(a.modal==MODAL_CANCEL_DIRTY);
@@ -198,7 +198,7 @@ int main(int argc,char **argv) {
     press(&a,SDLK_RIGHT); assert(a.game==0 && a.focus==GAME_BASE);
     press(&a,SDLK_LEFT); assert(a.game==1);
     shot(&a,argv[1],"games-second");
-    assert(!save(&a)); assert(!lr_presets_load(&disk,a.path,error)); assert(!strcmp(disk.game,"ac3p"));
+    assert(!save(&a)); assert(!psp_presets_load(&disk,a.path,error)); assert(!strcmp(disk.game,"ac3p"));
     activate(&a,PLAY); assert(a.child>0);
     for (int i=0;i<200 && a.child;i++) { SDL_Delay(5); poll_child(&a); }
     assert(!a.child && !a.running);

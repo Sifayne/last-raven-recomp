@@ -53,7 +53,8 @@ else
 fi
 
 info "compiling boot host"
-cc -O2 -std=gnu11 -c "$ROOT/host/settings.c" -o "$OUT/settings.o"
+cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -c "$ROOT/host/settings.c" -o "$OUT/settings.o"
+cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -c "$ROOT/tools/psprecomp/src/host/settings.c" -o "$OUT/player_settings.o"
 # The loader is part of the recompiler tool, not the runtime library, so its
 # sources are compiled in here rather than linked from an archive.
 cc -O2 -std=gnu11 $SDL_DEF \
@@ -112,11 +113,11 @@ cc -O2 -std=gnu11 $SDL_DEF ${SDL_DEF:+$(pkg-config --cflags sdl2 SDL2_ttf)} \
    -c "$ROOT/host/gereplay.c" -o "$OUT/gereplay.o"
 
 info "linking"
-cc "$OUT/settings.o" "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT \
+cc "$OUT/settings.o" "$OUT/player_settings.o" "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT \
    "$OUT/${PREFIX}_funcs.o" "$OUT/${PREFIX}_imports.o" "$OUT/replacements.o" "$LIB" \
    -o "$OUT/boot" -lm -lpthread "${HOST_LINK_FLAGS[@]}"
 
-cc "$OUT/settings.o" "$OUT/gereplay.o" $PRESENT "$LIB" \
+cc "$OUT/settings.o" "$OUT/player_settings.o" "$OUT/gereplay.o" $PRESENT "$LIB" \
    -o "$OUT/gereplay" -lm -lpthread "${HOST_LINK_FLAGS[@]}"
 
 # Build without running, so 09-replay.sh reuses this recipe instead of copying

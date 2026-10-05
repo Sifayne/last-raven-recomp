@@ -70,7 +70,10 @@ launcher and a primary-display fallback when the selection is unavailable.
 
 Implemented in `host/settings.h` and `host/settings.c`, with no SDL dependency.
 The registry covers the 17 options above, window mode, display selection and
-the two launch controls.
+the two launch controls. Since 5 Oct the mechanism (types, presets, precedence,
+the INI file) is psprecomp's, `psprecomp/host/settings.h`. `host/settings.c`
+keeps this registry as the schema it reads (psprecomp `docs/PLAYER-LAYER.md`
+stage 1).
 Runtime diagnostic options can migrate incrementally without blocking the screen.
 
 Each registered option needs a stable key, type, default, allowed values or

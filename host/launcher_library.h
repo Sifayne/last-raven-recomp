@@ -30,7 +30,7 @@ static int library_load(launcher *a,int imported) {
         const char **fields[]={&g->slug,&g->title,&g->boot,&g->module,&g->iso};
         for (int k=0;k<5;k++) if (!(*fields[k]=library_field(&cursor,end))) goto invalid;
         if (!*g->slug || !*g->title || !*g->module || !*g->iso ||
-            !lr_presets_name_valid(g->slug)) goto invalid;
+            !psp_presets_name_valid(g->slug)) goto invalid;
         count++;
     }
     const char *selected=imported && *wanted?wanted:a->book.game;

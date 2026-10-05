@@ -7,7 +7,7 @@ GAME_REQUESTED="${GAME:-}"
 . "$(dirname "$0")/common.sh"
 OUT="$ROOT/build/settings"
 mkdir -p "$OUT"
-cc -O2 -Wall -Wextra -std=gnu11 "$ROOT/host/settings.c" "$ROOT/host/settings_tool.c" \
+cc -O2 -Wall -Wextra -std=gnu11 -I "$ROOT/tools/psprecomp/include" "$ROOT/host/settings.c" "$ROOT/tools/psprecomp/src/host/settings.c" "$ROOT/host/settings_tool.c" \
     -lm -lpthread -o "$OUT/settings-tool"
 for arg in "$@"; do
     case "$arg" in
@@ -35,7 +35,7 @@ read -r -a UI_FLAGS <<< "$(pkg-config --cflags sdl2 SDL2_ttf)"
 read -r -a UI_LIBS <<< "$(pkg-config --libs sdl2 SDL2_ttf)"
 cc -O2 -Wall -Wextra -std=gnu11 "${UI_FLAGS[@]}" \
     -I "$ROOT/tools/psprecomp/include" \
-    "$ROOT/host/settings.c" "$ROOT/host/launcher.c" \
+    "$ROOT/host/settings.c" "$ROOT/tools/psprecomp/src/host/settings.c" "$ROOT/host/launcher.c" \
     "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${UI_LIBS[@]}" "${HOST_LINK_FLAGS[@]}" \
     -o "$OUT/launcher"
 # One --game per profile whose module has been emitted, in profile order. The

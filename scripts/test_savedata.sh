@@ -10,7 +10,7 @@ read -r -a flags <<< "$(pkg-config --cflags sdl2 SDL2_ttf)"
 read -r -a libs <<< "$(pkg-config --libs sdl2 SDL2_ttf)"
 cc -O2 -Wall -Wextra -Werror -UNDEBUG -std=gnu11 -DHAVE_SDL2 "${flags[@]}" \
     -I "$ROOT/tools/psprecomp/include" "$ROOT/host/save_dialog_tests.c" \
-    "$ROOT/tools/psprecomp/src/host/save_dialog.c" "$ROOT/host/present.c" "$ROOT/host/render_gl.c" "$ROOT/host/settings.c" \
+    "$ROOT/tools/psprecomp/src/host/save_dialog.c" "$ROOT/host/present.c" "$ROOT/host/render_gl.c" "$ROOT/host/settings.c" "$ROOT/tools/psprecomp/src/host/settings.c" \
     "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${libs[@]}" "${HOST_LINK_FLAGS[@]}" \
     -o "$OUT/save-dialog-tests"
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy "$OUT/save-dialog-tests" software "$OUT"

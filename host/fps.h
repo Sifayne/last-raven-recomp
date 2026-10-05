@@ -31,10 +31,10 @@ static void fps_sleep_until(uint64_t deadline) {
     do { error=clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&t,NULL); } while (error==EINTR);
 }
 static int fps_start(void) {
-    if (!lr_settings_current()->number[LR_HIGH_FPS]) return 0;
+    if (!psp_settings_current()->number[LR_HIGH_FPS]) return 0;
     memset(&fps,0,sizeof fps);
     fps.active=1;
-    fps.cap=(int)lr_settings_current()->number[LR_FPS_CAP];
+    fps.cap=(int)psp_settings_current()->number[LR_FPS_CAP];
     /* Deterministic regression injection; never affects windowed play. */
     const char *gap=getenv("PSPRECOMP_FPS_TEST_GAP");
     if (!psp_clock_is_realtime() && gap) {

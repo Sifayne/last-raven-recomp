@@ -39,7 +39,7 @@
 #include <time.h>
 
 int render_gl_resolution_mode(void) {
-    return (int)lr_settings_current()->number[LR_RESOLUTION];
+    return (int)psp_settings_current()->number[LR_RESOLUTION];
 }
 
 #ifdef HAVE_SDL2

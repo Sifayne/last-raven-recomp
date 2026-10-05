@@ -409,7 +409,7 @@ static void publish_pad(void) {
  * is also linked into the render fixtures without any replacements. */
 extern const int lr_modern_controls_available __attribute__((weak));
 static int gamepad_modern(void) {
-    if (!lr_settings_current()->gamepad) return 0;
+    if (!psp_settings_current()->gamepad) return 0;
     if (&lr_modern_controls_available && lr_modern_controls_available) return 1;
     fprintf(stderr, "present: this title has no native replacements for the modern "
                     "controller layout -- using the classic PSP buttons instead\n");
@@ -525,7 +525,7 @@ static uint32_t g_audio_preroll_frames = 4096;
 static int      g_audio_warned_fmt;
 
 static uint32_t settings_ms_frames(int id, uint32_t dflt_frames) {
-    const double ms = lr_settings_current()->number[id];
+    const double ms = psp_settings_current()->number[id];
     if (ms < 0) return dflt_frames;
     uint64_t f = (uint64_t)(ms * 44100.0 / 1000.0);
     if (f >= MIX_RING_FRAMES / 2) f = MIX_RING_FRAMES / 2;
@@ -685,7 +685,7 @@ int present_gl_make_current(void) {
      * the FPS clock only sleeps toward a positive cap). Unlimited then means
      * the display's own rate: vertical sync. */
     {
-        const lr_settings *s = lr_settings_current();
+        const psp_settings *s = psp_settings_current();
         const int unlimited = s->number[LR_HIGH_FPS] && s->number[LR_FPS_CAP] < 0;
         SDL_GL_SetSwapInterval(unlimited ? 1 : 0);
         if (unlimited) fprintf(stderr, "present: FPS cap unlimited -- pacing by vertical sync\n");
@@ -718,7 +718,7 @@ void present_request_window_size(int w, int h) {
  * shared by every title, so a preset saved on one reaches the others. */
 extern const int lr_adaptive_aspect_available __attribute__((weak));
 int present_adaptive_aspect(void) {
-    if (!lr_settings_current()->number[LR_ASPECT]) return 0;
+    if (!psp_settings_current()->number[LR_ASPECT]) return 0;
     if (&lr_adaptive_aspect_available && lr_adaptive_aspect_available) return 1;
     static int said;
     if (!said) {
@@ -800,7 +800,7 @@ static void *sdl_thread(void *arg) {
     }
     /* Windowed mode uses the saved size; borderless fullscreen uses the
      * current desktop resolution without switching the display mode. */
-    const lr_settings *settings = lr_settings_current();
+    const psp_settings *settings = psp_settings_current();
     int win_w = settings->width, win_h = settings->height;
     int display = settings->number[LR_DISPLAY] < 0 ? 0 : (int)settings->number[LR_DISPLAY] - 1;
     if (display >= SDL_GetNumVideoDisplays()) {

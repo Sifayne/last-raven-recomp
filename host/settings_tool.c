@@ -21,26 +21,26 @@ int main(int argc, char **argv) {
                  "settings-tool --create-defaults FILE\nNo config file is read unless --config is supplied."); return 0;
         } else { fprintf(stderr,"unknown option: %s\n",argv[i]); return 2; }
     }
-    char error[LR_ERROR_SIZE];
+    char error[PSP_SETTINGS_ERROR];
     if (create) {
         /* An explicit create must not overwrite an existing preferences file. */
         struct stat st;
         if (!lstat(create,&st)) { fprintf(stderr,"already exists: %s\n",create); return 2; }
         if (errno!=ENOENT) { fprintf(stderr,"%s: %s\n",create,strerror(errno)); return 2; }
-        lr_presets p; lr_presets_defaults(&p);
-        if (lr_presets_save(&p,create,error)) goto failed;
+        psp_presets p; psp_presets_defaults(&p);
+        if (psp_presets_save(&p,create,error)) goto failed;
         printf("Created %s\n",create); return 0;
     }
     if (list) {
         if (!path) { fprintf(stderr,"--list-presets requires --config\n"); return 2; }
-        lr_presets p;
-        if (lr_presets_load(&p,path,error)) goto failed;
+        psp_presets p;
+        if (psp_presets_load(&p,path,error)) goto failed;
         for (int i=0;i<p.count;i++) printf("%c %s\n",i==p.selected?'*':' ',p.presets[i].name);
         return 0;
     }
-    lr_settings s;
-    if (lr_settings_load(&s,path,preset,error)) goto failed;
-    lr_settings_print(&s,stdout); return 0;
+    psp_settings s;
+    if (psp_settings_load(&s,path,preset,error)) goto failed;
+    psp_settings_print(&s,stdout); return 0;
 failed:
     fprintf(stderr,"settings: %s\n",error); return 2;
 }

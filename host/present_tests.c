@@ -63,8 +63,8 @@ static void virtual_button(SDL_Joystick *joystick,int button,int down) {
 }
 
 static void event_loop(const char *mode) {
-    lr_settings settings; char error[LR_ERROR_SIZE]; lr_settings_defaults(&settings);
-    assert(!lr_settings_resolve(&settings,error)); lr_settings_use(&settings);
+    psp_settings settings; char error[PSP_SETTINGS_ERROR]; psp_settings_defaults(&settings);
+    assert(!psp_settings_resolve(&settings,error)); psp_settings_use(&settings);
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
     assert(present_start()==0);
     if (!strcmp(mode,"keyboard")) {

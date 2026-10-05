@@ -781,24 +781,24 @@ int main(int argc, char **argv) {
         else if (!iso) iso = argv[i];
         else { fprintf(stderr,"unexpected argument: %s\n",argv[i]); return 2; }
     }
-    lr_settings settings;
-    char settings_error[LR_ERROR_SIZE];
-    if (lr_settings_load(&settings, config, preset, settings_error)) {
+    psp_settings settings;
+    char settings_error[PSP_SETTINGS_ERROR];
+    if (psp_settings_load(&settings, config, preset, settings_error)) {
         fprintf(stderr, "settings: %s\n", settings_error); return 2;
     }
     /* The interactive launcher supplies --window; direct boot stays headless
      * by default. This is launch policy, not a saved temporary override. */
     if (force_window) {
-        lr_settings_set(&settings, LR_WINDOW, "1", LR_COMMAND_LINE, settings_error);
-        lr_settings_resolve(&settings, settings_error);
+        psp_settings_set(&settings, LR_WINDOW, "1", PSP_SOURCE_COMMAND_LINE, settings_error);
+        psp_settings_resolve(&settings, settings_error);
     }
-    if (inspect) { lr_settings_print(&settings, stdout); return 0; }
+    if (inspect) { psp_settings_print(&settings, stdout); return 0; }
     if (!module) {
         fprintf(stderr, "boot <module.elf> [disc.iso] [--config FILE] [--preset NAME]\n");
         return 2;
     }
-    lr_settings_use(&settings);
-    lr_settings_print(&settings, stdout);
+    psp_settings_use(&settings);
+    psp_settings_print(&settings, stdout);
     if (psp_mpeg_set_decoding((int)settings.number[LR_MPEG_DECODE])) {
         fprintf(stderr,"settings: intro decoding requires a runtime built with OpenH264\n");
         return 2;

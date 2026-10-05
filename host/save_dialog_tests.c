@@ -78,8 +78,8 @@ static void scene(uint32_t color) {
     backend->draw(PSP_PRIM_SPRITES,v,2); backend->present();
 }
 static void integration(const char *renderer,const char *out) {
-    lr_settings settings; char error[LR_ERROR_SIZE]; lr_settings_defaults(&settings);
-    assert(!lr_settings_resolve(&settings,error)); lr_settings_use(&settings);
+    psp_settings settings; char error[PSP_SETTINGS_ERROR]; psp_settings_defaults(&settings);
+    assert(!psp_settings_resolve(&settings,error)); psp_settings_use(&settings);
     int gl=!strcmp(renderer,"gl");
     if (gl) {
         backend=render_gl_backend(); assert(!psp_render_register(backend));

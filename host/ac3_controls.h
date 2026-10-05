@@ -75,7 +75,7 @@ static void f32_write(uint32_t addr, float f) {
  * about 20 cm of desk at 800 dpi -- a middling FPS default. */
 static float mouse_sens(void) {
     static float k = -1.0f;
-    if (k < 0.0f) k = 0.001f * (float)lr_settings_current()->number[LR_MOUSE_SENS];
+    if (k < 0.0f) k = 0.001f * (float)psp_settings_current()->number[LR_MOUSE_SENS];
     return k;
 }
 
@@ -90,7 +90,7 @@ static float mouse_sens(void) {
 static int gamepad_modern(void) {
     static int modern = -1;
     if (modern < 0) {
-        modern = lr_settings_current()->gamepad;
+        modern = psp_settings_current()->gamepad;
         if (modern)
             printf("      gamepad   modern -- triggers, bumpers and stick clicks are gameplay actions\n");
     }
@@ -100,7 +100,7 @@ static int gamepad_modern(void) {
 static int input_mode(void) {
     static int mode = -1;
     if (mode < 0) {
-        mode = (int)lr_settings_current()->number[LR_INPUT];
+        mode = (int)psp_settings_current()->number[LR_INPUT];
         if (mode == INPUT_MODERN)
             printf("      input     modern -- the stick asks to turn and walk from a light touch; "
                    "PSPRECOMP_INPUT=classic for the game's own\n");
@@ -866,7 +866,7 @@ enum { AC3_CAM_EYE = 16, AC3_CAM_PITCH = 32, AC3_CAM_YAW = 36, AC3_CAM_TARGET = 
 static float camera_lag(void) {
     static float r = -2.0f;
     if (r < -1.5f) {
-        r = (float)lr_settings_current()->number[LR_CAMERA_LAG];
+        r = (float)psp_settings_current()->number[LR_CAMERA_LAG];
         if (r >= 0.0f) {
             if (r > 0.99f) r = 0.99f;
             printf("      camera    lag %.2f per frame (the game keeps 0.90); "
