@@ -2,7 +2,8 @@
  * share menu placement, scissor and depth clears on both transform paths,
  * and a depth-tested screen-space sprite (the lock-on reticle) must be
  * placed with the HUD. */
-#include "present.h"
+#include "psprecomp/host/present.h"
+#include "psprecomp/host/title.h"
 #include "render_gl.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
@@ -19,8 +20,9 @@
 /* present.c offers the adaptive aspect only to a title with a camera
  * replacement; the fixture stands in for host/replacements.c here, or its
  * window-aspect configurations would silently run the original view. */
-const int lr_adaptive_aspect_available = 1;
-const int lr_hud_bands_available = 1;
+const psp_title psp_title_info = {
+    .name = "Fixture", .capabilities = PSP_TITLE_ADAPTIVE_ASPECT | PSP_TITLE_HUD_BANDS,
+};
 static const psp_render_backend *be;
 static unsigned pc, va, checks, failures;
 static double scene_scale, ui_scale, yscale, ui_offset;

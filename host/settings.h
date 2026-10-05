@@ -16,4 +16,15 @@ enum lr_option {
 
 extern const psp_option_def lr_options[LR_OPTION_COUNT];
 
+/* What the shared host prints at startup about Armored Core's own controls,
+ * for each title's psp_title_info (psprecomp/host/title.h). */
+#define AC_KEYS_WASD_HELP \
+    "keys wasd stick | space/z cross, x circle, c square, v triangle | " \
+    "q change weapon, e R shoulder | enter start | backspace select | " \
+    "mouse: left = right weapon, right/middle = left weapon (default key assign) | " \
+    "close window to stop"
+#define AC_GAMEPAD_MODERN_HELP \
+    "gamepad LT boost | RT right arm | LB left arm | RB switch | L3 extension | " \
+    "R3 OB/EO | A inside | B view reset | Y purge modifier | X spare"
+
 #endif

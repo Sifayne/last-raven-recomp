@@ -69,9 +69,10 @@
 #include "psprecomp/mem.h"
 #include "psprecomp/hle.h"
 #include "aclr_funcs.h"        /* psp_func_*, the __orig originals, r_* aliases */
-#include "controls.h"
+#include "psprecomp/host/pad.h"
 #include "settings.h"
-#include "present.h"
+#include "psprecomp/host/present.h"
+#include "psprecomp/host/title.h"
 #include "stick.h"      /* INPUT_*, stick2, input_tune(), stick_radial(), stick_look(), hysteresis() */
 #include "fps_aclr.h"
 
@@ -91,18 +92,20 @@ static int input_mode(void) {
     return mode;
 }
 
-/* This host does read the modern pad's carrier bits (psp_func_00279A10 and
- * the action helpers below), so the presentation layer may offer that layout.
- * A title without these replacements leaves the symbol undefined and
- * present.c keeps its controller on the PSP buttons. */
-const int lr_modern_controls_available = 1;
-
-/* The adaptive aspect is this title's own camera rebuild, below. */
-const int lr_adaptive_aspect_available = 1;
-/* Off-screen HUD draws may go to the wide bands: this title's menus, garage
- * and missions were audited (reports/aspect-reticle, 17 Sep) and only the
- * lock-on rings and the lock marker ever draw there. */
-const int lr_hud_bands_available = 1;
+/* What the shared host may offer this title (psprecomp/host/title.h):
+ * - the modern controller layout: this host reads the modern pad's carrier
+ *   bits (psp_func_00279A10 and the action helpers below);
+ * - the adaptive aspect: this title's own camera rebuild, below;
+ * - HUD bands: off-screen HUD draws may go to the wide bands. This title's
+ *   menus, garage and missions were audited (reports/aspect-reticle, 17 Sep)
+ *   and only the lock-on rings and the lock marker ever draw there. */
+const psp_title psp_title_info = {
+    .name = "Armored Core: Last Raven",
+    .capabilities = PSP_TITLE_MODERN_CONTROLS | PSP_TITLE_ADAPTIVE_ASPECT |
+                    PSP_TITLE_HUD_BANDS,
+    .keys_wasd_help = AC_KEYS_WASD_HELP,
+    .gamepad_modern_help = AC_GAMEPAD_MODERN_HELP,
+};
 
 /* Button layout is independently overridable so the analog work can be
  * compared with the PSP buttons, or the modern buttons can be used with the
@@ -942,26 +945,26 @@ static struct {
 
 static uint32_t extra_menu_buttons(uint32_t extra) {
     uint32_t psp = 0;
-    if (extra & LR_PAD_A)  psp |= 0x004000u;       /* Cross    */
-    if (extra & LR_PAD_B)  psp |= 0x002000u;       /* Circle   */
-    if (extra & LR_PAD_X)  psp |= 0x008000u;       /* Square   */
-    if (extra & LR_PAD_Y)  psp |= 0x001000u;       /* Triangle */
-    if (extra & (LR_PAD_LB | LR_PAD_LT)) psp |= 0x000100u;
-    if (extra & (LR_PAD_RB | LR_PAD_RT)) psp |= 0x000200u;
+    if (extra & PSP_PAD_A)  psp |= 0x004000u;       /* Cross    */
+    if (extra & PSP_PAD_B)  psp |= 0x002000u;       /* Circle   */
+    if (extra & PSP_PAD_X)  psp |= 0x008000u;       /* Square   */
+    if (extra & PSP_PAD_Y)  psp |= 0x001000u;       /* Triangle */
+    if (extra & (PSP_PAD_LB | PSP_PAD_LT)) psp |= 0x000100u;
+    if (extra & (PSP_PAD_RB | PSP_PAD_RT)) psp |= 0x000200u;
     return psp;
 }
 
 static uint32_t extra_for_action(uint32_t action) {
     switch (action) {
-    case 4:  return LR_PAD_RB;       /* Change unit         */
-    case 5:  return LR_PAD_LT;       /* Boost / jump        */
-    case 6:  return LR_PAD_RT;       /* Arm unit R          */
-    case 7:  return LR_PAD_LB;       /* Arm unit L / event  */
-    case 12: return LR_PAD_B;        /* Look reset          */
-    case 13: return LR_PAD_L3;       /* Extension           */
-    case 14: return LR_PAD_A;        /* Inside              */
-    case 15: return LR_PAD_R3;       /* OB / EO              */
-    case 16: return LR_PAD_Y;        /* Disarmament modifier */
+    case 4:  return PSP_PAD_RB;       /* Change unit         */
+    case 5:  return PSP_PAD_LT;       /* Boost / jump        */
+    case 6:  return PSP_PAD_RT;       /* Arm unit R          */
+    case 7:  return PSP_PAD_LB;       /* Arm unit L / event  */
+    case 12: return PSP_PAD_B;        /* Look reset          */
+    case 13: return PSP_PAD_L3;       /* Extension           */
+    case 14: return PSP_PAD_A;        /* Inside              */
+    case 15: return PSP_PAD_R3;       /* OB / EO              */
+    case 16: return PSP_PAD_Y;        /* Disarmament modifier */
     default: return 0;
     }
 }
@@ -987,7 +990,7 @@ static void extra_action_log(uint32_t action, int edge) {
 void psp_func_00279A10(void) {
     const uint32_t state = r_a0;
     const uint32_t raw = r_a1;
-    const uint32_t extra = raw & LR_PAD_EXTRA;
+    const uint32_t extra = raw & PSP_PAD_EXTRA;
     const uint32_t poll = psp_ctrl_polls();
     if (poll != g_extra_pad.poll) {
         const uint32_t old = g_extra_pad.down;
@@ -1004,7 +1007,7 @@ void psp_func_00279A10(void) {
         g_extra_pad.down = extra;
     }
 
-    uint32_t psp = raw & ~LR_PAD_EXTRA;
+    uint32_t psp = raw & ~PSP_PAD_EXTRA;
     if (gamepad_modern() && !in_play()) psp |= extra_menu_buttons(extra);
     r_a0 = state;
     r_a1 = psp;
@@ -1043,7 +1046,7 @@ void psp_func_0005F348(void) {
     const uint32_t pad = r_a0;
     psp_func_0005F348__orig();
     if (gamepad_modern() && in_play() && player_pad_is(pad) &&
-        (g_extra_pad.down & LR_PAD_Y)) {
+        (g_extra_pad.down & PSP_PAD_Y)) {
         r_v0 = 1;
         extra_action_log(16, 0);
     }

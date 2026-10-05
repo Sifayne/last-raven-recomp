@@ -82,9 +82,9 @@ done
 if [ -n "$SDL_DEF" ]; then
     info "compiling presentation layer (SDL2)"
     # The window is titled after the profile's TITLE.
-    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) -DGAME_TITLE="\"$TITLE\"" \
+    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
        -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
-       -c "$ROOT/host/present.c" -o "$OUT/present.o"
+       -c "$ROOT/tools/psprecomp/src/host/present.c" -o "$OUT/present.o"
     # The GL backend is compiled here rather than with the runtime: it needs a
     # window and a GL context, and the core stays dependency-free on purpose.
     cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \

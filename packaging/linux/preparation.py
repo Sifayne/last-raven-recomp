@@ -44,8 +44,8 @@ def stage_tools(b, tools, obj):
         b.copy(b.ROOT / "scripts" / name, resource / name)
     host = resource / "host"
     for name in ("replacements.c", "replacements-ac3p.c", "replacements-acsl.c",
-                 "replace.txt", "replace-ac3p.txt", "replace-acsl.txt", "controls.h",
-                 "stick.h", "ac3_controls.h", "settings.h", "present.h",
+                 "replace.txt", "replace-ac3p.txt", "replace-acsl.txt",
+                 "stick.h", "ac3_controls.h", "settings.h",
                  "fps.h", "fps_clock.h", "fps_aclr.h", "fps_joints.h", "fps_ac3.h"):
         b.copy(b.ROOT / "host" / name, host / name)
     shutil.copytree(b.ROOT / "tools/psprecomp/include", resource / "include")

@@ -1,5 +1,6 @@
 /* Physical-output regressions. Guest readback cannot prove enhanced detail. */
-#include "present.h"
+#include "psprecomp/host/present.h"
+#include "psprecomp/host/title.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
 #include "render_gl.h"
@@ -16,8 +17,9 @@ enum { W = 480, H = 272, STRIDE = 512 };
 /* present.c offers the adaptive aspect only to a title with a camera
  * replacement; the fixture stands in for host/replacements.c here, or its
  * window-aspect configurations would silently run the original view. */
-const int lr_adaptive_aspect_available = 1;
-const int lr_hud_bands_available = 1;
+const psp_title psp_title_info = {
+    .name = "Fixture", .capabilities = PSP_TITLE_ADAPTIVE_ASPECT | PSP_TITLE_HUD_BANDS,
+};
 static const psp_render_backend *be;
 static unsigned checks, failures;
 static void check(int yes, const char *why) {

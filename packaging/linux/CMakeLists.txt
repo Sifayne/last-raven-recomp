@@ -30,12 +30,12 @@ foreach(name fps-tests fps-pose-tests)
     target_link_libraries(${name} PRIVATE m)
 endforeach()
 target_compile_options(launcher PRIVATE -Wall -Wextra -Werror)
-add_executable(present-tests "${ROOT}/host/present_tests.c" "${ROOT}/tools/psprecomp/src/host/save_dialog.c" "${ROOT}/host/settings.c" "${ROOT}/tools/psprecomp/src/host/settings.c")
+add_executable(present-tests "${ROOT}/tools/psprecomp/tests/test_present.c" "${ROOT}/tools/psprecomp/src/host/save_dialog.c" "${ROOT}/tools/psprecomp/src/host/settings.c")
 target_compile_definitions(present-tests PRIVATE HAVE_SDL2)
 target_compile_options(present-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_link_libraries(present-tests PRIVATE runtime PkgConfig::SDL)
 add_executable(save-dialog-tests "${ROOT}/host/save_dialog_tests.c" "${ROOT}/tools/psprecomp/src/host/save_dialog.c"
-    "${ROOT}/host/present.c" "${ROOT}/host/render_gl.c" "${ROOT}/host/settings.c" "${ROOT}/tools/psprecomp/src/host/settings.c")
+    "${ROOT}/tools/psprecomp/src/host/present.c" "${ROOT}/host/render_gl.c" "${ROOT}/host/settings.c" "${ROOT}/tools/psprecomp/src/host/settings.c")
 target_compile_definitions(save-dialog-tests PRIVATE HAVE_SDL2)
 target_compile_options(save-dialog-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_link_libraries(save-dialog-tests PRIVATE runtime PkgConfig::SDL)
@@ -49,19 +49,15 @@ add_executable(allegrexrecomp ${RECOMP_SOURCES})
 target_include_directories(allegrexrecomp PRIVATE "${RECOMP}")
 target_link_libraries(allegrexrecomp PRIVATE runtime)
 foreach(slug ac3p acsl aclr)
-    if(slug STREQUAL "ac3p")
-        set(TITLE "Armored Core 3 Portable")
-    elseif(slug STREQUAL "acsl")
-        set(TITLE "Armored Core: Silent Line")
-    else()
-        set(TITLE "Armored Core: Last Raven")
-    endif()
+    # The window title now comes from the title's psp_title_info, compiled on
+    # the device with its replacements, so these three archives are the same
+    # objects; the player (psprecomp docs/PLAYER-LAYER.md stage 2) keeps one.
     # These are original host objects only. The user's generated game objects
     # and replacements requiring generated headers are linked on their device.
     add_library(host-${slug} STATIC "${ROOT}/host/boot.c" "${ROOT}/host/settings.c" "${ROOT}/tools/psprecomp/src/host/settings.c"
-        "${ROOT}/host/present.c" "${ROOT}/tools/psprecomp/src/host/save_dialog.c" "${ROOT}/host/render_gl.c"
+        "${ROOT}/tools/psprecomp/src/host/present.c" "${ROOT}/tools/psprecomp/src/host/save_dialog.c" "${ROOT}/host/render_gl.c"
         "${RECOMP}/loader.c" "${RECOMP}/container.c" "${RECOMP}/decode.c")
     target_include_directories(host-${slug} PRIVATE "${RECOMP}")
-    target_compile_definitions(host-${slug} PRIVATE HAVE_SDL2 GAME_TITLE="${TITLE}")
+    target_compile_definitions(host-${slug} PRIVATE HAVE_SDL2)
     target_link_libraries(host-${slug} PRIVATE runtime PkgConfig::SDL)
 endforeach()

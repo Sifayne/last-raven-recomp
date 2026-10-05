@@ -103,14 +103,17 @@ static int player_pad_is(uint32_t pad) {
 #define AC3_PERSPECTIVE 001EA920
 #include "ac3_controls.h"
 
-/* The adaptive aspect has a native camera replacement here, so present.c may
- * offer "Match window". Without it the GL backend would spread a scene the
- * camera never widened. */
-const int lr_adaptive_aspect_available = 1;
-
-/* This host reads the modern pad's carrier bits (the converter and the two
- * queries above), so present.c may offer that layout. */
-const int lr_modern_controls_available = 1;
+/* What the shared host may offer this title (psprecomp/host/title.h):
+ * - the adaptive aspect: there is a native camera replacement here. Without
+ *   it the GL backend would spread a scene the camera never widened;
+ * - the modern controller layout: this host reads the modern pad's carrier
+ *   bits (the converter and the two queries above). */
+const psp_title psp_title_info = {
+    .name = "Armored Core: Silent Line",
+    .capabilities = PSP_TITLE_MODERN_CONTROLS | PSP_TITLE_ADAPTIVE_ASPECT,
+    .keys_wasd_help = AC_KEYS_WASD_HELP,
+    .gamepad_modern_help = AC_GAMEPAD_MODERN_HELP,
+};
 
 /* Mission rendering at independent FPS: US PSN NPUH10025 1.00. */
 #define FPS_MISSION_LOOP 000914B0

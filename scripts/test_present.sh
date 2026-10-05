@@ -6,10 +6,11 @@ cmake --build "$ROOT/build/psprecomp" --target psprecomp -j"$(nproc)" >/dev/null
 read -r -a flags <<< "$(pkg-config --cflags sdl2 SDL2_ttf)"
 read -r -a libs <<< "$(pkg-config --libs sdl2 SDL2_ttf)"
 cc -O2 -Wall -Wextra -Werror -std=gnu11 -DHAVE_SDL2 "${flags[@]}" \
-    -I "$ROOT/tools/psprecomp/include" "$ROOT/host/present_tests.c" "$ROOT/host/settings.c" "$ROOT/tools/psprecomp/src/host/settings.c" "$ROOT/tools/psprecomp/src/host/save_dialog.c" \
+    -I "$ROOT/tools/psprecomp/include" "$ROOT/tools/psprecomp/tests/test_present.c" "$ROOT/tools/psprecomp/src/host/settings.c" "$ROOT/tools/psprecomp/src/host/save_dialog.c" \
     "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${libs[@]}" "${HOST_LINK_FLAGS[@]}" \
     -o "$ROOT/build/present-checks/present-tests"
 "$ROOT/build/present-checks/present-tests"
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy "$ROOT/build/present-checks/present-tests" keyboard
-# Virtual-controller integration is also run in the isolated package builder,
-# where a physical controller cannot take ownership before the virtual device.
+# The test keeps SDL to its virtual controller, so a physical one cannot take
+# ownership before it here either.
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy "$ROOT/build/present-checks/present-tests" controller

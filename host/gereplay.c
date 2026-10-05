@@ -21,7 +21,8 @@
  * scheduler -- only the GE and a backend.
  */
 
-#include "present.h"
+#include "psprecomp/host/present.h"
+#include "psprecomp/host/title.h"
 #include "render_gl.h"
 #include "settings.h"
 
@@ -32,6 +33,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Not a game: the shared host offers this program nothing title-specific
+ * (psprecomp/host/title.h). */
+const psp_title psp_title_info = { .name = "GE replay" };
 
 #define GE_CAP_MAGIC  0x50414347u
 #define GE_CAP_VER    2

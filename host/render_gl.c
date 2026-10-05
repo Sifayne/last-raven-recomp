@@ -24,7 +24,8 @@
  * a fixed GL equivalent stay explicitly counted rather than approximated.
  */
 
-#include "present.h"
+#include "psprecomp/host/present.h"
+#include "psprecomp/host/title.h"
 #include "render_gl.h"
 #include "settings.h"
 #include "psprecomp/render.h"
@@ -1379,11 +1380,10 @@ static int rt_for(uint32_t addr) {
  * Both are viewports, not vertex transforms: the shader still maps guest x over
  * the guest width, so nothing is requantised. With wide_w == 480 every mapping
  * is the identity and the run is bit-identical to native. */
-/* Weak, like present.c's lr_adaptive_aspect_available: only a title whose
- * replacements define it places off-screen HUD draws in the wide bands. */
-extern const int lr_hud_bands_available __attribute__((weak));
+/* Only a title whose psp_title_info says so places off-screen HUD draws in
+ * the wide bands (psprecomp/host/title.h). */
 static int hud_bands_available(void) {
-    return &lr_hud_bands_available && lr_hud_bands_available;
+    return psp_title_can(PSP_TITLE_HUD_BANDS);
 }
 static double rt_off(const rendertarget *r) {
     if (!r->wide) return 0;
@@ -2701,7 +2701,7 @@ static void gl_draw(int prim, const psp_vertex *v, int count) {
             const int outside = min_x >= g.w * PSP_SUBPX || max_x <= 0;
             int min_y = v[0].y, max_y = v[0].y;
             for (int i = 0; i < count; i++) { if (v[i].y < min_y) min_y = v[i].y; if (v[i].y > max_y) max_y = v[i].y; }
-            /* Per title: a title's replacements define lr_hud_bands_available
+            /* Per title: a title's psp_title_info claims PSP_TITLE_HUD_BANDS
              * once its menus, garage and missions are audited for 2D parked
              * off the screen (Last Raven draws none; AC3 Portable's menus
              * draw thousands of untextured pieces there). */

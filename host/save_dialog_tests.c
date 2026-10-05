@@ -1,5 +1,6 @@
 /* Exercise the real SDL event loop and GL owner handoff on a disposable card. */
-#include "present.h"
+#include "psprecomp/host/present.h"
+#include "psprecomp/host/title.h"
 #include "render_gl.h"
 #include "psprecomp/host/save_dialog.h"
 #include "settings.h"
@@ -9,6 +10,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* Not a game: the shared host offers this program nothing title-specific
+ * (psprecomp/host/title.h). */
+const psp_title psp_title_info = { .name = "Save dialog test" };
 
 static const uint32_t param=0x08810000, names=0x08811000, data=0x08812000;
 static psp_savedata_view view;
