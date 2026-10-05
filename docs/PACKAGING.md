@@ -49,8 +49,10 @@ The ISO must stay accessible because the game reads its assets from that file.
 Since 5 Oct the pipeline is psprecomp's player (`tools/psprecomp/player/`, see
 its README and `docs/PLAYER-LAYER.md`), and this repository is a title pack:
 `pack.json` names the app, the three titles, the sources compiled on the
-player's machine, and `packaging/linux/pack.cmake`, which builds what has not
-moved into psprecomp yet (the launcher, `boot.c`, the GL backend).
+player's machine, and `packaging/linux/pack.cmake`. That file builds the
+player's launcher with this pack's settings and `host/launcher_info.c` (the
+app's name, About text and title order), and what has not moved into
+psprecomp yet (`boot.c`, the GL backend).
 
 On an x86-64 Linux host, install Python 3.9+, curl, tar and Bubblewrap (`bwrap`).
 Unprivileged user namespaces must be available. Initialize the psprecomp

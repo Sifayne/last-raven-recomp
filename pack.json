@@ -137,8 +137,7 @@
     ]
   },
   "sources": [
-    "host/launcher.c",
-    "host/launcher_library.h",
+    "host/launcher_info.c",
     "host/launcher_tests.c",
     "host/settings.c",
     "host/settings_tool.c",

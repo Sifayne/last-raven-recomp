@@ -238,7 +238,8 @@ save remains recoverable after a failed overwrite.
   icons if needed. Headless/runtime-only builds retain no UI dependency.
 
 The launcher runs in a separate process. Reuse suitable resources/helpers,
-but do not put the game dialog in `host/launcher.c` or its SDL renderer.
+but do not put the game dialog in the launcher (psprecomp's
+`src/host/launcher.c`) or its SDL renderer.
 
 **Gate:** a synthetic dialog fixture navigates and dismisses in both renderer
 paths with no fresh game frames. Verify keyboard and real-controller input,

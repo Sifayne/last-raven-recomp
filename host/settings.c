@@ -29,10 +29,11 @@ const psp_option_def lr_options[LR_OPTION_COUNT] = {
     N(AUDIO_LEAD_MS,"Audio buffer lead","Advanced","Milliseconds queued ahead. Auto uses two of the channel's buffers. Smaller buffers can reduce latency but may underrun.","auto",0,4000,5,"auto"),
     N(AUDIO_PREROLL_MS,"Audio preroll","Advanced","Milliseconds buffered before playback starts. Auto preserves the 4096-frame default (about 93 ms).","auto",0,4000,5,"auto"),
     C(MPEG_DECODE,"Intro movie decoding","Advanced","Decode the intro movie. Requires a build with OpenH264. Play presets enable this when supported.","0","0|1","Off|On"),
-    C(WINDOW,"Window","Launch","A window also enables real-time pacing. OpenGL always requires a window.","0","0|1","Off|On"),
-    C(REALTIME,"Real-time pacing","Launch","Headless real-time pacing. Windowed play always uses real time.","0","0|1","Off|On"),
+    C(WINDOW,"Window","Launch","A window also enables real-time pacing. OpenGL always requires a window.","0","0|1","Off|On",.flags=PSP_OPTION_HIDDEN),
+    C(REALTIME,"Real-time pacing","Launch","Headless real-time pacing. Windowed play always uses real time.","0","0|1","Off|On",.flags=PSP_OPTION_HIDDEN),
     C(HIGH_FPS,"Higher FPS","Graphics","Smooth mission rendering between the game's original simulation ticks. Menus and movies keep their original timing.","0","0|1","Off|On"),
-    S(FPS_CAP,"FPS cap","Graphics","Maximum mission rendering rate when Higher FPS is on. Enter a custom limit, or unlimited to follow the display's refresh with vertical sync. The game keeps its original simulation speed.",PSP_OPTION_INTEGER,"60",30,1000,1,"unlimited",.special_label="Unlimited",.format="%.0f FPS"),
+    S(FPS_CAP,"FPS cap","Graphics","Maximum mission rendering rate when Higher FPS is on. Enter a custom limit, or unlimited to follow the display's refresh with vertical sync. The game keeps its original simulation speed.",PSP_OPTION_INTEGER,"60",30,1000,1,"unlimited",.special_label="Unlimited",.format="%.0f FPS",
+      .stops="30|60|90|120|144|165|240|360|1000|unlimited"),
 };
 #undef C
 #undef N

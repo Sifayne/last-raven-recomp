@@ -1,6 +1,9 @@
-/* Exercise the actual event handlers and render the real screen. This fixture
- * uses a temporary preferences directory and a harmless child in place of a
- * game, so Save & Play can be verified without guest data or user settings. */
+/* Exercise the actual event handlers and render the real screen: psprecomp's
+ * launcher (src/host/launcher.c, found on the include path) with Armored
+ * Core's settings. This fixture uses a temporary preferences directory and a
+ * harmless child in place of a game, so Save & Play can be verified without
+ * guest data or user settings. */
+#include "settings.h"
 #include <SDL2/SDL.h>
 /* Exercise display selection and unplugging even on a single-screen runner. */
 static int fixture_displays=-1;

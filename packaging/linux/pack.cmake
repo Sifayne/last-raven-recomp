@@ -1,15 +1,17 @@
 # Armored Core's targets in the player's package build (psprecomp
-# player/linux/CMakeLists.txt includes this file; pack.json names it). What
-# is here is what has not moved into psprecomp yet: the launcher, boot.c and
-# the GL backend, and their checks. The variables and targets used are the
-# player's: PACK, RECOMP, PLAYER_SETTINGS, PLAYER_HOST, runtime and
-# PkgConfig::SDL.
+# player/linux/CMakeLists.txt includes this file; pack.json names it): the
+# player's launcher with this pack's settings, and what has not moved into
+# psprecomp yet -- boot.c and the GL backend -- with their checks. The
+# variables and targets used are the player's: PACK, RECOMP,
+# PLAYER_SETTINGS, PLAYER_HOST, PLAYER_LAUNCHER, runtime and PkgConfig::SDL.
 set(AC_SETTINGS "${PACK}/host/settings.c" "${PLAYER_SETTINGS}")
 
-add_executable(launcher "${PACK}/host/launcher.c" ${AC_SETTINGS})
+add_executable(launcher ${PLAYER_LAUNCHER} "${PACK}/host/launcher_info.c" ${AC_SETTINGS})
 target_link_libraries(launcher PRIVATE runtime PkgConfig::SDL)
 target_compile_options(launcher PRIVATE -Wall -Wextra -Werror)
-add_executable(launcher-tests "${PACK}/host/launcher_tests.c" ${AC_SETTINGS})
+# The tests include the player's launcher.c for its internals.
+add_executable(launcher-tests "${PACK}/host/launcher_tests.c" "${PACK}/host/launcher_info.c" ${AC_SETTINGS})
+target_include_directories(launcher-tests PRIVATE "${TOOLKIT}/src/host")
 target_link_libraries(launcher-tests PRIVATE runtime PkgConfig::SDL)
 foreach(name settings-tool settings-tests)
     string(REPLACE "-" "_" source ${name})
