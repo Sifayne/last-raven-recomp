@@ -38,12 +38,14 @@ const psp_option_def lr_options[LR_OPTION_COUNT] = {
 #undef N
 #undef S
 
-/* Modern buttons follow the control scheme unless chosen outright. */
+/* Modern buttons follow the control scheme unless chosen outright. The
+ * pointer is captured whenever MOUSE asks, whatever the scheme; mouse look
+ * itself needs Dual, which the replacements check (print_notes says so). */
 static int resolve(psp_settings *s, char *error) {
     (void)error;
     s->input = (int)s->number[LR_INPUT];
     s->gamepad = s->number[LR_GAMEPAD] ? s->number[LR_GAMEPAD] == 2 : s->input != 0;
-    s->mouse = s->number[LR_MOUSE] && s->input == 2;
+    s->mouse = s->number[LR_MOUSE] != 0;
     return 0;
 }
 
