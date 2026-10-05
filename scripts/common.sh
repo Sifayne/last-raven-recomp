@@ -32,7 +32,7 @@ if [ -f "$RUNTIME_CACHE" ]; then
                  "AVUTIL_LIBRARY:FILEPATH=$FFMPEG_PREFIX/lib/libavutil.so"; do
         grep -Fxq "$entry" "$RUNTIME_CACHE" || \
             die "the runtime in build/psprecomp was configured before the bundled LGPL FFmpeg existed (or against a system one).
-       Run scripts/build-tools.sh once: it downloads the pinned FFmpeg source (see third_party/ffmpeg/source.json),
+       Run scripts/build-tools.sh once: it downloads the pinned FFmpeg source (see tools/psprecomp/third_party/ffmpeg/source.json),
        builds only the two ATRAC decoders into build/deps/ffmpeg (a few minutes) and reconfigures the runtime.
        Offline: place the pinned tarball at build/deps/downloads/ first; the checksum is still verified."
     done

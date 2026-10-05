@@ -63,7 +63,7 @@ if [ "${OPT:-0}" != "0" ]; then
     # (docs/GAME-TICK-MAP-REVIEW.md, section 14).
     info "compiling at -O2 in $(nproc) jobs"
     SPLIT="$OBJ/split"; rm -rf "$SPLIT"; mkdir -p "$SPLIT"
-    python3 "$ROOT/scripts/emit-split.py" "$GEN/${PREFIX}_funcs.c" "$SPLIT" 32
+    python3 "$ROOT/tools/psprecomp/player/emit-split.py" "$GEN/${PREFIX}_funcs.c" "$SPLIT" 32
     # The chunks live outside $GEN, so the generated header needs an -I.
     OPTFLAGS=(-O2 -fno-strict-aliasing -fwrapv "${CFLAGS[@]:1}" -I "$GEN")
     ls "$SPLIT/${PREFIX}_funcs_"[0-9][0-9].c | xargs -P "$(nproc)" -I{} \

@@ -7,7 +7,7 @@ OpenH264 remains the separate video decoder.
 
 ## Source and configuration
 
-`third_party/ffmpeg/source.json` pins FFmpeg **9.0.1**, its official release
+`tools/psprecomp/third_party/ffmpeg/source.json` pins FFmpeg **9.0.1**, its official release
 URL and SHA-256. The initial archive was verified against its detached PGP
 signature with the official FFmpeg release key:
 
@@ -51,10 +51,14 @@ settings, replay, oracle and renderer scripts link the same selected libraries.
 For dependency work alone:
 
 ```bash
-python3 scripts/ffmpeg.py build
-python3 scripts/ffmpeg.py verify
-python3 scripts/test_ffmpeg.py
+python3 tools/psprecomp/player/ffmpeg.py build --deps build/deps
+python3 tools/psprecomp/player/ffmpeg.py verify --deps build/deps
+FFMPEG_DEPS=build/deps python3 tools/psprecomp/player/tests/test_ffmpeg.py
 ```
+
+The recipe is psprecomp's since 5 Oct (`player/ffmpeg.py`); `--deps` keeps
+its downloads and output in this checkout. Moving it changed the recipe's own
+hash, so the first `scripts/build-tools.sh` afterwards rebuilds the library.
 
 Build prerequisites are Linux, Python 3.9+, a C compiler, make, tar/xz,
 readelf, patchelf, and curl for the first download. `JOBS` controls build
@@ -75,7 +79,7 @@ different compilers or operating-system toolchains are not promised.
 ## Stage a distribution bundle
 
 ```bash
-python3 scripts/ffmpeg.py bundle --output build/ffmpeg-bundle
+python3 tools/psprecomp/player/ffmpeg.py bundle --deps build/deps --output build/ffmpeg-bundle
 ```
 
 The output must not already exist. The command verifies actual loaded library
@@ -107,7 +111,7 @@ dependency, not the other components or original game's distribution rights.
 
 ## Validation
 
-`scripts/test_ffmpeg.py` checks relocated execution from a path containing
+`tools/psprecomp/player/tests/test_ffmpeg.py` checks relocated execution from a path containing
 spaces, source/license staging, the bundle checksums, rejection of corrupt
 source and missing/externally resolved libraries, and preservation of an
 existing output directory.

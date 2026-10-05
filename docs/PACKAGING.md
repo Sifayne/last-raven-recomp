@@ -39,19 +39,25 @@ This build accepts these exact US PSN executable versions:
 | Armored Core: Silent Line Portable | NPUH10025 | 1.00 |
 | Armored Core: Last Raven Portable | NPUH10024 | 1.00 |
 
-`packaging/linux/games.json` pins the decrypted executable SHA-256 for each
+`pack.json`'s titles pin the decrypted executable SHA-256 for each
 profile. Other regions, revisions and modified executables are rejected even
 if the disc ID matches. Convert compressed images to ISO before importing.
 The ISO must stay accessible because the game reads its assets from that file.
 
 ## Build
 
+Since 5 Oct the pipeline is psprecomp's player (`tools/psprecomp/player/`, see
+its README and `docs/PLAYER-LAYER.md`), and this repository is a title pack:
+`pack.json` names the app, the three titles, the sources compiled on the
+player's machine, and `packaging/linux/pack.cmake`, which builds what has not
+moved into psprecomp yet (the launcher, `boot.c`, the GL backend).
+
 On an x86-64 Linux host, install Python 3.9+, curl, tar and Bubblewrap (`bwrap`).
 Unprivileged user namespaces must be available. Initialize the psprecomp
 submodule, then run:
 
 ```sh
-python3 scripts/package-linux.py build --output build/releases/deck-test-2
+python3 tools/psprecomp/player/package-linux.py build --pack . --output build/releases/deck-test-2
 ```
 
 The output must be a new directory. SHA-256-pinned archives are downloaded,
@@ -67,7 +73,8 @@ Repeated builds reuse downloads and the builder but compile fresh source.
 A process lock prevents two package builds sharing the same cache.
 
 The baseline is glibc 2.35 and the GCC 11 C++ ABI. Dependency pins live in
-`packaging/linux/dependencies.json`; FFmpeg uses `third_party/ffmpeg/source.json`.
+`tools/psprecomp/player/linux/dependencies.json`; FFmpeg uses
+`tools/psprecomp/third_party/ffmpeg/source.json`.
 Ubuntu build-tool packages track Jammy updates; installed versions are recorded.
 This is an auditable recipe, not a claim of byte-for-byte reproducibility.
 
@@ -112,8 +119,8 @@ force relinking. Actual build outputs capture compiler/flag changes without
 making every packaging-script edit invalidate games. Fingerprints use relative
 paths, independent of the AppImage's location or mount directory.
 
-The compiler recipe lives in `scripts/compile_game.py`; library/UI bookkeeping
-is in `scripts/import_game.py`. Keep commands and flags affecting generated
+The compiler recipe lives in `tools/psprecomp/player/compile_game.py`;
+library/UI bookkeeping is in `tools/psprecomp/player/import_game.py`. Keep commands and flags affecting generated
 executables in the compiler recipe so they remain covered by the fingerprint.
 The whole-app build ID remains recorded for provenance, not compatibility.
 Old preview install records without a game fingerprint require one preparation

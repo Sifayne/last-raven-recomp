@@ -217,7 +217,7 @@ They reject a runtime cache pointing at system FFmpeg, so a checkout built
 before the bundle existed stops at every script until it is migrated: run
 `scripts/build-tools.sh` once. That step downloads the pinned FFmpeg source
 and builds it, which takes a few minutes; to do it offline, place the pinned
-tarball named in `third_party/ffmpeg/source.json` under `build/deps/downloads/`
+tarball named in `tools/psprecomp/third_party/ffmpeg/source.json` under `build/deps/downloads/`
 first, and its checksum is still verified.
 
 The [FFmpeg bundle command](docs/FFMPEG.md) stages the shared libraries,
