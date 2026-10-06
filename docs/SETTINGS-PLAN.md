@@ -156,9 +156,9 @@ reader and inspection command even when it cannot build the launcher.
 ## Why live changes need additional work
 
 `host/replacements.c` caches control mode, controller layout, mouse
-sensitivity, stick tuning and camera lag. `host/present.c` independently
+sensitivity, stick tuning and camera lag. psprecomp's `src/host/present.c` independently
 chooses layouts and mouse capture during SDL startup.
-`host/render_gl.c:gl_init` snapshots resolution and aspect settings.
+Its `src/host/render_gl.c:gl_init` snapshots resolution and aspect settings.
 Changing a saved value alone cannot update these consumers.
 
 Window resizing already has a useful live mechanism:

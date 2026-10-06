@@ -3,7 +3,7 @@
 #include "psprecomp/host/title.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
-#include "render_gl.h"
+#include "psprecomp/host/render_gl.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>

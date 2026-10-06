@@ -89,7 +89,7 @@ if [ -n "$SDL_DEF" ]; then
     # window and a GL context, and the core stays dependency-free on purpose.
     cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
        -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
-       -c "$ROOT/host/render_gl.c" -o "$OUT/render_gl.o"
+       -c "$ROOT/tools/psprecomp/src/host/render_gl.c" -o "$OUT/render_gl.o"
     cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
        -I "$ROOT/tools/psprecomp/include" \
        -c "$ROOT/tools/psprecomp/src/host/save_dialog.c" -o "$OUT/save_dialog.o"
@@ -100,7 +100,7 @@ fi
 # no-backend stub and boot.c still links.
 if [ -z "$SDL_DEF" ]; then
     cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
-       -c "$ROOT/host/render_gl.c" -o "$OUT/render_gl.o"
+       -c "$ROOT/tools/psprecomp/src/host/render_gl.c" -o "$OUT/render_gl.o"
     PRESENT="$OUT/render_gl.o"
 fi
 

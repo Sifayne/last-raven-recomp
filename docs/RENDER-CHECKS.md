@@ -283,7 +283,8 @@ including same-value stores; partial writes preserve the untouched channels
 of every physical sample. Guest readback resolves with nearest sampling so
 alpha/stencil values and packed reinterpretation are not averaged.
 
-The body font has a game-specific sampling exception in `host/render_gl.c`.
+The body font has a game-specific sampling exception in psprecomp's GL backend
+(`tools/psprecomp/src/host/render_gl.c`).
 Its 512x512 CLUT4 atlas is drawn as 13-pixel-high, axis-aligned, 1:1 glyph
 triangles. At 1x, linear filtering samples texel centers exactly; magnification
 interpolates the already shaded glyph edges again and weakens the strokes.

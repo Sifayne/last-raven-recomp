@@ -1,9 +1,9 @@
 # Armored Core's targets in the player's package build (psprecomp
 # player/linux/CMakeLists.txt includes this file; pack.json names it): the
 # player's launcher with this pack's settings, and what has not moved into
-# psprecomp yet -- boot.c and the GL backend -- with their checks. The
-# variables and targets used are the player's: PACK, RECOMP,
-# PLAYER_SETTINGS, PLAYER_HOST, PLAYER_LAUNCHER, runtime and PkgConfig::SDL.
+# psprecomp yet -- boot.c -- with the checks. The variables and targets used
+# are the player's: PACK, RECOMP, PLAYER_SETTINGS, PLAYER_HOST (psprecomp's
+# GL backend among it), PLAYER_LAUNCHER, runtime and PkgConfig::SDL.
 set(AC_SETTINGS "${PACK}/host/settings.c" "${PLAYER_SETTINGS}")
 
 add_executable(launcher ${PLAYER_LAUNCHER} "${PACK}/host/launcher_info.c" ${AC_SETTINGS})
@@ -28,7 +28,7 @@ foreach(name fps-tests fps-pose-tests)
     target_compile_options(${name} PRIVATE -UNDEBUG -Wall -Wextra -Werror)
     target_link_libraries(${name} PRIVATE m)
 endforeach()
-add_executable(save-dialog-tests "${PACK}/host/save_dialog_tests.c" "${PACK}/host/render_gl.c"
+add_executable(save-dialog-tests "${PACK}/host/save_dialog_tests.c"
     "${PACK}/host/settings.c" ${PLAYER_HOST})
 target_compile_definitions(save-dialog-tests PRIVATE HAVE_SDL2)
 target_compile_options(save-dialog-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
@@ -39,7 +39,7 @@ foreach(slug ${PACK_SLUGS})
     # device with its replacements, so these archives are the same objects.
     # They are original host objects only: the user's generated game objects
     # and the replacements that need generated headers link on their device.
-    add_library(host-${slug} STATIC "${PACK}/host/boot.c" "${PACK}/host/settings.c" "${PACK}/host/render_gl.c"
+    add_library(host-${slug} STATIC "${PACK}/host/boot.c" "${PACK}/host/settings.c"
         ${PLAYER_HOST} "${RECOMP}/loader.c" "${RECOMP}/container.c" "${RECOMP}/decode.c")
     target_include_directories(host-${slug} PRIVATE "${RECOMP}")
     target_compile_definitions(host-${slug} PRIVATE HAVE_SDL2)

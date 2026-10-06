@@ -24,7 +24,7 @@
 #include "loader.h"
 #include "container.h"
 #include "psprecomp/host/present.h"
-#include "render_gl.h"
+#include "psprecomp/host/render_gl.h"
 #include "settings.h"
 
 #include "decode.h"          /* PSP_RA_INDEX */

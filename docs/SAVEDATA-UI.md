@@ -35,8 +35,8 @@ the current host.
 | `tools/psprecomp/src/hle/utility.c` | Dialog session, candidate enumeration, initial focus, confirmation state, selection writeback, results and file operations |
 | `tools/psprecomp/include/psprecomp/savedata.h` (included by `hle.h`) | Small host-facing snapshot/response interface; no SDL or GL types |
 | `tools/psprecomp/src/host/save_dialog.c`, `include/psprecomp/host/save_dialog.h` | Host dialog layout, text/icons, scrolling, input navigation and overlay image; the runtime's optional SDL2 host layer, shared with The 3rd Birthday |
-| `host/present.c` / `.h` | Register the host bridge, route SDL input, software composition and dialog teardown |
-| `host/render_gl.c` | Upload/composite the overlay on the GL owner thread; preserve game render state |
+| `tools/psprecomp/src/host/present.c` | Register the host bridge, route SDL input, software composition and dialog teardown |
+| `tools/psprecomp/src/host/render_gl.c` | Upload/composite the overlay on the GL owner thread; preserve game render state |
 | `host/boot.c` | Unchanged: a headless host registers no dialog, and the runtime's own diagnostic names each cancelled request |
 | `tools/psprecomp/tests/test_savedata.c`, registered in `tests/CMakeLists.txt` | Synthetic-card tests through the actual HLE interface |
 | `host/save_dialog_tests.c` and `scripts/test_savedata.sh` | Input/layout/presentation checks and a repeatable focused test entry point |

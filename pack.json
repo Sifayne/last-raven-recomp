@@ -143,8 +143,6 @@
     "host/settings_tool.c",
     "host/settings_tests.c",
     "host/boot.c",
-    "host/render_gl.c",
-    "host/render_gl.h",
     "host/save_dialog_tests.c",
     "host/fps_tests.c",
     "host/fps_pose_tests.c",

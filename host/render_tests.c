@@ -2,7 +2,7 @@
  * Run identically on software and GL; expectations do not call either renderer. */
 #include "psprecomp/host/present.h"
 #include "psprecomp/host/title.h"
-#include "render_gl.h"
+#include "psprecomp/host/render_gl.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
 #include "psprecomp/render.h"

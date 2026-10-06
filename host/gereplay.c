@@ -23,7 +23,7 @@
 
 #include "psprecomp/host/present.h"
 #include "psprecomp/host/title.h"
-#include "render_gl.h"
+#include "psprecomp/host/render_gl.h"
 #include "settings.h"
 
 #include "psprecomp/hle.h"
