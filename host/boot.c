@@ -1034,6 +1034,7 @@ int main(int argc, char **argv) {
     uint64_t clock_guest_us = 0, clock_wall_us = 0;
     const int clock_realtime =
         psp_clock_realtime_stats(&clock_guest_us, &clock_wall_us);
+    const uint64_t clock_held_us = psp_clock_held_us();
 
     /* Disarm before the summary. Everything below reads guest memory --
      * dump_framebuffer, survey_vram, find_pointer -- and a trap armed for the
@@ -1057,10 +1058,18 @@ int main(int argc, char **argv) {
                live == 0 ? "all finished" : "still alive (see the deadlock report above)");
     printf("bad mem:  %llu accesses\n", (unsigned long long)psp_mem_bad_access);
     if (clock_realtime) {
-        const int64_t lag_us = (int64_t)clock_wall_us - (int64_t)clock_guest_us;
-        printf("clock:    %.3f s guest / %.3f s wall (%+.3f ms wall minus guest)\n",
-               clock_guest_us / 1.0e6, clock_wall_us / 1.0e6,
-               lag_us / 1000.0);
+        /* Host pauses hold the guest clock (psprecomp/safepoint.h): the
+         * drift is measured against the wall time the guest was given. */
+        const int64_t lag_us = (int64_t)(clock_wall_us - clock_held_us) - (int64_t)clock_guest_us;
+        if (clock_held_us)
+            printf("clock:    %.3f s guest / %.3f s wall, %.3f s of it paused "
+                   "(%+.3f ms wall less pauses minus guest)\n",
+                   clock_guest_us / 1.0e6, clock_wall_us / 1.0e6, clock_held_us / 1.0e6,
+                   lag_us / 1000.0);
+        else
+            printf("clock:    %.3f s guest / %.3f s wall (%+.3f ms wall minus guest)\n",
+                   clock_guest_us / 1.0e6, clock_wall_us / 1.0e6,
+                   lag_us / 1000.0);
     }
     if (psp_clock_is_realtime()) { psp_audio_dump_gaps(stdout); psp_mpeg_dump_sync(stdout); }
     psp_mem_dump_bad(stdout, g_bad_top);

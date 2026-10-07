@@ -21,14 +21,17 @@ static struct {
     FILE *log;
 } fps;
 
-static uint64_t fps_now(void) {
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
-    return (uint64_t)t.tv_sec*1000000000ull+(uint64_t)t.tv_nsec;
-}
+/* Wall time less host pauses (psprecomp/safepoint.h), so a pause is neither
+ * a late frame nor a burst of catch-up ticks. A pause cannot fall inside a
+ * sleep here -- the sleeping thread keeps the scheduler token, which a pause
+ * needs -- so the sleep is the same span of wall time. */
+static uint64_t fps_now(void) { return psp_clock_run_ns(); }
 static void fps_sleep_until(uint64_t deadline) {
-    struct timespec t={(time_t)(deadline/1000000000ull),(long)(deadline%1000000000ull)};
-    int error;
-    do { error=clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&t,NULL); } while (error==EINTR);
+    const uint64_t now=fps_now();
+    if (deadline<=now) return;
+    const uint64_t ns=deadline-now;
+    struct timespec t={(time_t)(ns/1000000000ull),(long)(ns%1000000000ull)};
+    while (nanosleep(&t,&t)==-1 && errno==EINTR) {}
 }
 static int fps_start(void) {
     if (!psp_settings_current()->number[LR_HIGH_FPS]) return 0;
