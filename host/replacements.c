@@ -99,12 +99,35 @@ static int input_mode(void) {
  * - HUD bands: off-screen HUD draws may go to the wide bands. This title's
  *   menus, garage and missions were audited (reports/aspect-reticle, 17 Sep)
  *   and only the lock-on rings and the lock marker ever draw there. */
+/* The carriers this host reads, as actions the bindings can name
+ * (bind.pad.boost=...): extra_for_action below in play, and menus alias A, B,
+ * X and Y to the face buttons (extra_menu_buttons). None means anything
+ * while the modern layout is off. */
+static const psp_title_action ac_actions[] = {
+    { "inside",      "Inside",           PSP_PAD_A,  PSP_ACTION_KEEP },
+    { "view_reset",  "View reset",       PSP_PAD_B,  PSP_ACTION_KEEP },
+    { "spare",       "Spare",            PSP_PAD_X,  PSP_ACTION_KEEP },
+    { "purge",       "Purge modifier",   PSP_PAD_Y,  PSP_ACTION_KEEP },
+    { "left_arm",    "Left arm / event", PSP_PAD_LB, PSP_ACTION_KEEP },
+    { "change_unit", "Change unit",      PSP_PAD_RB, PSP_ACTION_KEEP },
+    { "boost",       "Boost / jump",     PSP_PAD_LT, PSP_ACTION_KEEP },
+    { "right_arm",   "Right arm",        PSP_PAD_RT, PSP_ACTION_KEEP },
+    { "extension",   "Extension",        PSP_PAD_L3, PSP_ACTION_KEEP },
+    { "ob",          "OB / EO",          PSP_PAD_R3, PSP_ACTION_KEEP },
+};
+static void ac_input(const psp_settings *s, psp_title_input *out) {
+    (void)s;
+    out->actions = ac_actions;
+    out->action_count = sizeof ac_actions / sizeof *ac_actions;
+}
+
 const psp_title psp_title_info = {
     .name = "Armored Core: Last Raven",
     .capabilities = PSP_TITLE_MODERN_CONTROLS | PSP_TITLE_ADAPTIVE_ASPECT |
                     PSP_TITLE_HUD_BANDS,
     .keys_wasd_help = AC_KEYS_WASD_HELP,
     .gamepad_modern_help = AC_GAMEPAD_MODERN_HELP,
+    .input = ac_input,
 };
 
 /* Button layout is independently overridable so the analog work can be

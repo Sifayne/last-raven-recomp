@@ -96,6 +96,7 @@ const psp_title psp_title_info = {
     .capabilities = PSP_TITLE_MODERN_CONTROLS | PSP_TITLE_ADAPTIVE_ASPECT,
     .keys_wasd_help = AC_KEYS_WASD_HELP,
     .gamepad_modern_help = AC_GAMEPAD_MODERN_HELP,
+    .input = ac3_input,
 };
 
 /* Mission rendering at independent FPS: US PSN NPUH10023 1.01. */

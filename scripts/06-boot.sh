@@ -85,6 +85,9 @@ if [ -n "$SDL_DEF" ]; then
     cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
        -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
        -c "$ROOT/tools/psprecomp/src/host/present.c" -o "$OUT/present.o"
+    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
+       -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
+       -c "$ROOT/tools/psprecomp/src/host/input.c" -o "$OUT/input.o"
     # The GL backend is compiled here rather than with the runtime: it needs a
     # window and a GL context, and the core stays dependency-free on purpose.
     cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
@@ -93,7 +96,7 @@ if [ -n "$SDL_DEF" ]; then
     cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
        -I "$ROOT/tools/psprecomp/include" \
        -c "$ROOT/tools/psprecomp/src/host/save_dialog.c" -o "$OUT/save_dialog.o"
-    PRESENT="$OUT/present.o $OUT/save_dialog.o $OUT/render_gl.o $(pkg-config --libs sdl2 SDL2_ttf)"
+    PRESENT="$OUT/present.o $OUT/input.o $OUT/save_dialog.o $OUT/render_gl.o $(pkg-config --libs sdl2 SDL2_ttf)"
 fi
 
 # Without SDL2 there is no window, so render_gl.c compiles to its

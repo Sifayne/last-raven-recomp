@@ -683,6 +683,28 @@ static uint32_t extra_for_action(uint32_t action) {
     }
 }
 
+/* The same carriers as actions the bindings can name (bind.pad.boost=...),
+ * for each title's psp_title_info: in play as above, and in menus A, B, X and
+ * Y are the face buttons (extra_menu_buttons). None means anything while the
+ * modern layout is off. */
+static const psp_title_action ac3_actions[] = {
+    { "confirm",       "Confirm (menus)",  PSP_PAD_A,  PSP_ACTION_KEEP },
+    { "view_reset",    "View reset",       PSP_PAD_B,  PSP_ACTION_KEEP },
+    { "menu_square",   "Square (menus)",   PSP_PAD_X,  PSP_ACTION_KEEP },
+    { "menu_triangle", "Triangle (menus)", PSP_PAD_Y,  PSP_ACTION_KEEP },
+    { "left_arm",      "Left arm / event", PSP_PAD_LB, PSP_ACTION_KEEP },
+    { "change_weapon", "Change weapon",    PSP_PAD_RB, PSP_ACTION_KEEP },
+    { "boost",         "Boost / jump",     PSP_PAD_LT, PSP_ACTION_KEEP },
+    { "right_arm",     "Right arm",        PSP_PAD_RT, PSP_ACTION_KEEP },
+    { "extension",     "Extension",        PSP_PAD_L3, PSP_ACTION_KEEP },
+    { "ob",            "OB / EO",          PSP_PAD_R3, PSP_ACTION_KEEP },
+};
+static void ac3_input(const psp_settings *s, psp_title_input *out) {
+    (void)s;
+    out->actions = ac3_actions;
+    out->action_count = sizeof ac3_actions / sizeof *ac3_actions;
+}
+
 static void extra_action_log(uint32_t action, int edge) {
     static uint32_t poll, held_seen, edge_seen;
     const uint32_t now = psp_ctrl_polls();
