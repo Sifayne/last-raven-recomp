@@ -43,6 +43,7 @@ cmake --build "$ROOT/build/psprecomp" -j"$(nproc)" >/dev/null
 # and present.h turns that into a stub when HAVE_SDL2 is absent. Probing later
 # left the call with nothing to link against on a machine without SDL2.
 PRESENT=""
+MENU=""
 SDL_DEF=""
 if pkg-config --exists sdl2 2>/dev/null; then
     pkg-config --exists SDL2_ttf 2>/dev/null ||
@@ -97,6 +98,21 @@ if [ -n "$SDL_DEF" ]; then
        -I "$ROOT/tools/psprecomp/include" \
        -c "$ROOT/tools/psprecomp/src/host/save_dialog.c" -o "$OUT/save_dialog.o"
     PRESENT="$OUT/present.o $OUT/input.o $OUT/save_dialog.o $OUT/render_gl.o $(pkg-config --libs sdl2 SDL2_ttf)"
+    # The in-game menu, for the boot host alone: psprecomp's overlay and its
+    # Dear ImGui toolkit. ImGui's core is the runtime build's archive; ui.cpp
+    # and the two SDL backends are C++ without exceptions, RTTI or
+    # thread-safe statics, so the C link below needs no C++ runtime.
+    IMGUI="$ROOT/tools/psprecomp/third_party/imgui"
+    [ -f "$ROOT/build/psprecomp/libpsprecomp_imgui.a" ] || \
+        die "no libpsprecomp_imgui.a: build/psprecomp was configured without a C++ compiler"
+    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) -I "$ROOT/tools/psprecomp/include" \
+       -c "$ROOT/tools/psprecomp/src/host/overlay.c" -o "$OUT/overlay.o"
+    for src in "$ROOT/tools/psprecomp/src/host/ui.cpp" "$IMGUI/backends/imgui_impl_sdl2.cpp" \
+               "$IMGUI/backends/imgui_impl_sdlrenderer2.cpp"; do
+        c++ -O2 -std=c++11 -fno-exceptions -fno-rtti -fno-threadsafe-statics $(pkg-config --cflags sdl2) \
+            -I "$IMGUI" -c "$src" -o "$OUT/$(basename "$src" .cpp).o"
+    done
+    MENU="$OUT/overlay.o $OUT/ui.o $OUT/imgui_impl_sdl2.o $OUT/imgui_impl_sdlrenderer2.o $ROOT/build/psprecomp/libpsprecomp_imgui.a"
 fi
 
 # Without SDL2 there is no window, so render_gl.c compiles to its
@@ -116,7 +132,7 @@ cc -O2 -std=gnu11 $SDL_DEF ${SDL_DEF:+$(pkg-config --cflags sdl2 SDL2_ttf)} \
    -c "$ROOT/host/gereplay.c" -o "$OUT/gereplay.o"
 
 info "linking"
-cc "$OUT/settings.o" "$OUT/player_settings.o" "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT \
+cc "$OUT/settings.o" "$OUT/player_settings.o" "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT $MENU \
    "$OUT/${PREFIX}_funcs.o" "$OUT/${PREFIX}_imports.o" "$OUT/replacements.o" "$LIB" \
    -o "$OUT/boot" -lm -lpthread "${HOST_LINK_FLAGS[@]}"
 

@@ -909,6 +909,7 @@ int main(int argc, char **argv) {
     int windowed = 0;
     if (settings.window) {
         if (want_gl) present_want_gl();
+        present_use_overlay();          /* the in-game menu: Escape, or View + Menu */
         if (present_start() == 0) {
             windowed = 1;
             printf("      window    on (SDL2: video, pad, audio; implies real-time pacing)\n");
