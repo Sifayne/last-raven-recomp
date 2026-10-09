@@ -56,11 +56,13 @@ fi
 info "compiling boot host"
 cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -c "$ROOT/host/settings.c" -o "$OUT/settings.o"
 cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -c "$ROOT/tools/psprecomp/src/host/settings.c" -o "$OUT/player_settings.o"
-# The loader is part of the recompiler tool, not the runtime library, so its
+# The boot host is psprecomp's, every game's (src/host/boot.c); what is
+# this game's own reaches it through psp_title_info in the replacements. The
+# loader is part of the recompiler tool, not the runtime library, so its
 # sources are compiled in here rather than linked from an archive.
 cc -O2 -std=gnu11 $SDL_DEF \
    -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
-   -c "$ROOT/host/boot.c" -o "$OUT/boot.o"
+   -c "$ROOT/tools/psprecomp/src/host/boot.c" -o "$OUT/boot.o"
 
 # Native replacements for the functions the replace list names. Linked into the
 # boot host as well as stage 04's probe, because this is the build that runs.

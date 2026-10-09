@@ -47,7 +47,6 @@
   ],
   "host": {
     "sources": [
-      "host/boot.c",
       "host/settings.c"
     ],
     "launcher": [

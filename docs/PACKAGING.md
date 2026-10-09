@@ -65,8 +65,10 @@ The pipeline is psprecomp's player (`tools/psprecomp/player/`; see its README
 and `docs/PLAYER-LAYER.md` §6). `pack.json` (version 2) names:
 - the pack: its id `last-raven`, name and file;
 - the three titles;
-- its host code (`host/boot.c`, `host/settings.c`), compiled when the pack
-  is added and linked into each game;
+- its host code (`host/settings.c`), compiled when the pack is added and
+  linked into each game. The boot host is psprecomp's (`src/host/boot.c`,
+  since stage 11); what is this pack's own reaches it through each title's
+  `psp_title_info`, beside its replacements;
 - its launcher part (`host/settings.c`, `host/launcher_info.c`);
 - the files compiled with each title;
 - its checks, in `packaging/linux/pack.cmake`.

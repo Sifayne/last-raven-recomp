@@ -121,6 +121,10 @@ static void ac_input(const psp_settings *s, psp_title_input *out) {
     out->action_count = sizeof ac_actions / sizeof *ac_actions;
 }
 
+/* What the replacements carry from one poll to the next, named to a save
+ * state (psprecomp/state.h); defined at the end of this file. */
+void lr_replacements_keep(void);
+
 const psp_title psp_title_info = {
     .name = "Armored Core: Last Raven",
     .capabilities = PSP_TITLE_MODERN_CONTROLS | PSP_TITLE_ADAPTIVE_ASPECT |
@@ -128,6 +132,7 @@ const psp_title psp_title_info = {
     .keys_wasd_help = AC_KEYS_WASD_HELP,
     .gamepad_modern_help = AC_GAMEPAD_MODERN_HELP,
     .input = ac_input,
+    .keep = lr_replacements_keep,
 };
 
 /* Button layout is independently overridable so the analog work can be

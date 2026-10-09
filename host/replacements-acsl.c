@@ -108,12 +108,17 @@ static int player_pad_is(uint32_t pad) {
  *   it the GL backend would spread a scene the camera never widened;
  * - the modern controller layout: this host reads the modern pad's carrier
  *   bits (the converter and the two queries above). */
+/* What the replacements carry from one poll to the next, named to a save
+ * state (psprecomp/state.h); defined at the end of this file. */
+void lr_replacements_keep(void);
+
 const psp_title psp_title_info = {
     .name = "Armored Core: Silent Line",
     .capabilities = PSP_TITLE_MODERN_CONTROLS | PSP_TITLE_ADAPTIVE_ASPECT,
     .keys_wasd_help = AC_KEYS_WASD_HELP,
     .gamepad_modern_help = AC_GAMEPAD_MODERN_HELP,
     .input = ac3_input,
+    .keep = lr_replacements_keep,
 };
 
 /* Mission rendering at independent FPS: US PSN NPUH10025 1.00. */
