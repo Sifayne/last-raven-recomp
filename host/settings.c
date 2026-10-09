@@ -31,6 +31,8 @@ const psp_option_def lr_options[LR_OPTION_COUNT] = {
     N(AUDIO_PREROLL_MS,"Audio preroll","Advanced","Milliseconds buffered before playback starts. Auto preserves the 4096-frame default (about 93 ms).","auto",0,4000,5,"auto"),
     C(MPEG_DECODE,"Intro movie decoding","Advanced","Decode the intro movie. Requires a build with OpenH264. Play presets enable this when supported.","0","0|1","Off|On"),
     N(VOLUME,"Volume","Audio","The game's overall loudness. The in-game menu also mutes it.","100",0,100,5,NULL,.format="%.0f%%",.flags=PSP_OPTION_LIVE),
+    C(STATE_LOAD,"Loading a state","Save states","What loading a save state does to the game in progress. Ask first confirms every load, from the menu or the key. Load at once does not ask. Keep an undo loads at once, saving the game as it was first: \"Before the last load\" in the Load state list brings it back.","ask","ask|now|undo","Ask first|Load at once|Load at once, keep an undo",.flags=PSP_OPTION_LIVE),
+    C(STATE_START,"When the game starts","Save states","Start fresh begins at the game's own start. Continue where I quit saves the game as it is when you quit, and loads it the next time the game starts.","fresh","fresh|continue","Start fresh|Continue where I quit",.flags=PSP_OPTION_LIVE),
     C(WINDOW,"Window","Launch","A window also enables real-time pacing. OpenGL always requires a window.","0","0|1","Off|On",.flags=PSP_OPTION_HIDDEN),
     C(REALTIME,"Real-time pacing","Launch","Headless real-time pacing. Windowed play always uses real time.","0","0|1","Off|On",.flags=PSP_OPTION_HIDDEN),
     C(HIGH_FPS,"Higher FPS","Graphics","Smooth mission rendering between the game's original simulation ticks. Menus and movies keep their original timing.","0","0|1","Off|On"),

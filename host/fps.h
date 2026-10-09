@@ -75,8 +75,13 @@ static int fps_state_load(psp_state_reader *r, char *why, size_t size) {
     if (fps.log) setvbuf(fps.log,NULL,_IOLBF,0);
     return 0;
 }
+/* A load into the running game: its log is closed, and opened again above. */
+static void fps_state_drop(void) {
+    if (fps.log) fclose(fps.log);
+    fps.log=NULL;
+}
 static void fps_keep(void) {
-    static const psp_state_part part={"fps",NULL,NULL,fps_state_load};
+    static const psp_state_part part={.name="fps",.load=fps_state_load,.drop=fps_state_drop};
     PSP_STATE_KEEP(fps);
     psp_state_register(&part);
 }

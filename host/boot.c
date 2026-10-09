@@ -39,6 +39,7 @@
 #include "psprecomp/state.h"
 #include "psprecomp/vfpu.h"
 
+#include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <unistd.h>
@@ -636,12 +637,28 @@ static void install_bad_hook(void) {
 
 /* Each thread needs its own: sigaltstack is per-thread, and the fault most
  * worth catching is a blown stack, which leaves no room to run a handler. */
+/* Freed when its thread ends: a save state loaded while the game runs ends
+ * and starts every guest thread, so a run may start thousands. */
+static pthread_key_t g_alt_key;
+static pthread_once_t g_alt_once = PTHREAD_ONCE_INIT;
+static void alt_stack_free(void *sp) {
+    stack_t off;
+    memset(&off, 0, sizeof off);
+    off.ss_flags = SS_DISABLE;
+    sigaltstack(&off, NULL);
+    free(sp);
+}
+static void alt_stack_key(void) { pthread_key_create(&g_alt_key, alt_stack_free); }
+
 static void install_alt_stack(void) {
     stack_t ss;
     ss.ss_sp    = malloc(ALT_STACK_SIZE);
     ss.ss_size  = ALT_STACK_SIZE;
     ss.ss_flags = 0;
-    if (ss.ss_sp) sigaltstack(&ss, NULL);
+    if (!ss.ss_sp) return;
+    if (sigaltstack(&ss, NULL)) { free(ss.ss_sp); return; }
+    pthread_once(&g_alt_once, alt_stack_key);
+    pthread_setspecific(g_alt_key, ss.ss_sp);
 }
 
 static void on_signal(int sig);
@@ -942,6 +959,17 @@ int main(int argc, char **argv) {
     install_bad_hook();
     psp_sched_set_thread_hook(install_alt_stack);
     printf("      disc      %s\n", iso ? iso : "(none -- raw umd: opens will fail)");
+
+    /* Continue where I quit (STATE_START): the state the menu wrote when the
+     * game last closed, if this build can load it. */
+    if (!load_state && settings.number[LR_STATE_START]) {
+        static char quit[1100];
+        psp_state_info info;
+        psp_state_file("quit", quit, sizeof quit);
+        if (psp_state_peek(quit, &info, NULL)) printf("      state     nothing to continue from yet\n");
+        else if (!info.usable) printf("      state     %s is from another build of the game; starting fresh\n", quit);
+        else load_state = quit;
+    }
 
     /* A save state replaces steps 3 to 5: its threads are already past
      * module_start, each continuing where the state left it once the drain
