@@ -61,7 +61,7 @@ done
 info "building oracle_diff"
 cc -c -O1 -I "$ROOT/tools/psprecomp/include" \
          -I "$ROOT/tools/psprecomp/tools/allegrexrecomp" \
-         -o "$GEN_OBJ/oracle_diff.o" "$ROOT/host/oracle_diff.c"
+         -o "$GEN_OBJ/oracle_diff.o" "$ROOT/tools/psprecomp/tools/oracle/oracle_diff.c"
 
 # Replacements are linked here too, because the emitted objects reference their
 # symbols. Note what that means for a comparison: this harness runs
@@ -69,7 +69,8 @@ cc -c -O1 -I "$ROOT/tools/psprecomp/include" \
 # so a *replaced* function differs by construction rather than by codegen fault.
 # Exclude replaced addresses from a sweep instead of reading the differ as a
 # bug -- see host/replace.txt.
-cc -O2 -std=gnu11 -c "$ROOT/host/settings.c" -o "$GEN_OBJ/settings.o"
+cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -c "$ROOT/host/settings.c" -o "$GEN_OBJ/settings.o"
+cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -c "$ROOT/tools/psprecomp/src/host/settings.c" -o "$GEN_OBJ/player_settings.o"
 # The boot host builds replacements with SDL enabled. The oracle has no
 # presentation layer, so give it its own object instead of depending on which
 # build script most recently wrote replacements.o.
@@ -77,7 +78,7 @@ cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -I "$GEN" \
     -c "$REPLACEMENTS_SRC" -o "$GEN_OBJ/oracle_replacements.o"
 cc -o "$BIN" "$GEN_OBJ/oracle_diff.o" \
        "$GEN_OBJ/${PREFIX}_funcs.o" "$GEN_OBJ/${PREFIX}_imports.o" \
-       "$GEN_OBJ/oracle_replacements.o" "$GEN_OBJ/settings.o" \
+       "$GEN_OBJ/oracle_replacements.o" "$GEN_OBJ/settings.o" "$GEN_OBJ/player_settings.o" \
        "$ROOT/build/psprecomp/tools/allegrexrecomp/liballegrex_core.a" \
        "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${HOST_LINK_FLAGS[@]}"
 

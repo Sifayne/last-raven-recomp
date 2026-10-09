@@ -10,7 +10,7 @@
 #include "psprecomp/cpu.h"
 #include "psprecomp/mem.h"
 #include "aclr_funcs.h"
-#include "present.h"
+#include "psprecomp/host/present.h"
 
 enum {
     SCENE = 0x00421040u, RENDER = 0x0043D8D0u,

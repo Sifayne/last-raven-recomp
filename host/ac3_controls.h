@@ -40,8 +40,9 @@
 #include "psprecomp/mem.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/vfpu.h"     /* psp_lv_q, psp_vtfm, psp_sv_q: the push's rotation */
-#include "controls.h"           /* LR_PAD_*: the modern pad's carrier bits */
-#include "present.h"            /* present_adaptive_aspect(), the wide width */
+#include "psprecomp/host/pad.h"   /* PSP_PAD_*: the modern pad's carrier bits */
+#include "psprecomp/host/present.h" /* present_adaptive_aspect(), the wide width */
+#include "psprecomp/host/title.h"   /* psp_title_info */
 #include "settings.h"
 
 static int input_mode(void);
@@ -75,7 +76,7 @@ static void f32_write(uint32_t addr, float f) {
  * about 20 cm of desk at 800 dpi -- a middling FPS default. */
 static float mouse_sens(void) {
     static float k = -1.0f;
-    if (k < 0.0f) k = 0.001f * (float)lr_settings_current()->number[LR_MOUSE_SENS];
+    if (k < 0.0f) k = 0.001f * (float)psp_settings_current()->number[LR_MOUSE_SENS];
     return k;
 }
 
@@ -90,7 +91,7 @@ static float mouse_sens(void) {
 static int gamepad_modern(void) {
     static int modern = -1;
     if (modern < 0) {
-        modern = lr_settings_current()->gamepad;
+        modern = psp_settings_current()->gamepad;
         if (modern)
             printf("      gamepad   modern -- triggers, bumpers and stick clicks are gameplay actions\n");
     }
@@ -100,7 +101,7 @@ static int gamepad_modern(void) {
 static int input_mode(void) {
     static int mode = -1;
     if (mode < 0) {
-        mode = (int)lr_settings_current()->number[LR_INPUT];
+        mode = (int)psp_settings_current()->number[LR_INPUT];
         if (mode == INPUT_MODERN)
             printf("      input     modern -- the stick asks to turn and walk from a light touch; "
                    "PSPRECOMP_INPUT=classic for the game's own\n");
@@ -642,7 +643,8 @@ void AC3_FN(AC3_WALK_PUSH_B)(void) { walk_push(r_a0, r_a1, r_ra, AC3_ORIG(AC3_WA
  *     static uint32_t action_mask(uint32_t ac, uint32_t action);
  * or
  *     #define AC3_ACTION_HELD <hex>, AC3_ACTION_PRESSED <hex>
- * and sets lr_modern_controls_available = 1 so present.c offers the layout. */
+ * and claims PSP_TITLE_MODERN_CONTROLS in its psp_title_info so the shared
+ * host offers the layout. */
 static int player_pad_is(uint32_t pad);
 
 static struct {
@@ -653,12 +655,12 @@ static struct {
 
 static uint32_t extra_menu_buttons(uint32_t extra) {
     uint32_t psp = 0;
-    if (extra & LR_PAD_A)  psp |= 0x004000u;       /* Cross    */
-    if (extra & LR_PAD_B)  psp |= 0x002000u;       /* Circle   */
-    if (extra & LR_PAD_X)  psp |= 0x008000u;       /* Square   */
-    if (extra & LR_PAD_Y)  psp |= 0x001000u;       /* Triangle */
-    if (extra & (LR_PAD_LB | LR_PAD_LT)) psp |= 0x000100u;
-    if (extra & (LR_PAD_RB | LR_PAD_RT)) psp |= 0x000200u;
+    if (extra & PSP_PAD_A)  psp |= 0x004000u;       /* Cross    */
+    if (extra & PSP_PAD_B)  psp |= 0x002000u;       /* Circle   */
+    if (extra & PSP_PAD_X)  psp |= 0x008000u;       /* Square   */
+    if (extra & PSP_PAD_Y)  psp |= 0x001000u;       /* Triangle */
+    if (extra & (PSP_PAD_LB | PSP_PAD_LT)) psp |= 0x000100u;
+    if (extra & (PSP_PAD_RB | PSP_PAD_RT)) psp |= 0x000200u;
     return psp;
 }
 
@@ -668,17 +670,39 @@ static uint32_t extra_menu_buttons(uint32_t extra) {
  * alias A and B to cross and circle above). */
 static uint32_t extra_for_action(uint32_t action) {
     switch (action) {
-    case 4:  return LR_PAD_RB;       /* Change weapon       */
-    case 5:  return LR_PAD_LT;       /* Boost / jump        */
-    case 6:  return LR_PAD_RT;       /* Arm unit R          */
-    case 7:  return LR_PAD_LB;       /* Arm unit L / event  */
-    case 10: return LR_PAD_B;        /* Look up   -- both:  */
-    case 11: return LR_PAD_B;        /* Look down    reset  */
-    case 13: return LR_PAD_L3;       /* Extension           */
-    case 14: return LR_PAD_R3;       /* OB / EO             */
-    case 15: return LR_PAD_R3;       /* OB / EO (one mask)  */
+    case 4:  return PSP_PAD_RB;       /* Change weapon       */
+    case 5:  return PSP_PAD_LT;       /* Boost / jump        */
+    case 6:  return PSP_PAD_RT;       /* Arm unit R          */
+    case 7:  return PSP_PAD_LB;       /* Arm unit L / event  */
+    case 10: return PSP_PAD_B;        /* Look up   -- both:  */
+    case 11: return PSP_PAD_B;        /* Look down    reset  */
+    case 13: return PSP_PAD_L3;       /* Extension           */
+    case 14: return PSP_PAD_R3;       /* OB / EO             */
+    case 15: return PSP_PAD_R3;       /* OB / EO (one mask)  */
     default: return 0;
     }
+}
+
+/* The same carriers as actions the bindings can name (bind.pad.boost=...),
+ * for each title's psp_title_info: in play as above, and in menus A, B, X and
+ * Y are the face buttons (extra_menu_buttons). None means anything while the
+ * modern layout is off. */
+static const psp_title_action ac3_actions[] = {
+    { "confirm",       "Confirm (menus)",  PSP_PAD_A,  PSP_ACTION_KEEP },
+    { "view_reset",    "View reset",       PSP_PAD_B,  PSP_ACTION_KEEP },
+    { "menu_square",   "Square (menus)",   PSP_PAD_X,  PSP_ACTION_KEEP },
+    { "menu_triangle", "Triangle (menus)", PSP_PAD_Y,  PSP_ACTION_KEEP },
+    { "left_arm",      "Left arm / event", PSP_PAD_LB, PSP_ACTION_KEEP },
+    { "change_weapon", "Change weapon",    PSP_PAD_RB, PSP_ACTION_KEEP },
+    { "boost",         "Boost / jump",     PSP_PAD_LT, PSP_ACTION_KEEP },
+    { "right_arm",     "Right arm",        PSP_PAD_RT, PSP_ACTION_KEEP },
+    { "extension",     "Extension",        PSP_PAD_L3, PSP_ACTION_KEEP },
+    { "ob",            "OB / EO",          PSP_PAD_R3, PSP_ACTION_KEEP },
+};
+static void ac3_input(const psp_settings *s, psp_title_input *out) {
+    (void)s;
+    out->actions = ac3_actions;
+    out->action_count = sizeof ac3_actions / sizeof *ac3_actions;
 }
 
 static void extra_action_log(uint32_t action, int edge) {
@@ -697,7 +721,7 @@ static void extra_action_log(uint32_t action, int edge) {
 void AC3_FN(AC3_PAD_MAPPER)(void) {
     const uint32_t state = r_a0;
     const uint32_t raw = r_a1;
-    const uint32_t extra = raw & LR_PAD_EXTRA;
+    const uint32_t extra = raw & PSP_PAD_EXTRA;
     const uint32_t poll = psp_ctrl_polls();
     if (poll != g_extra_pad.poll) {
         const uint32_t old = g_extra_pad.down;
@@ -714,7 +738,7 @@ void AC3_FN(AC3_PAD_MAPPER)(void) {
         g_extra_pad.down = extra;
     }
 
-    uint32_t psp = raw & ~LR_PAD_EXTRA;
+    uint32_t psp = raw & ~PSP_PAD_EXTRA;
     if (gamepad_modern() && !in_play()) psp |= extra_menu_buttons(extra);
     r_a0 = state;
     r_a1 = psp;
@@ -794,7 +818,8 @@ void AC3_FN(AC3_ACTION_PRESSED)(void) {
  *
  * The including file provides:
  *     #define AC3_PERSPECTIVE <hex address>
- * and defines lr_adaptive_aspect_available = 1 so present.c offers the option. */
+ * and claims PSP_TITLE_ADAPTIVE_ASPECT in its psp_title_info so the shared
+ * host offers the option. */
 enum { AC3_CAM_FOV = 192, AC3_CAM_NEAR = 196, AC3_CAM_FAR = 200, AC3_CAM_ASPECT = 204 };
 
 void AC3_FN(AC3_PERSPECTIVE)(void) {
@@ -866,7 +891,7 @@ enum { AC3_CAM_EYE = 16, AC3_CAM_PITCH = 32, AC3_CAM_YAW = 36, AC3_CAM_TARGET = 
 static float camera_lag(void) {
     static float r = -2.0f;
     if (r < -1.5f) {
-        r = (float)lr_settings_current()->number[LR_CAMERA_LAG];
+        r = (float)psp_settings_current()->number[LR_CAMERA_LAG];
         if (r >= 0.0f) {
             if (r > 0.99f) r = 0.99f;
             printf("      camera    lag %.2f per frame (the game keeps 0.90); "

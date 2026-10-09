@@ -116,4 +116,24 @@ void AC3_FN(FPS_MISSION_LOOP)(void) {
     fps_native_loop(0); /* The generated switch's default is the function entry. */
     fps_ac3_render_close(); fps_ac3_history_reset(); fps_stop();
 }
+/* A thread a save state restored inside the mission loop: the loop it was
+ * running, native or the original, from the return site it was at. */
+#define FPS_LOOP_ADDR AC3_CAT(0x, AC3_CAT(FPS_MISSION_LOOP, u))
+static void fps_resume(uint32_t site) {
+    psp_nest_enter(PSP_NEST_REPLACED,FPS_LOOP_ADDR);
+    if (!fps.active) AC3_CAT(psp_resume_, FPS_MISSION_LOOP)(site);
+    else {
+        fps_native_loop(site);
+        fps_ac3_render_close(); fps_ac3_history_reset(); fps_stop();
+    }
+    psp_nest_leave();
+}
+static void fps_ac3_keep(void) {
+    fps_keep();
+    PSP_STATE_KEEP(fps_camera);
+    PSP_STATE_KEEP(fps_borrowed);
+    PSP_STATE_KEEP(fps_joints);
+    PSP_STATE_KEEP(fps_phase);
+    psp_resume_override(FPS_LOOP_ADDR,AC3_CAT(psp_resume_, FPS_MISSION_LOOP),fps_resume);
+}
 #endif

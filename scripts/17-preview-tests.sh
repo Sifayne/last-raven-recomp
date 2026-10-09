@@ -10,7 +10,7 @@ read -r -a SDL_FLAGS <<< "$(pkg-config --cflags sdl2 SDL2_ttf)"
 read -r -a SDL_LIBS <<< "$(pkg-config --libs sdl2 SDL2_ttf)"
 cc -O2 -Wall -Wextra -Werror -std=gnu11 -DHAVE_SDL2 "${SDL_FLAGS[@]}" \
     -I "$ROOT/tools/psprecomp/include" \
-    "$ROOT/host/settings.c" "$ROOT/host/preview_tests.c" "$ROOT/host/render_gl.c" "$ROOT/host/present.c" "$ROOT/host/save_dialog.c" \
+    "$ROOT/host/settings.c" "$ROOT/tools/psprecomp/src/host/settings.c" "$ROOT/host/preview_tests.c" "$ROOT/tools/psprecomp/src/host/render_gl.c" "$ROOT/tools/psprecomp/src/host/present.c" "$ROOT/tools/psprecomp/src/host/input.c" "$ROOT/tools/psprecomp/src/host/save_dialog.c" \
     "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${SDL_LIBS[@]}" $HOST_LIBS \
     -o "$OUT/preview-tests"
 for resolution in psp window; do

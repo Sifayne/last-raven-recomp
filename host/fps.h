@@ -10,6 +10,8 @@
 #include <time.h>
 #include "settings.h"
 #include "psprecomp/clock.h"
+#include "psprecomp/dispatch.h"
+#include "psprecomp/state.h"
 #include "fps_clock.h"
 
 static struct {
@@ -21,20 +23,23 @@ static struct {
     FILE *log;
 } fps;
 
-static uint64_t fps_now(void) {
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
-    return (uint64_t)t.tv_sec*1000000000ull+(uint64_t)t.tv_nsec;
-}
+/* Wall time less host pauses (psprecomp/safepoint.h), so a pause is neither
+ * a late frame nor a burst of catch-up ticks. A pause cannot fall inside a
+ * sleep here -- the sleeping thread keeps the scheduler token, which a pause
+ * needs -- so the sleep is the same span of wall time. */
+static uint64_t fps_now(void) { return psp_clock_run_ns(); }
 static void fps_sleep_until(uint64_t deadline) {
-    struct timespec t={(time_t)(deadline/1000000000ull),(long)(deadline%1000000000ull)};
-    int error;
-    do { error=clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&t,NULL); } while (error==EINTR);
+    const uint64_t now=fps_now();
+    if (deadline<=now) return;
+    const uint64_t ns=deadline-now;
+    struct timespec t={(time_t)(ns/1000000000ull),(long)(ns%1000000000ull)};
+    while (nanosleep(&t,&t)==-1 && errno==EINTR) {}
 }
 static int fps_start(void) {
-    if (!lr_settings_current()->number[LR_HIGH_FPS]) return 0;
+    if (!psp_settings_current()->number[LR_HIGH_FPS]) return 0;
     memset(&fps,0,sizeof fps);
     fps.active=1;
-    fps.cap=(int)lr_settings_current()->number[LR_FPS_CAP];
+    fps.cap=(int)psp_settings_current()->number[LR_FPS_CAP];
     /* Deterministic regression injection; never affects windowed play. */
     const char *gap=getenv("PSPRECOMP_FPS_TEST_GAP");
     if (!psp_clock_is_realtime() && gap) {
@@ -57,6 +62,28 @@ static void fps_stop(void) {
         fclose(fps.log);
     }
     memset(&fps,0,sizeof fps);
+}
+/* A save state keeps the loop as it is (fps_keep). Its log is this
+ * process's, opened again where the loop is running; and in real time its
+ * clock starts again, since the saving process's wall time means nothing
+ * here. Headless, the display clock is the loop's own count and carries on. */
+static int fps_state_load(psp_state_reader *r, char *why, size_t size) {
+    (void)r; (void)why; (void)size;
+    if (psp_clock_is_realtime()) { fps.deadline=0; fps.clock.started=0; }
+    const char *path=getenv("PSPRECOMP_FPS_LOG");
+    fps.log=fps.active && path && *path?fopen(path,"a"):NULL;
+    if (fps.log) setvbuf(fps.log,NULL,_IOLBF,0);
+    return 0;
+}
+/* A load into the running game: its log is closed, and opened again above. */
+static void fps_state_drop(void) {
+    if (fps.log) fclose(fps.log);
+    fps.log=NULL;
+}
+static void fps_keep(void) {
+    static const psp_state_part part={.name="fps",.load=fps_state_load,.drop=fps_state_drop};
+    PSP_STATE_KEEP(fps);
+    psp_state_register(&part);
 }
 static void fps_frame_begin(void) {
     uint64_t now;

@@ -63,7 +63,7 @@ if [ "${OPT:-0}" != "0" ]; then
     # (docs/GAME-TICK-MAP-REVIEW.md, section 14).
     info "compiling at -O2 in $(nproc) jobs"
     SPLIT="$OBJ/split"; rm -rf "$SPLIT"; mkdir -p "$SPLIT"
-    python3 "$ROOT/scripts/emit-split.py" "$GEN/${PREFIX}_funcs.c" "$SPLIT" 32
+    python3 "$ROOT/tools/psprecomp/player/emit-split.py" "$GEN/${PREFIX}_funcs.c" "$SPLIT" 32
     # The chunks live outside $GEN, so the generated header needs an -I.
     OPTFLAGS=(-O2 -fno-strict-aliasing -fwrapv "${CFLAGS[@]:1}" -I "$GEN")
     ls "$SPLIT/${PREFIX}_funcs_"[0-9][0-9].c | xargs -P "$(nproc)" -I{} \
@@ -85,7 +85,8 @@ cc -c "${CFLAGS[@]}" -o "$OBJ/link_probe.o" "$ROOT/host/link_probe.c"
 # when that list is empty, so adding the first one needs no build change here.
 cc -c "${CFLAGS[@]}" -I "$GEN" -o "$OBJ/replacements.o" "$REPLACEMENTS_SRC"
 
-cc -O2 -std=gnu11 -c "$ROOT/host/settings.c" -o "$OBJ/settings.o"
+cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -c "$ROOT/host/settings.c" -o "$OBJ/settings.o"
+cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -c "$ROOT/tools/psprecomp/src/host/settings.c" -o "$OBJ/player_settings.o"
 
 info "linking"
 # Named explicitly rather than globbed: stage 05 also builds into this
@@ -94,7 +95,7 @@ info "linking"
 GEN_OBJS=()
 for src in "$GEN"/*.c; do GEN_OBJS+=("$OBJ/$(basename "${src%.c}").o"); done
 cc -o "$OBJ/${PREFIX}_probe" "${GEN_OBJS[@]}" "$OBJ/link_probe.o" \
-      "$OBJ/replacements.o" "$OBJ/settings.o" \
+      "$OBJ/replacements.o" "$OBJ/settings.o" "$OBJ/player_settings.o" \
       "$ROOT/build/psprecomp/libpsprecomp.a" -lm -lpthread "${HOST_LINK_FLAGS[@]}"
 
 info "link closed: $(du -h "$OBJ/${PREFIX}_probe" | cut -f1) executable"

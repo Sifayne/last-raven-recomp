@@ -283,7 +283,8 @@ including same-value stores; partial writes preserve the untouched channels
 of every physical sample. Guest readback resolves with nearest sampling so
 alpha/stencil values and packed reinterpretation are not averaged.
 
-The body font has a game-specific sampling exception in `host/render_gl.c`.
+The body font has a game-specific sampling exception in psprecomp's GL backend
+(`tools/psprecomp/src/host/render_gl.c`).
 Its 512x512 CLUT4 atlas is drawn as 13-pixel-high, axis-aligned, 1:1 glyph
 triangles. At 1x, linear filtering samples texel centers exactly; magnification
 interpolates the already shaded glyph edges again and weakens the strokes.
@@ -414,8 +415,8 @@ rasterises lines through its own walker, clamped to the screen, so a band
 line batch under the game's whole-screen scissor now walks into the bands.
 Sif's hand-recorded AC Test session (`scenarios/lock-band-hand.pad`, with
 `lock-band-hand.dialog` answering the save dialog the recorder cannot see)
-replayed at 2560x720 shows the box continuing into the right band. The path is per title (`lr_hud_bands_available`, defined by a
-title's replacements): Last Raven's menus, garage and missions were audited
+replayed at 2560x720 shows the box continuing into the right band. The path is per title (`PSP_TITLE_HUD_BANDS` in a
+title's `psp_title_info`, the weak `lr_hud_bands_available` until 5 Oct): Last Raven's menus, garage and missions were audited
 and only the rings and the marker draw off the screen, while a replay of
 AC3 Portable's menus showed some 26,000 untextured pieces parked there --
 black in that run, but unaudited, so that title keeps the centred clip. And the mission loop keeps the marker only while `001FBDF8`, the lock
@@ -437,7 +438,8 @@ scripts/17-preview-tests.sh
 
 Both GL fixtures had been running their window-aspect configurations at the
 original aspect since 7 September: `present.c` offers the adaptive aspect
-only when a title's replacement defines `lr_adaptive_aspect_available`, and
+only when a title's replacement defines `lr_adaptive_aspect_available` (now
+`PSP_TITLE_ADAPTIVE_ASPECT` in `psp_title_info`), and
 the fixtures do not link one. They now define it themselves; the preview
 fixture passes 49 checks at the original aspect and 51 in window aspect on
 each transform path, the resolution fixture 40 in each mode, renderer

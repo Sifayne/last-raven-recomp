@@ -130,4 +130,23 @@ void psp_func_00102018(void) {
     fps_native_loop(0x00102018u);
     fps_aclr_render_close(); fps_history_reset(); fps_stop();
 }
+/* A thread a save state restored inside the mission loop: the loop it was
+ * running, native or the original, from the return site it was at. */
+static void fps_resume(uint32_t site) {
+    psp_nest_enter(PSP_NEST_REPLACED,0x00102018u);
+    if (!fps.active) psp_resume_00102018(site);
+    else {
+        fps_native_loop(site);
+        fps_aclr_render_close(); fps_history_reset(); fps_stop();
+    }
+    psp_nest_leave();
+}
+static void fps_aclr_keep(void) {
+    fps_keep();
+    PSP_STATE_KEEP(fps_camera);
+    PSP_STATE_KEEP(fps_borrowed);
+    PSP_STATE_KEEP(fps_joints);
+    PSP_STATE_KEEP(fps_phase);
+    psp_resume_override(0x00102018u,psp_resume_00102018,fps_resume);
+}
 #endif

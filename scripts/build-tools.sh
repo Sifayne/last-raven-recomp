@@ -13,7 +13,7 @@ cd "$ROOT"
 
 # Configure before common.sh checks the cache, so this also migrates existing
 # checkouts that previously discovered a GPL-enabled system FFmpeg.
-python3 "$ROOT/scripts/ffmpeg.py" build
+python3 "$ROOT/tools/psprecomp/player/ffmpeg.py" build --deps "$ROOT/build/deps"
 cmake -S tools/psprecomp -B build/psprecomp -G Ninja -DCMAKE_BUILD_TYPE=Release \
     "${FFMPEG_CMAKE_ARGS[@]}"
 source "$ROOT/scripts/common.sh"

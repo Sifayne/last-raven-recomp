@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Armored Core Portable
-Comment=Prepare your PSP games and configure graphics and controls
-Exec=AppRun
-Icon=last-raven
-Terminal=false
-Categories=Game;
-StartupWMClass=last-raven

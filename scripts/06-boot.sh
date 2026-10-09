@@ -43,6 +43,7 @@ cmake --build "$ROOT/build/psprecomp" -j"$(nproc)" >/dev/null
 # and present.h turns that into a stub when HAVE_SDL2 is absent. Probing later
 # left the call with nothing to link against on a machine without SDL2.
 PRESENT=""
+MENU=""
 SDL_DEF=""
 if pkg-config --exists sdl2 2>/dev/null; then
     pkg-config --exists SDL2_ttf 2>/dev/null ||
@@ -53,12 +54,15 @@ else
 fi
 
 info "compiling boot host"
-cc -O2 -std=gnu11 -c "$ROOT/host/settings.c" -o "$OUT/settings.o"
-# The loader is part of the recompiler tool, not the runtime library, so its
+cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -c "$ROOT/host/settings.c" -o "$OUT/settings.o"
+cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -c "$ROOT/tools/psprecomp/src/host/settings.c" -o "$OUT/player_settings.o"
+# The boot host is psprecomp's, every game's (src/host/boot.c); what is
+# this game's own reaches it through psp_title_info in the replacements. The
+# loader is part of the recompiler tool, not the runtime library, so its
 # sources are compiled in here rather than linked from an archive.
 cc -O2 -std=gnu11 $SDL_DEF \
    -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
-   -c "$ROOT/host/boot.c" -o "$OUT/boot.o"
+   -c "$ROOT/tools/psprecomp/src/host/boot.c" -o "$OUT/boot.o"
 
 # Native replacements for the functions the replace list names. Linked into the
 # boot host as well as stage 04's probe, because this is the build that runs.
@@ -81,25 +85,45 @@ done
 if [ -n "$SDL_DEF" ]; then
     info "compiling presentation layer (SDL2)"
     # The window is titled after the profile's TITLE.
-    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) -DGAME_TITLE="\"$TITLE\"" \
+    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
        -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
-       -c "$ROOT/host/present.c" -o "$OUT/present.o"
+       -c "$ROOT/tools/psprecomp/src/host/present.c" -o "$OUT/present.o"
+    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
+       -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
+       -c "$ROOT/tools/psprecomp/src/host/input.c" -o "$OUT/input.o"
     # The GL backend is compiled here rather than with the runtime: it needs a
     # window and a GL context, and the core stays dependency-free on purpose.
     cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
        -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
-       -c "$ROOT/host/render_gl.c" -o "$OUT/render_gl.o"
+       -c "$ROOT/tools/psprecomp/src/host/render_gl.c" -o "$OUT/render_gl.o"
     cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) \
        -I "$ROOT/tools/psprecomp/include" \
-       -c "$ROOT/host/save_dialog.c" -o "$OUT/save_dialog.o"
-    PRESENT="$OUT/present.o $OUT/save_dialog.o $OUT/render_gl.o $(pkg-config --libs sdl2 SDL2_ttf)"
+       -c "$ROOT/tools/psprecomp/src/host/save_dialog.c" -o "$OUT/save_dialog.o"
+    PRESENT="$OUT/present.o $OUT/input.o $OUT/save_dialog.o $OUT/render_gl.o $(pkg-config --libs sdl2 SDL2_ttf)"
+    # The in-game menu, for the boot host alone: psprecomp's overlay and its
+    # Dear ImGui toolkit. ImGui's core is the runtime build's archive; ui.cpp
+    # and the two SDL backends are C++ without exceptions, RTTI or
+    # thread-safe statics, so the C link below needs no C++ runtime.
+    IMGUI="$ROOT/tools/psprecomp/third_party/imgui"
+    [ -f "$ROOT/build/psprecomp/libpsprecomp_imgui.a" ] || \
+        die "no libpsprecomp_imgui.a: build/psprecomp was configured without a C++ compiler"
+    for src in overlay pages; do
+        cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) -I "$ROOT/tools/psprecomp/include" \
+           -c "$ROOT/tools/psprecomp/src/host/$src.c" -o "$OUT/$src.o"
+    done
+    for src in "$ROOT/tools/psprecomp/src/host/ui.cpp" "$IMGUI/backends/imgui_impl_sdl2.cpp" \
+               "$IMGUI/backends/imgui_impl_sdlrenderer2.cpp"; do
+        c++ -O2 -std=c++11 -fno-exceptions -fno-rtti -fno-threadsafe-statics $(pkg-config --cflags sdl2) \
+            -I "$IMGUI" -c "$src" -o "$OUT/$(basename "$src" .cpp).o"
+    done
+    MENU="$OUT/overlay.o $OUT/pages.o $OUT/ui.o $OUT/imgui_impl_sdl2.o $OUT/imgui_impl_sdlrenderer2.o $ROOT/build/psprecomp/libpsprecomp_imgui.a"
 fi
 
 # Without SDL2 there is no window, so render_gl.c compiles to its
 # no-backend stub and boot.c still links.
 if [ -z "$SDL_DEF" ]; then
     cc -O2 -std=gnu11 -I "$ROOT/tools/psprecomp/include" -I "$RECOMP_DIR" \
-       -c "$ROOT/host/render_gl.c" -o "$OUT/render_gl.o"
+       -c "$ROOT/tools/psprecomp/src/host/render_gl.c" -o "$OUT/render_gl.o"
     PRESENT="$OUT/render_gl.o"
 fi
 
@@ -112,11 +136,11 @@ cc -O2 -std=gnu11 $SDL_DEF ${SDL_DEF:+$(pkg-config --cflags sdl2 SDL2_ttf)} \
    -c "$ROOT/host/gereplay.c" -o "$OUT/gereplay.o"
 
 info "linking"
-cc "$OUT/settings.o" "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT \
+cc "$OUT/settings.o" "$OUT/player_settings.o" "$OUT/boot.o" "$OUT/loader.o" "$OUT/container.o" "$OUT/decode.o" $PRESENT $MENU \
    "$OUT/${PREFIX}_funcs.o" "$OUT/${PREFIX}_imports.o" "$OUT/replacements.o" "$LIB" \
    -o "$OUT/boot" -lm -lpthread "${HOST_LINK_FLAGS[@]}"
 
-cc "$OUT/settings.o" "$OUT/gereplay.o" $PRESENT "$LIB" \
+cc "$OUT/settings.o" "$OUT/player_settings.o" "$OUT/gereplay.o" $PRESENT "$LIB" \
    -o "$OUT/gereplay" -lm -lpthread "${HOST_LINK_FLAGS[@]}"
 
 # Build without running, so 09-replay.sh reuses this recipe instead of copying

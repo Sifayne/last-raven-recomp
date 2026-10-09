@@ -1,12 +1,17 @@
 /* Synthetic backend-contract checks, with full RGBA readback. No game data.
  * Run identically on software and GL; expectations do not call either renderer. */
-#include "present.h"
-#include "render_gl.h"
+#include "psprecomp/host/present.h"
+#include "psprecomp/host/title.h"
+#include "psprecomp/host/render_gl.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
 #include "psprecomp/render.h"
 #include <stdio.h>
 #include <string.h>
+
+/* Not a game: the shared host offers this program nothing title-specific
+ * (psprecomp/host/title.h). */
+const psp_title psp_title_info = { .name = "Render test" };
 
 enum { W = 512, H = 272 };
 #define FB 0x04000000u

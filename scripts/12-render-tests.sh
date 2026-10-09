@@ -11,12 +11,12 @@ mkdir -p "$OUT"
 cmake --build "$ROOT/build/psprecomp" --target psprecomp -j"$(nproc)" >/dev/null
 SDL_FLAGS=()
 SDL_LIBS=()
-SOURCES=("$ROOT/host/settings.c" "$ROOT/host/render_tests.c" "$ROOT/host/render_gl.c")
+SOURCES=("$ROOT/host/settings.c" "$ROOT/tools/psprecomp/src/host/settings.c" "$ROOT/host/render_tests.c" "$ROOT/tools/psprecomp/src/host/render_gl.c")
 if pkg-config --exists sdl2; then
     pkg-config --exists SDL2_ttf || die "SDL2 is installed but SDL2_ttf is not; the presentation layer needs it"
     read -r -a SDL_FLAGS <<< "-DHAVE_SDL2 $(pkg-config --cflags sdl2 SDL2_ttf)"
     read -r -a SDL_LIBS <<< "$(pkg-config --libs sdl2 SDL2_ttf)"
-    SOURCES+=("$ROOT/host/present.c" "$ROOT/host/save_dialog.c")
+    SOURCES+=("$ROOT/tools/psprecomp/src/host/present.c" "$ROOT/tools/psprecomp/src/host/input.c" "$ROOT/tools/psprecomp/src/host/save_dialog.c")
 fi
 cc -O2 -Wall -Wextra -std=gnu11 "${SDL_FLAGS[@]}" \
     -I "$ROOT/tools/psprecomp/include" "${SOURCES[@]}" \

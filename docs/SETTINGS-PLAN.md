@@ -70,7 +70,10 @@ launcher and a primary-display fallback when the selection is unavailable.
 
 Implemented in `host/settings.h` and `host/settings.c`, with no SDL dependency.
 The registry covers the 17 options above, window mode, display selection and
-the two launch controls.
+the two launch controls. Since 5 Oct the mechanism (types, presets, precedence,
+the INI file) is psprecomp's, `psprecomp/host/settings.h`. `host/settings.c`
+keeps this registry as the schema it reads (psprecomp `docs/PLAYER-LAYER.md`
+stage 1).
 Runtime diagnostic options can migrate incrementally without blocking the screen.
 
 Each registered option needs a stable key, type, default, allowed values or
@@ -153,9 +156,9 @@ reader and inspection command even when it cannot build the launcher.
 ## Why live changes need additional work
 
 `host/replacements.c` caches control mode, controller layout, mouse
-sensitivity, stick tuning and camera lag. `host/present.c` independently
+sensitivity, stick tuning and camera lag. psprecomp's `src/host/present.c` independently
 chooses layouts and mouse capture during SDL startup.
-`host/render_gl.c:gl_init` snapshots resolution and aspect settings.
+Its `src/host/render_gl.c:gl_init` snapshots resolution and aspect settings.
 Changing a saved value alone cannot update these consumers.
 
 Window resizing already has a useful live mechanism:

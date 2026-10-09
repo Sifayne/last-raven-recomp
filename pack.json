@@ -1,0 +1,154 @@
+{
+  "version": 2,
+  "pack": {
+    "id": "last-raven",
+    "name": "Armored Core",
+    "file": "Armored-Core",
+    "license": "LICENSE",
+    "resources": {
+      "FPS.md": "docs/FPS.md",
+      "README.txt": "packaging/linux/README.txt"
+    }
+  },
+  "titles": [
+    {
+      "slug": "ac3p",
+      "title": "Armored Core 3 Portable",
+      "disc_id": "NPUH10023",
+      "elf_sha256": "bd1314d5184dcbfe38db06b9e4a60d083217becb0ed2f80fca3ad608b2738e37",
+      "replacements": "replacements-ac3p.c",
+      "replace_list": "replace-ac3p.txt",
+      "codegen": [
+        "fps-loop.py"
+      ]
+    },
+    {
+      "slug": "acsl",
+      "title": "Armored Core: Silent Line",
+      "disc_id": "NPUH10025",
+      "elf_sha256": "143f1e1b6dc9961854a2f00dd3535a54643d3becc5a64c5493bbe0ef28184ae9",
+      "replacements": "replacements-acsl.c",
+      "replace_list": "replace-acsl.txt",
+      "codegen": [
+        "fps-loop.py"
+      ]
+    },
+    {
+      "slug": "aclr",
+      "title": "Armored Core: Last Raven",
+      "disc_id": "NPUH10024",
+      "elf_sha256": "e5a4511acda7f06b1d94996ecc9364a0b9e55485cfbbf655305f0a3a94b0a752",
+      "replacements": "replacements.c",
+      "replace_list": "replace.txt",
+      "codegen": [
+        "fps-loop.py"
+      ]
+    }
+  ],
+  "host": {
+    "sources": [
+      "host/settings.c"
+    ],
+    "launcher": [
+      "host/settings.c",
+      "host/launcher_info.c"
+    ]
+  },
+  "device": {
+    "host": [
+      "host/replacements.c",
+      "host/replacements-ac3p.c",
+      "host/replacements-acsl.c",
+      "host/replace.txt",
+      "host/replace-ac3p.txt",
+      "host/replace-acsl.txt",
+      "host/stick.h",
+      "host/ac3_controls.h",
+      "host/settings.h",
+      "host/fps.h",
+      "host/fps_clock.h",
+      "host/fps_aclr.h",
+      "host/fps_joints.h",
+      "host/fps_ac3.h"
+    ],
+    "scripts": [
+      "scripts/fps-loop.py"
+    ]
+  },
+  "build": {
+    "cmake": "packaging/linux/pack.cmake",
+    "checks": [
+      {
+        "run": [
+          "settings-tests"
+        ]
+      },
+      {
+        "run": [
+          "fps-tests"
+        ]
+      },
+      {
+        "run": [
+          "fps-pose-tests"
+        ]
+      },
+      {
+        "run": [
+          "save-dialog-tests",
+          "software",
+          "{ui}"
+        ],
+        "xvfb": true,
+        "env": {
+          "SDL_AUDIODRIVER": "dummy",
+          "PSPRECOMP_UI_FONT": "{font}"
+        }
+      },
+      {
+        "run": [
+          "save-dialog-tests",
+          "controller",
+          "{ui}"
+        ],
+        "xvfb": true,
+        "env": {
+          "SDL_AUDIODRIVER": "dummy",
+          "PSPRECOMP_UI_FONT": "{font}"
+        }
+      },
+      {
+        "run": [
+          "save-dialog-tests",
+          "gl",
+          "{ui}"
+        ],
+        "xvfb": true,
+        "env": {
+          "SDL_AUDIODRIVER": "dummy",
+          "PSPRECOMP_UI_FONT": "{font}"
+        }
+      },
+      {
+        "run": [
+          "launcher-tests",
+          "{ui}"
+        ],
+        "env": {
+          "SDL_VIDEODRIVER": "dummy",
+          "PSPRECOMP_UI_FONT": "{font}"
+        }
+      }
+    ]
+  },
+  "sources": [
+    "host/launcher_tests.c",
+    "host/settings_tests.c",
+    "host/save_dialog_tests.c",
+    "host/fps_tests.c",
+    "host/fps_pose_tests.c",
+    "docs/SAVEDATA-UI.md",
+    "docs/SAVE-SYNC.md",
+    "docs/PACKAGING.md"
+  ]
+}

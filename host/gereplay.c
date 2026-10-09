@@ -21,8 +21,9 @@
  * scheduler -- only the GE and a backend.
  */
 
-#include "present.h"
-#include "render_gl.h"
+#include "psprecomp/host/present.h"
+#include "psprecomp/host/title.h"
+#include "psprecomp/host/render_gl.h"
 #include "settings.h"
 
 #include "psprecomp/hle.h"
@@ -32,6 +33,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Not a game: the shared host offers this program nothing title-specific
+ * (psprecomp/host/title.h). */
+const psp_title psp_title_info = { .name = "GE replay" };
 
 #define GE_CAP_MAGIC  0x50414347u
 #define GE_CAP_VER    2
@@ -106,13 +111,13 @@ int main(int argc, char **argv) {
     const char *path = argv[1], *backend = argv[2], *out = argv[3];
     /* The explicit backend argument wins over an inherited RENDER variable,
      * before checking its compatibility with resolution/aspect settings. */
-    lr_settings settings;
-    char error[LR_ERROR_SIZE];
-    lr_settings_defaults(&settings);
-    if (lr_settings_env(&settings, error) ||
-        lr_settings_set(&settings, LR_RENDER, backend, LR_COMMAND_LINE, error) ||
-        lr_settings_resolve(&settings, error)) return die(error);
-    lr_settings_use(&settings);
+    psp_settings settings;
+    char error[PSP_SETTINGS_ERROR];
+    psp_settings_defaults(&settings);
+    if (psp_settings_env(&settings, error) ||
+        psp_settings_set(&settings, LR_RENDER, backend, PSP_SOURCE_COMMAND_LINE, error) ||
+        psp_settings_resolve(&settings, error)) return die(error);
+    psp_settings_use(&settings);
     const int resolution = render_gl_resolution_mode();
     if (resolution < 0) return 2;
     if (resolution && strcmp(backend, "gl"))
