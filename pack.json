@@ -1,17 +1,13 @@
 {
-  "version": 1,
-  "app": {
-    "name": "Armored Core Portable",
+  "version": 2,
+  "pack": {
     "id": "last-raven",
-    "appdir": "Last-Raven.AppDir",
-    "artifact": "Armored-Core-Portable",
-    "readme": "packaging/linux/README.txt",
-    "desktop": "packaging/linux/last-raven.desktop",
+    "name": "Armored Core",
+    "file": "Armored-Core",
     "license": "LICENSE",
-    "legacy_settings": "Last Raven/settings.ini",
-    "check_preset": "Controller",
     "resources": {
-      "FPS.md": "docs/FPS.md"
+      "FPS.md": "docs/FPS.md",
+      "README.txt": "packaging/linux/README.txt"
     }
   },
   "titles": [
@@ -49,6 +45,16 @@
       ]
     }
   ],
+  "host": {
+    "sources": [
+      "host/boot.c",
+      "host/settings.c"
+    ],
+    "launcher": [
+      "host/settings.c",
+      "host/launcher_info.c"
+    ]
+  },
   "device": {
     "host": [
       "host/replacements.c",
@@ -127,22 +133,18 @@
       {
         "run": [
           "launcher-tests",
-          "{ui}",
-          "{font}"
+          "{ui}"
         ],
         "env": {
-          "SDL_VIDEODRIVER": "dummy"
+          "SDL_VIDEODRIVER": "dummy",
+          "PSPRECOMP_UI_FONT": "{font}"
         }
       }
     ]
   },
   "sources": [
-    "host/launcher_info.c",
     "host/launcher_tests.c",
-    "host/settings.c",
-    "host/settings_tool.c",
     "host/settings_tests.c",
-    "host/boot.c",
     "host/save_dialog_tests.c",
     "host/fps_tests.c",
     "host/fps_pose_tests.c",

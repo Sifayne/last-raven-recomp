@@ -1,37 +1,52 @@
-# Linux application package
+# The Armored Core pack
 
-The native x86-64 AppImage includes the launcher, ISO importer, compiler,
-Python runtime and media libraries. Users supply their own supported PSP ISO;
-its executable is extracted, verified and compiled locally. The distributed
-image and matching source archive contain no generated game code or assets.
+Since psprecomp's player-layer stage 10 there is one app, **psprecomp**, for
+every game, and this repository is its **Armored Core pack**. A pack is
+source: the app compiles it on the player's machine when it is added, and
+again with each game. The app (an x86-64 AppImage) includes the launcher,
+the importer for packs and ISOs, the compiler, the Python runtime and the
+media libraries. Players supply their own supported PSP ISO; its executable
+is extracted, verified and compiled locally. Neither the app, the pack's
+file nor the matching source archive contains generated game code or
+assets.
 
 ## Use on Steam Deck
 
-Open the AppImage in Desktop Mode after marking it executable. Choose **Add
-Game**, browse to the ISO, then **Open**. **Drives** opens removable media
-locations. Drag-and-drop and pasting a path with Ctrl+V are also supported.
-Keep the app open during preparation, then choose **Save & Play**. No separate
-FFmpeg, Python or compiler installation is required. Preparation uses two
-compiler workers and needs at least 2 GB of available space in the library.
+1. Open the psprecomp AppImage in Desktop Mode, after marking it executable.
+2. Open **Packs** and choose **Add pack...**, then `Armored-Core-pack.zip`.
+   It is built for the computer in a few seconds.
+3. Choose **Add game**, browse to the ISO, and choose it. **Drives** opens
+   removable media locations. Dropping an ISO on the window and pasting a
+   path with Ctrl+V also work.
+4. Keep the app open during preparation, then choose **Save and play**.
 
-Tabs appear in release order: AC3P, Silent Line, Last Raven. Settings remain
-editable before launch, with saved presets and a remembered game selection.
-After Desktop Mode setup, add the AppImage as a non-Steam game for Gaming Mode.
+No separate FFmpeg, Python or compiler installation is required.
+Preparation uses two compiler workers and needs at least 2 GB of available
+space in the library.
+
+The tabs list every game of every pack added; this pack's appear in release
+order: AC3P, Silent Line, Last Raven. The settings are the player's, for
+every game, and this pack's own ([the settings guide](SETTINGS.md)). After
+Desktop Mode setup, add the AppImage as a non-Steam game for Gaming Mode.
 It is a native Linux application; leave Proton compatibility overrides off.
 
-The `deck-test-6` package includes Higher FPS for all three games. After updating,
-choose **Prepare Game** once per title, then enable **Graphics → Higher FPS**
-and set **FPS cap** to 60 to start. Presets can also save a custom cap or
-Unlimited. Existing saves, ISO locations and presets are retained. See
-[Higher FPS](FPS.md) for the mission scope and simulation behavior.
+Higher FPS is on this pack's **Graphics** page: enable it and set **FPS cap**
+to 60 to start. See [Higher FPS](FPS.md) for the mission scope and simulation
+behavior.
 
-To quit during play, hold **View + Menu (Select + Start) for two seconds**.
-Releasing either button, losing window focus or disconnecting the controller
-resets the hold. Keyboard users can press **Ctrl+Shift+Q**. Both shortcuts use
-the normal window-close shutdown path. Save progress in-game before quitting.
-Escape continues to release mouse capture.
+To open the in-game menu, press Escape, or **View + Menu (Select + Start)**
+on a controller. It has save states, bindings, settings and **Quit**. Ctrl+Shift+Q
+also quits. Save progress in-game before quitting.
 
-This build accepts these exact US PSN executable versions:
+**Moving from the earlier Armored Core Portable app.** Add this pack to
+psprecomp. Its saves and save states are copied into psprecomp's folders,
+and its prepared games come along with where their ISOs are. Its settings
+come in the first time the launcher shows the pack: the selected preset
+becomes the settings, and the other presets are kept, unused. The earlier
+folders keep their saves and a note of what came over. Prepare each game
+once with the new app.
+
+This pack accepts these exact US PSN executable versions:
 
 | Game | Disc ID | Version |
 | --- | --- | --- |
@@ -46,29 +61,33 @@ The ISO must stay accessible because the game reads its assets from that file.
 
 ## Build
 
-Since 5 Oct the pipeline is psprecomp's player (`tools/psprecomp/player/`, see
-its README and `docs/PLAYER-LAYER.md`), and this repository is a title pack:
-`pack.json` names the app, the three titles, the sources compiled on the
-player's machine, and `packaging/linux/pack.cmake`. That file builds the
-player's launcher with this pack's settings and `host/launcher_info.c` (the
-app's name, About text and title order), and what has not moved into
-psprecomp yet (`boot.c`, the GL backend).
+The pipeline is psprecomp's player (`tools/psprecomp/player/`; see its README
+and `docs/PLAYER-LAYER.md` §6). `pack.json` (version 2) names:
+- the pack: its id `last-raven`, name and file;
+- the three titles;
+- its host code (`host/boot.c`, `host/settings.c`), compiled when the pack
+  is added and linked into each game;
+- its launcher part (`host/settings.c`, `host/launcher_info.c`);
+- the files compiled with each title;
+- its checks, in `packaging/linux/pack.cmake`.
 
 On an x86-64 Linux host, install Python 3.9+, curl, tar and Bubblewrap (`bwrap`).
 Unprivileged user namespaces must be available. Initialize the psprecomp
-submodule, then run:
+submodule, then build the app with this pack's file:
 
 ```sh
-python3 tools/psprecomp/player/package-linux.py build --pack . --output build/releases/deck-test-2
+python3 tools/psprecomp/player/package-linux.py build --pack . --output build/releases/stage10
 ```
 
-The output must be a new directory. SHA-256-pinned archives are downloaded,
-then an unprivileged Ubuntu 22.04 environment is bootstrapped under
-`build/package/ubuntu-22.04/`. An explicit allowlist snapshots original
-app/runtime source. No game dump or developer build products enter the build.
-After bootstrap, compilation and tests run without networking. No Docker
-daemon or root access is needed. Logs are retained in
-`build/package/last-build.log`, including after failed builds.
+`--pack` may be repeated, for The 3rd Birthday's too. The output must be a
+new directory. SHA-256-pinned archives are downloaded, then an unprivileged
+Ubuntu 22.04 environment is bootstrapped under `--work` (default:
+psprecomp's `build/package`). An explicit allowlist snapshots original
+app/runtime source and the files each pack names; no game dump or developer
+build products enter the build. After bootstrap, compilation and tests run
+without networking. No Docker daemon or root access is needed. Logs are
+retained in the work folder's `last-build.log`, including after failed
+builds.
 
 `fetch` only verifies/populates downloads; `bootstrap` also prepares the builder.
 Repeated builds reuse downloads and the builder but compile fresh source.
@@ -82,9 +101,10 @@ This is an auditable recipe, not a claim of byte-for-byte reproducibility.
 
 Outputs include:
 
-- `Armored-Core-Portable-x86_64.AppImage`
-- `Last-Raven.AppDir/`, usable through `AppRun` without FUSE
-- `Armored-Core-Portable-sources.tar.gz`, matching source and build recipes
+- `psprecomp-x86_64.AppImage`, and `psprecomp.AppDir/`, usable through
+  `AppRun` without FUSE
+- `Armored-Core-pack.zip`, this pack's file, which a player adds
+- `psprecomp-sources.tar.gz`, matching source and build recipes, with each pack
 - `BUILD.json`, source hashes, dependency pins and ELF dependency/ABI audit
 - `build.log`, `build-packages.txt`, UI fixture captures and `SHA256SUMS`
 - `README.txt`, setup and troubleshooting instructions
@@ -112,10 +132,12 @@ that title; shared controls invalidate the titles that include them. Shared
 runtime, code generator, compiler or compilation-recipe changes invalidate all
 affected games. **Prepare Game** rebuilds each using the saved ISO location.
 
-`game-builds.json` records the ingredients and fingerprint for each title:
-the actual original host/runtime archives, runtime headers, generator binary,
-Zig compiler/support files, compilation/splitting recipes, supported executable
-hash, and the title's replacement source with its transitive local headers.
+Since stage 10 the fingerprint has an app part, fixed when the app is built
+(`app-build.json`): the runtime and player archives, the headers, the
+generator binary, Zig compiler/support files and the compilation/splitting
+recipes. A pack part follows: its host code with its transitive headers. Then
+each title adds the supported executable hash, and its replacement source with
+its transitive local headers.
 Shared libraries contribute their SONAMEs, so compatible library updates do not
 force relinking. Actual build outputs capture compiler/flag changes without
 making every packaging-script edit invalidate games. Fingerprints use relative
@@ -138,18 +160,22 @@ Default persistent paths:
 
 | Content | Location |
 | --- | --- |
-| Settings | `~/.config/last-raven/settings.ini` |
-| Install records and prepared games | `~/.local/share/last-raven/` |
-| Game save data | `~/.local/share/last-raven/saves/<slug>/ms/PSP/SAVEDATA/` |
-| Import, launcher and game logs | `~/.local/state/last-raven/logs/` |
+| Settings | `~/.config/psprecomp/settings.ini` |
+| Added packs | `~/.local/share/psprecomp/packs/` |
+| Install records and prepared games | `~/.local/share/psprecomp/` |
+| Game save data | `~/.local/share/psprecomp/saves/<slug>/ms/PSP/SAVEDATA/` |
+| Save states | `~/.local/share/psprecomp/states/<slug>/` |
+| Import, launcher and game logs | `~/.local/state/psprecomp/logs/` |
 
 Absolute XDG base-directory overrides are supported. A source build started
 through `scripts/15-settings.sh` uses the same save folder; to play from more
-than one computer, see [the save sync guide](SAVE-SYNC.md). First packaged launch
-copies legacy SDL settings from `~/.local/share/Last Raven/settings.ini` only
-when the new settings file is absent. Moving or replacing the AppImage leaves
-user files intact. Developer scripts and explicit `--config` / `--preset`
-arguments remain available, with existing default and environment precedence.
+than one computer, see [the save sync guide](SAVE-SYNC.md). Settings from
+`~/.config/last-raven/settings.ini` (the earlier app) or
+`~/.local/share/Last Raven/settings.ini` (the earlier development launcher)
+come in when the launcher first shows this pack. Moving or replacing the
+AppImage leaves user files intact. Developer scripts and an explicit
+`--config` remain available, with existing default and environment
+precedence.
 
 ELF helpers and libraries use relative RUNPATHs. System graphics, audio and
 input drivers remain supplied by the OS. Import/game subprocesses add the
@@ -165,9 +191,12 @@ change does not invalidate prepared games.
 
 ## Validation
 
-Every package build runs the settings and actual launcher event-handler fixtures,
-including title ordering, ISO browsing, import subprocess arguments, cancellation,
-preset saving and game launch handoff. Backend fixtures exercise exact-version
+Every package build runs this pack's settings checks, and draws psprecomp's
+launcher with this pack to screenshots through a session to Save and play.
+It then adds the pack's file to the staged app as a player would, building
+it with the app's own Zig, and checks that the launcher loads it. psprecomp's
+own fixtures cover title ordering, ISO browsing, import subprocess arguments,
+cancellation and game launch handoff. Backend fixtures exercise exact-version
 rejection, record corruption, import locking, interrupted preparation, moved ISO
 cache reuse and update invalidation. They contain synthetic data, not game bytes.
 Presentation fixtures check the exact two-second quit threshold, release and

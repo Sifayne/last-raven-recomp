@@ -90,16 +90,16 @@ For normal play, open the **settings launcher**:
 scripts/15-settings.sh
 ```
 
-Choose **Classic**, **Controller**, or **Mouse & Keyboard**, adjust graphics
-and controls, then **Save & Play**. You can create your own named presets.
-For smoother missions in ACLR, AC3P and ACSL, enable **Graphics → Higher FPS**
-and choose **FPS cap** (including custom limits or unlimited). Simulation stays
-at its original speed; see [the FPS guide](docs/FPS.md) for scope and validation.
-The launcher needs SDL2 and SDL2_ttf; existing command-line and headless
-tools continue to work without the launcher. Settings apply on the next
-launch. See [the settings guide](docs/SETTINGS.md) for navigation, file
+It is psprecomp's launcher with this pack linked in. Adjust the settings for
+all games and Armored Core's own graphics and controls, then **Save and
+play**. For smoother missions in ACLR, AC3P and ACSL, enable **Graphics →
+Higher FPS** and choose **FPS cap** (including custom limits or unlimited).
+Simulation stays at its original speed; see [the FPS guide](docs/FPS.md) for
+scope and validation. The launcher needs SDL2 and a C++ compiler; existing
+command-line and headless tools continue to work without it. Settings apply
+on the next launch. See [the settings guide](docs/SETTINGS.md) for navigation, file
 locations, environment overrides and headless inspection. Saves go to
-`~/.local/share/last-raven/saves/`, the same folder the AppImage uses; to play
+`~/.local/share/psprecomp/saves/`, the same folder the psprecomp app uses; to play
 from more than one computer, see [the save sync guide](docs/SAVE-SYNC.md).
 
 For the current dual-stick controls directly in a window:
