@@ -1,23 +1,21 @@
 /* What psprecomp's launcher shows of Armored Core besides its settings
- * (psprecomp/host/launcher.h); the pages come from host/settings.c. */
+ * (psprecomp/host/launcher.h); the pages come from host/settings.c. Its
+ * earlier name is the one this game's own launcher kept settings under,
+ * which psprecomp's brings in once. */
 #include <psprecomp/host/launcher.h>
 #include <stddef.h>
 
 static const char *const titles[] = {"ac3p", "acsl", "aclr", NULL};
+static const char *const names[] = {"Armored Core 3 Portable", "Armored Core: Silent Line",
+                                    "Armored Core: Last Raven", NULL};
 
 const psp_launcher psp_launcher_info = {
-    .name = "Last Raven",
-    .id = "last-raven",
+    .name = "Armored Core",
+    .earlier = "Last Raven",
     .about =
-        "Armored Core PC runtime and launcher: MIT license.\n\n"
-        "Audio uses FFmpeg libraries, copyright the FFmpeg contributors,\n"
-        "under the GNU LGPL version 2.1 or later. https://ffmpeg.org/\n\n"
-        "See licenses/ffmpeg/ for the license and notices, and the\n"
-        "source/ package alongside the release for matching FFmpeg\n"
-        "source and build instructions. Compatible modified shared\n"
-        "libraries may be substituted.\n\n"
+        "The Armored Core pack -- its host code, controls and higher frame rates for "
+        "Armored Core 3 Portable, Silent Line and Last Raven -- is MIT licensed. "
         "Original game code and assets belong to their rights holders.",
     .titles = titles,
-    .new_preset = "WINDOW=1 RENDER=gl MPEG_DECODE=1",
-    .reset_preset = "WINDOW=1",
+    .names = names,
 };

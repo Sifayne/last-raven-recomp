@@ -786,20 +786,18 @@ static int report_cplinit(const psp_blob *b, const elf_info *e) {
 /* ---- entry ----------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
-    const char *module = NULL, *iso = NULL, *config = NULL, *preset = NULL, *load_state = NULL;
+    const char *module = NULL, *iso = NULL, *config = NULL, *load_state = NULL;
     int inspect = 0, force_window = 0;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--config") || !strcmp(argv[i], "--preset") ||
-            !strcmp(argv[i], "--load-state")) {
+        if (!strcmp(argv[i], "--config") || !strcmp(argv[i], "--load-state")) {
             const char *option = argv[i];
             if (++i == argc) { fprintf(stderr, "missing option value\n"); return 2; }
             if (!strcmp(option, "--config")) config = argv[i];
-            else if (!strcmp(option, "--preset")) preset = argv[i];
             else load_state = argv[i];
         } else if (!strcmp(argv[i], "--print-settings")) inspect = 1;
         else if (!strcmp(argv[i], "--window")) force_window = 1;
         else if (!strcmp(argv[i], "--help")) {
-            puts("boot [module.elf] [disc.iso] [--config FILE] [--preset NAME] [--print-settings] [--window]\n"
+            puts("boot [module.elf] [disc.iso] [--config FILE] [--print-settings] [--window]\n"
                  "     [--load-state FILE]");
             return 0;
         } else if (argv[i][0] == '-') { fprintf(stderr,"unknown option: %s\n",argv[i]); return 2; }
@@ -809,7 +807,7 @@ int main(int argc, char **argv) {
     }
     psp_settings settings;
     char settings_error[PSP_SETTINGS_ERROR];
-    if (psp_settings_load(&settings, config, preset, settings_error)) {
+    if (psp_settings_load(&settings, config, settings_error)) {
         fprintf(stderr, "settings: %s\n", settings_error); return 2;
     }
     /* The interactive launcher supplies --window; direct boot stays headless
@@ -820,7 +818,7 @@ int main(int argc, char **argv) {
     }
     if (inspect) { psp_settings_print(&settings, stdout); return 0; }
     if (!module) {
-        fprintf(stderr, "boot <module.elf> [disc.iso] [--config FILE] [--preset NAME]\n");
+        fprintf(stderr, "boot <module.elf> [disc.iso] [--config FILE]\n");
         return 2;
     }
     psp_settings_use(&settings);

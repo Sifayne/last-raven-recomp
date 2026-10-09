@@ -105,14 +105,16 @@ if [ -n "$SDL_DEF" ]; then
     IMGUI="$ROOT/tools/psprecomp/third_party/imgui"
     [ -f "$ROOT/build/psprecomp/libpsprecomp_imgui.a" ] || \
         die "no libpsprecomp_imgui.a: build/psprecomp was configured without a C++ compiler"
-    cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) -I "$ROOT/tools/psprecomp/include" \
-       -c "$ROOT/tools/psprecomp/src/host/overlay.c" -o "$OUT/overlay.o"
+    for src in overlay pages; do
+        cc -O2 -std=gnu11 $SDL_DEF $(pkg-config --cflags sdl2 SDL2_ttf) -I "$ROOT/tools/psprecomp/include" \
+           -c "$ROOT/tools/psprecomp/src/host/$src.c" -o "$OUT/$src.o"
+    done
     for src in "$ROOT/tools/psprecomp/src/host/ui.cpp" "$IMGUI/backends/imgui_impl_sdl2.cpp" \
                "$IMGUI/backends/imgui_impl_sdlrenderer2.cpp"; do
         c++ -O2 -std=c++11 -fno-exceptions -fno-rtti -fno-threadsafe-statics $(pkg-config --cflags sdl2) \
             -I "$IMGUI" -c "$src" -o "$OUT/$(basename "$src" .cpp).o"
     done
-    MENU="$OUT/overlay.o $OUT/ui.o $OUT/imgui_impl_sdl2.o $OUT/imgui_impl_sdlrenderer2.o $ROOT/build/psprecomp/libpsprecomp_imgui.a"
+    MENU="$OUT/overlay.o $OUT/pages.o $OUT/ui.o $OUT/imgui_impl_sdl2.o $OUT/imgui_impl_sdlrenderer2.o $ROOT/build/psprecomp/libpsprecomp_imgui.a"
 fi
 
 # Without SDL2 there is no window, so render_gl.c compiles to its

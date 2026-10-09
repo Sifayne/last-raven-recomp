@@ -1,275 +1,135 @@
-/* Exercise the actual event handlers and render the real screen: psprecomp's
- * launcher (src/host/launcher.c, found on the include path) with Armored
- * Core's settings. This fixture uses a temporary preferences directory and a
- * harmless child in place of a game, so Save & Play can be verified without
- * guest data or user settings. */
+/* psprecomp's launcher (src/host/launcher.c, found on the include path) with
+ * Armored Core's pack linked in (launcher_one.c): every page drawn and saved
+ * as a BMP to look at, and a session -- the pack's settings changed and
+ * saved to its own section, and Save and play running a harmless child in
+ * place of a game, from the title's save folder, with the preferences file.
+ * A folder under the first argument stands in for the user's. */
 #include "settings.h"
 #include <SDL2/SDL.h>
-/* Exercise display selection and unplugging even on a single-screen runner. */
-static int fixture_displays=-1;
-static int test_display_count(void) {
-    return fixture_displays<0?SDL_GetNumVideoDisplays():fixture_displays;
-}
-static const char *test_display_name(int index) {
-    if (fixture_displays<0) return SDL_GetDisplayName(index);
-    return index==0?"Desk monitor":"Side monitor";
-}
-#define SDL_GetNumVideoDisplays test_display_count
-#define SDL_GetDisplayName test_display_name
 #define main launcher_entry
 #include "launcher.c"
 #undef main
-#undef SDL_GetNumVideoDisplays
-#undef SDL_GetDisplayName
 #include <assert.h>
-#include <pthread.h>
-#include <sys/stat.h>
 
-/* The host's own pads stay out: the startup run opens the first game
- * controller, and a press on it can close the launcher (B cancels) before the
- * quit event below is pushed. SDL keeps HIDAPI devices closed and passes only
- * VID/PID 0, the ID SDL_JoystickAttachVirtual gives a virtual pad. Override
- * priority, because a same-named environment variable would win over
- * SDL_SetHint. SDL_Quit clears hints, so each SDL_Init needs this first. */
+/* The host's own pads stay out: a press on one could close the launcher (B
+ * goes back) mid-check. SDL keeps HIDAPI devices closed and passes only
+ * VID/PID 0. Override priority, because a same-named environment variable
+ * would win over SDL_SetHint; SDL_Quit clears hints. */
 static void ignore_host_controllers(void) {
-    assert(SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI,"0",SDL_HINT_OVERRIDE));
-    assert(SDL_SetHintWithPriority(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x0000/0x0000",SDL_HINT_OVERRIDE));
+    assert(SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI, "0", SDL_HINT_OVERRIDE));
+    assert(SDL_SetHintWithPriority(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT, "0x0000/0x0000", SDL_HINT_OVERRIDE));
 }
 
-static void *close_startup(void *unused) {
-    (void)unused;
-    SDL_Delay(500);
-    SDL_Event e={0}; e.type=SDL_QUIT;
-    assert(SDL_PushEvent(&e)==1);
-    return NULL;
+static void shot(launcher *a, const char *dir, const char *name) {
+    /* Twice: ImGui sizes a new window or popup on its first frame. */
+    render(a); render(a);
+    int w = 0, h = 0;
+    assert(!SDL_GetRendererOutputSize(a->renderer, &w, &h));
+    SDL_Surface *surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
+    assert(surface);
+    assert(!SDL_RenderReadPixels(a->renderer, NULL, surface->format->format, surface->pixels, surface->pitch));
+    char path[4096];
+    snprintf(path, sizeof path, "%s/%s.bmp", dir, name);
+    for (char *c = path + strlen(dir) + 1; *c; c++) if (*c == ' ' || *c == '&') *c = '-';
+    assert(!SDL_SaveBMP(surface, path));
+    SDL_FreeSurface(surface);
+    SDL_RenderPresent(a->renderer);
 }
 
-static void press(launcher *a,SDL_Keycode sym) {
-    SDL_Event e={0}; e.type=SDL_KEYDOWN; e.key.keysym.sym=sym; event(a,&e);
+static int contains(const char *path, const char *text) {
+    FILE *f = fopen(path, "r"); if (!f) return 0;
+    static char buf[16384]; size_t n = fread(buf, 1, sizeof buf - 1, f); buf[n] = 0; fclose(f);
+    return strstr(buf, text) != NULL;
 }
-static void pad_press(launcher *a,Uint8 button) {
-    SDL_Event e={0}; e.type=SDL_CONTROLLERBUTTONDOWN; e.cbutton.button=button; event(a,&e);
-}
-static void click(launcher *a,int x,int y) {
-    SDL_Event e={0}; e.type=SDL_MOUSEBUTTONDOWN; e.button.button=SDL_BUTTON_LEFT;
-    e.button.x=x; e.button.y=y; event(a,&e);
-}
-static void type(launcher *a,const char *s) {
-    SDL_Event e={0}; e.type=SDL_TEXTINPUT; snprintf(e.text.text,sizeof e.text.text,"%s",s); event(a,&e);
-}
-static void shot(launcher *a,const char *dir,const char *name) {
-    draw(a);
-    SDL_Surface *surface=SDL_CreateRGBSurfaceWithFormat(0,UI_W,UI_H,32,SDL_PIXELFORMAT_ARGB8888);
-    assert(surface); assert(!SDL_RenderReadPixels(a->renderer,NULL,surface->format->format,surface->pixels,surface->pitch));
-    char path[4096]; snprintf(path,sizeof path,"%s/%s.bmp",dir,name);
-    assert(!SDL_SaveBMP(surface,path)); SDL_FreeSurface(surface); SDL_RenderPresent(a->renderer);
-}
-int main(int argc,char **argv) {
-    assert(argc==2 || argc==3);
-    for (int k=0;k<LR_OPTION_COUNT;k++) unsetenv(lr_options[k].env);
-    /* Launches with a title run from <data root>/saves/<slug>; keep that
-     * inside the fixture directory rather than the user's real one. */
-    setenv("LR_DATA_ROOT",argv[1],1);
-    launcher a={0}; a.running=1; a.focus=a.selected_row=LR_RESOLUTION; a.movie_available=1;
-    snprintf(a.path,sizeof a.path,"%s/presets with spaces.ini",argv[1]);
+
+int main(int argc, char **argv) {
+    assert(argc == 2);
+    for (int k = 0; k < LR_OPTION_COUNT; k++) unsetenv(psp_settings_option(k)->env);
+    char home[3000], config[3100], data[3100], module[3100], settings[3200];
+    snprintf(home, sizeof home, "%s/home", argv[1]);
+    snprintf(config, sizeof config, "%s/config", home);
+    snprintf(data, sizeof data, "%s/data", home);
+    assert(!make_directories(config) && !make_directories(data));
+    setenv("XDG_CONFIG_HOME", config, 1); setenv("XDG_DATA_HOME", data, 1);
+    unsetenv("PSPRECOMP_DATA_ROOT");
+    snprintf(settings, sizeof settings, "%s/psprecomp/settings.ini", config);
+    unlink(settings);
+    snprintf(module, sizeof module, "%s/module.elf", home);
+    FILE *m = fopen(module, "w"); assert(m); fclose(m);
     ignore_host_controllers();
-    assert(!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMECONTROLLER)); assert(!TTF_Init());
-    a.window=SDL_CreateWindow("Settings UI checks",0,0,UI_W,UI_H,SDL_WINDOW_HIDDEN);
-    assert(a.window); a.renderer=SDL_CreateRenderer(a.window,-1,SDL_RENDERER_SOFTWARE); assert(a.renderer);
-    SDL_RenderSetLogicalSize(a.renderer,UI_W,UI_H); assert(!fonts(&a,argc==3?argv[2]:NULL));
-    psp_presets_defaults(&a.book); shot(&a,argv[1],"graphics");
-    a.focus=a.selected_row=LR_WINDOW_MODE;
-    pad_press(&a,SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
-    assert(!strcmp(editing(&a)->value[LR_WINDOW_MODE],"borderless"));
-    shot(&a,argv[1],"windowed-fullscreen");
-    /* The row cycles connected screens with mouse, keyboard and controller. */
-    fixture_displays=2;
-    a.focus=a.selected_row=LR_DISPLAY;
-    pad_press(&a,SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
-    assert(editing(&a)->number[LR_DISPLAY]==1);
-    draw(&a); click(&a,700,394);
-    assert(editing(&a)->number[LR_DISPLAY]==2 && a.modal==MODAL_NONE);
-    char screen[PSP_SETTINGS_VALUE]; display_label(editing(&a),screen,sizeof screen);
-    assert(strstr(screen,"2: Side monitor"));
-    shot(&a,argv[1],"display-selection");
-    press(&a,SDLK_RIGHT); assert(editing(&a)->number[LR_DISPLAY]==-1);
-    press(&a,SDLK_LEFT); assert(editing(&a)->number[LR_DISPLAY]==2);
-    fixture_displays=1; refresh(&a);
-    display_label(&a.effective,screen,sizeof screen);
-    assert(strstr(screen,"unavailable") && editing(&a)->number[LR_DISPLAY]==2 && a.valid);
-    shot(&a,argv[1],"display-disconnected");
-    setenv("PSPRECOMP_DISPLAY","primary",1);
-    press(&a,SDLK_LEFT); refresh(&a);
-    assert(editing(&a)->number[LR_DISPLAY]==2 && a.effective.number[LR_DISPLAY]==-1);
-    /* Higher FPS and its cap are saved rows, with common rates and custom
-     * integer entry. Arrow adjustments from a custom cap use adjacent rates. */
-    a.focus=a.selected_row=LR_HIGH_FPS;
-    press(&a,SDLK_RIGHT); assert(editing(&a)->number[LR_HIGH_FPS]==1);
-    a.focus=a.selected_row=LR_FPS_CAP;
-    press(&a,SDLK_RETURN); assert(a.modal==MODAL_VALUE);
-    type(&a,"175"); press(&a,SDLK_RETURN);
-    assert(a.modal==MODAL_NONE && editing(&a)->number[LR_FPS_CAP]==175);
-    press(&a,SDLK_LEFT); assert(editing(&a)->number[LR_FPS_CAP]==165);
-    press(&a,SDLK_RIGHT); assert(editing(&a)->number[LR_FPS_CAP]==240);
-    press(&a,SDLK_RETURN); type(&a,"unlimited"); press(&a,SDLK_RETURN);
-    assert(editing(&a)->number[LR_FPS_CAP]==-1);
-    a.scroll=2; shot(&a,argv[1],"higher-fps");
-    setenv("PSPRECOMP_FPS_CAP","60",1);
-    press(&a,SDLK_LEFT); refresh(&a);
-    assert(editing(&a)->number[LR_FPS_CAP]==-1 && a.effective.number[LR_FPS_CAP]==60);
-    unsetenv("PSPRECOMP_FPS_CAP");
-    /* Mouse navigation and adjustment. */
-    click(&a,500,166); assert(a.page==1); draw(&a);
-    a.focus=LR_MOUSE_SENS; press(&a,SDLK_RIGHT);
-    assert(fabs(editing(&a)->number[LR_MOUSE_SENS]-1.1)<1e-6);
-    shot(&a,argv[1],"controls");
-    /* Controller navigation scrolls to rows that were initially offscreen. */
-    a.focus=LR_LOOK_DEADZONE; pad_press(&a,SDL_CONTROLLER_BUTTON_DPAD_DOWN);
-    assert(a.focus==LR_STICK_OUTER_DEADZONE && a.scroll>0);
-    pad_press(&a,SDL_CONTROLLER_BUTTON_RIGHTSHOULDER); assert(a.page==2);
-    shot(&a,argv[1],"advanced");
-    /* Override rows are locked; even Reset never writes the override value. */
-    setenv("PSPRECOMP_MOUSE_SENS","3",1); refresh(&a);
-    double saved=editing(&a)->number[LR_MOUSE_SENS];
-    adjust(&a,LR_MOUSE_SENS,1); assert(editing(&a)->number[LR_MOUSE_SENS]==saved);
-    assert(a.effective.number[LR_MOUSE_SENS]==3);
-    activate(&a,PAGE_BASE+1); a.focus=a.selected_row=LR_MOUSE_SENS;
-    shot(&a,argv[1],"override");
-    assert(!save(&a)); psp_presets disk; char error[PSP_SETTINGS_ERROR];
-    assert(!psp_presets_load(&disk,a.path,error));
-    assert(disk.presets[disk.selected].settings.number[LR_MOUSE_SENS]==saved);
-    assert(!strcmp(disk.presets[disk.selected].settings.value[LR_WINDOW_MODE],"borderless"));
-    assert(disk.presets[disk.selected].settings.number[LR_DISPLAY]==2);
-    unsetenv("PSPRECOMP_DISPLAY"); fixture_displays=-1;
-    unsetenv("PSPRECOMP_MOUSE_SENS");
-    activate(&a,DUPLICATE); type(&a,"My mouse setup"); press(&a,SDLK_RETURN);
-    assert(a.book.count==4 && !strcmp(a.book.presets[3].name,"My mouse setup"));
-    activate(&a,RENAME); type(&a,"Desk & controller"); press(&a,SDLK_RETURN);
-    assert(!strcmp(a.book.presets[3].name,"Desk & controller"));
-    /* Escape cancels text edits. */
-    activate(&a,RENAME); type(&a,"Do not save"); press(&a,SDLK_ESCAPE);
-    assert(!strcmp(a.book.presets[3].name,"Desk & controller"));
-    activate(&a,NEW); pad_press(&a,SDL_CONTROLLER_BUTTON_A); assert(a.book.count==5);
-    activate(&a,DELETE); pad_press(&a,SDL_CONTROLLER_BUTTON_A); assert(a.book.count==4);
-    activate(&a,RESET); press(&a,SDLK_ESCAPE); assert(editing(&a)->number[LR_INPUT]==2);
-    activate(&a,RESET); press(&a,SDLK_RETURN); assert(editing(&a)->number[LR_INPUT]==0);
-    /* Invalid input keeps the editor open and preserves the saved value. */
-    activate(&a,LR_MOUSE_SENS); type(&a,"nan"); press(&a,SDLK_RETURN);
-    assert(a.modal==MODAL_VALUE && *a.modal_error); shot(&a,argv[1],"invalid-value");
-    press(&a,SDLK_ESCAPE);
-    a.movie_available=0;
-    psp_settings_set(editing(&a),LR_MPEG_DECODE,"1",PSP_SOURCE_PRESET,error);
-    adjust(&a,LR_MPEG_DECODE,1); assert(!editing(&a)->number[LR_MPEG_DECODE]);
-    adjust(&a,LR_MPEG_DECODE,1); assert(!editing(&a)->number[LR_MPEG_DECODE]);
-    a.movie_available=1;
-    /* Verify a launch receives each argument intact, including spaces and '&'. */
-    char child[4096],module[4096],arguments[4096];
-    snprintf(child,sizeof child,"%s/fake boot",argv[1]);
-    snprintf(module,sizeof module,"%s/game dump.elf",argv[1]);
-    snprintf(arguments,sizeof arguments,"%s/arguments.txt",argv[1]);
-    FILE *f=fopen(child,"w"); assert(f);
-    /* The fake boot records its working directory first, then its arguments. */
-    fputs("#!/bin/sh\nprintf '%s\\n' \"$(pwd -P)\" \"$@\" > \"$LR_LAUNCH_TEST_ARGS\"\n",f); fclose(f); assert(!chmod(child,0700));
-    f=fopen(module,"w"); assert(f); fclose(f);
-    setenv("LR_LAUNCH_TEST_ARGS",arguments,1);
-    a.boot=child; a.module=module;
-    activate(&a,PLAY); assert(a.child>0);
-    for (int i=0;i<200 && a.child;i++) { SDL_Delay(5); poll_child(&a); }
+    assert(!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER));
+
+    /* The three titles, with a harmless child for a boot host. */
+    char specs[3][4000];
+    const char *slugs[] = {"aclr", "ac3p", "acsl"};
+    char *args[8]; int n = 0;
+    args[n++] = "launcher";
+    for (int i = 0; i < 3; i++) {
+        snprintf(specs[i], sizeof specs[i], "%s|%s|/bin/true|%s", slugs[i],
+                 psp_launcher_info.names[i == 0 ? 2 : i - 1], module);
+        args[n++] = "--game"; args[n++] = specs[i];
+    }
+    args[n] = NULL;
+    launcher a = {0}; a.running = 1;
+    int check = 0; const char *wanted = NULL;
+    assert(!start(&a, n, args, &check, &wanted));
+    /* The pack's titles in its order, opened on the first; a new player's
+     * settings: dual-stick controls over a window and Match window. */
+    assert(pack_count == 1 && a.game_count == 3 && !strcmp(a.games[0].slug, "ac3p") && a.pack == 0);
+    assert(a.edit.number[LR_INPUT] == 2 && a.edit.number[LR_WINDOW] == 1 && a.edit.number[LR_RESOLUTION] == 1);
+    const char *pages[PAGES_MAX];
+    assert(group_pages(&a, GROUP_PACK, pages) == 2 && !strcmp(pages[0], "Graphics") && !strcmp(pages[1], "Controls"));
+
+    /* Every page, at the Steam Deck's size. */
+    assert(!open_window(&a));
+    SDL_SetWindowSize(a.window, 1280, 800);
+    a.group = GROUP_PLAYER; a.page = NULL;
+    render(&a);
+    int groups[4 * PAGES_MAX], at; const char *ring[4 * PAGES_MAX];
+    const int count = page_ring(&a, groups, ring, &at);
+    for (int i = 0; i < count; i++) {
+        char name[160];
+        snprintf(name, sizeof name, "page-%d-%s", groups[at], ring[at]);
+        shot(&a, argv[1], name);
+        step_page(&a, 1);
+        page_ring(&a, groups, ring, &at);
+    }
+    a.confirm = CONFIRM_RESET; a.group = GROUP_PACK; a.page = "Controls";
+    shot(&a, argv[1], "reset");
+    a.confirm = CONFIRM_NONE;
+    a.importer = "/bin/false";
+    browser_open(&a, BROWSE_ISO);
+    shot(&a, argv[1], "add-game");
+    activate_back(&a);
+
+    /* A change to each table, saved: the player's to [player], the pack's to
+     * [pack last-raven]. */
+    char error[PSP_SETTINGS_ERROR];
+    assert(!psp_settings_set(&a.edit, LR_FPS_CAP, "144", PSP_SOURCE_FILE, error)); changed(&a);
+    assert(!psp_settings_set(&a.edit, LR_WINDOW_MODE, "borderless", PSP_SOURCE_FILE, error)); changed(&a);
+    shot(&a, argv[1], "unsaved");
+    assert(!save(&a));
+    assert(contains(settings, "[player]\nRESOLUTION=window\nWINDOW_MODE=borderless\n"));
+    assert(contains(settings, "[pack last-raven]\nASPECT=native\nHIGH_FPS=0\nFPS_CAP=144\nINPUT=dual\n"));
+    assert(contains(settings, "game=ac3p\n"));
+
+    /* Save and play: the child runs from the title's save folder and exits
+     * 0, which closes the launcher. */
+    a.importer = NULL;
+    select_game(&a, 2);
+    launch_game(&a);
+    assert(a.child);
+    for (int i = 0; i < 500 && a.child; i++) { SDL_Delay(10); poll_child(&a); }
     assert(!a.child && !a.running);
-    char contents[12000]={0}; f=fopen(arguments,"r"); assert(f);
-    fread(contents,1,sizeof contents-1,f); fclose(f);
-    /* No title selected: the game keeps the launcher's own directory. */
-    char cwd[4096]; assert(getcwd(cwd,sizeof cwd));
-    assert(!strncmp(contents,cwd,strlen(cwd)) && contents[strlen(cwd)]=='\n');
-    assert(strstr(contents,module) && strstr(contents,a.path));
-    assert(strstr(contents,"--preset\nDesk & controller\n--window\n"));
-    assert(!psp_presets_load(&disk,a.path,error));
-    assert(!strcmp(disk.presets[disk.selected].name,"Desk & controller"));
-    /* Cancel with edits asks once; rejecting the dialog keeps edits intact. */
-    a.running=1; a.dirty=1; activate(&a,CANCEL); assert(a.modal==MODAL_CANCEL_DIRTY);
-    press(&a,SDLK_ESCAPE); assert(a.running && a.dirty);
-    activate(&a,CANCEL); press(&a,SDLK_RETURN); assert(!a.running);
-    /* Title tabs: a click switches the launch target and remembers the slug,
-     * Left/Right cycle on a focused tab, Save persists it, Play uses it. */
-    a.running=1; a.dirty=0; a.game_count=2;
-    a.games[0]=(game_entry){"aclr","Armored Core: Last Raven",child,module,NULL};
-    a.games[1]=(game_entry){"ac3p","Armored Core 3 Portable",child,module,""};
-    select_game(&a,0,1); assert(a.game==0 && !strcmp(a.book.game,"aclr") && !a.dirty);
-    shot(&a,argv[1],"games");
-    draw(&a); click(&a,400,110);
-    assert(a.game==1 && a.focus==GAME_BASE+1 && a.dirty && !strcmp(a.book.game,"ac3p") && !a.iso);
-    press(&a,SDLK_RIGHT); assert(a.game==0 && a.focus==GAME_BASE);
-    press(&a,SDLK_LEFT); assert(a.game==1);
-    shot(&a,argv[1],"games-second");
-    assert(!save(&a)); assert(!psp_presets_load(&disk,a.path,error)); assert(!strcmp(disk.game,"ac3p"));
-    activate(&a,PLAY); assert(a.child>0);
-    for (int i=0;i<200 && a.child;i++) { SDL_Delay(5); poll_child(&a); }
-    assert(!a.child && !a.running);
-    contents[0]=0; f=fopen(arguments,"r"); assert(f); fread(contents,1,sizeof contents-1,f); fclose(f);
-    assert(strstr(contents,module) && strstr(contents,"--preset\nDesk & controller\n--window\n"));
-    /* The selected title ran from <data root>/saves/<slug>, created on demand. */
-    char save_root[4096],save_root_real[4096]; struct stat save_st;
-    snprintf(save_root,sizeof save_root,"%s/saves/ac3p",argv[1]);
-    assert(!stat(save_root,&save_st) && S_ISDIR(save_st.st_mode) && realpath(save_root,save_root_real));
-    assert(!strncmp(contents,save_root_real,strlen(save_root_real)) && contents[strlen(save_root_real)]=='\n');
-    /* Imported games keep release order, retain the saved selection, and
-     * reject a truncated library without losing the current launch targets. */
-    char library[4096], importer[4096], browser[4096], iso_fixture[4096];
-    snprintf(library,sizeof library,"%s/library.bin",argv[1]);
-    snprintf(importer,sizeof importer,"%s/fake importer",argv[1]);
-    snprintf(browser,sizeof browser,"%s/disc folder",argv[1]);
-    assert(!mkdir(browser,0700));
-    assert(snprintf(iso_fixture,sizeof iso_fixture,"%s/a disc & spaces.iso",browser)<(int)sizeof iso_fixture);
-    f=fopen(iso_fixture,"w"); assert(f); fclose(f);
-    f=fopen(library,"wb"); assert(f);
-    const char *slugs[]={"aclr","ac3p","acsl"};
-    const char *titles[]={"Armored Core: Last Raven","Armored Core 3 Portable","Armored Core: Silent Line"};
-    fprintf(f,"LRLIB1%cacsl%c",0,0);
-    for (int i=0;i<3;i++) fprintf(f,"%s%c%s%c%s%c%s%c%s%c",slugs[i],0,titles[i],0,child,0,module,0,iso_fixture,0);
-    fclose(f); a.library=library; a.importer=importer; a.running=1;
-    assert(!library_load(&a,0));
-    assert(a.game_count==3 && a.game==0 && !strcmp(a.games[0].slug,"ac3p"));
-    assert(!strcmp(a.games[1].slug,"acsl") && !strcmp(a.games[2].slug,"aclr"));
-    shot(&a,argv[1],"release-order");
-    browser_scan(&a,browser); browser_open(&a);
-    assert(a.modal==MODAL_BROWSE && a.file_count==1 && !a.files[0].directory);
-    shot(&a,argv[1],"add-game");
-    f=fopen(importer,"w"); assert(f);
-    fputs("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$LR_LAUNCH_TEST_ARGS\"\necho Ready\n",f);
-    fclose(f); assert(!chmod(importer,0700));
-    press(&a,SDLK_RETURN); assert(a.import_pid>0 && a.modal==MODAL_PREPARING);
-    for (int i=0;i<200 && a.import_pid;i++) { SDL_Delay(5); import_poll(&a); }
-    assert(!a.import_pid && a.modal==MODAL_NONE && a.game==1 && !strcmp(a.book.game,"acsl"));
-    contents[0]=0; f=fopen(arguments,"r"); assert(f); fread(contents,1,sizeof contents-1,f); fclose(f);
-    assert(strstr(contents,"import\n") && strstr(contents,iso_fixture));
-    f=fopen(library,"wb"); assert(f); fputs("truncated",f); fclose(f);
-    assert(library_load(&a,0)<0 && a.game_count==3 && !strcmp(a.games[a.game].slug,"acsl"));
-    f=fopen(importer,"w"); assert(f); fputs("#!/bin/sh\nsleep 30\n",f); fclose(f);
-    import_start(&a,iso_fixture); assert(a.import_pid>0);
-    import_cancel(&a);
-    for (int i=0;i<200 && a.import_pid;i++) { SDL_Delay(5); import_poll(&a); }
-    assert(!a.import_pid && strstr(a.status,"canceled"));
-    /* A valid library with no entries: the previous targets pointed into the
-     * buffer the reload frees, so they must be cleared, not kept; the screen
-     * must still draw with nothing to launch. */
-    f=fopen(library,"wb"); assert(f); fprintf(f,"LRLIB1%cacsl%c",0,0); fclose(f);
-    assert(!library_load(&a,0) && a.game_count==0 && a.game==0);
-    assert(!a.boot && !a.module && !a.iso && !strcmp(game_title(&a),"Last Raven"));
-    shot(&a,argv[1],"no-games");
-    free(a.library_buffer); a.library_buffer=NULL; a.library=a.importer=NULL;
-    unlink(library); unlink(importer); unlink(iso_fixture); rmdir(browser);
-    a.game_count=0;
-    unlink(child); unlink(module); unlink(arguments);
-    assert(!rmdir(save_root)); snprintf(save_root,sizeof save_root,"%s/saves",argv[1]); assert(!rmdir(save_root));
-    TTF_CloseFont(a.body); TTF_CloseFont(a.small); TTF_CloseFont(a.heading);
-    SDL_DestroyRenderer(a.renderer); SDL_DestroyWindow(a.window); TTF_Quit(); SDL_Quit();
-    /* Also exercise the real CLI entry point, loading the file we just saved.
-     * The event thread closes it normally, without touching user preferences. */
-    ignore_host_controllers();
-    pthread_t closer; assert(!pthread_create(&closer,NULL,close_startup,NULL));
-    char *startup[]={"launcher","--config",a.path,"--font",argc==3?argv[2]:NULL,NULL};
-    assert(!launcher_entry(argc==3?5:3,startup)); assert(!pthread_join(closer,NULL));
-    unlink(a.path);
-    puts("launcher: mouse, keyboard, controller, presets, overrides, cancel, validation and launch handoff passed");
+    char saves[3200];
+    snprintf(saves, sizeof saves, "%s/psprecomp/saves/aclr", data);
+    struct stat st;
+    assert(!stat(saves, &st) && S_ISDIR(st.st_mode));
+    assert(contains(settings, "game=aclr\n"));
+
+    close_window(&a);
+    psp_settings_file_free(a.file);
+    SDL_Quit();
+    printf("launcher: Armored Core's pages drawn to %s, settings saved to its section, Save and play ran\n", argv[1]);
     return 0;
 }
