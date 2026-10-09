@@ -10,6 +10,8 @@
 #include <time.h>
 #include "settings.h"
 #include "psprecomp/clock.h"
+#include "psprecomp/dispatch.h"
+#include "psprecomp/state.h"
 #include "fps_clock.h"
 
 static struct {
@@ -60,6 +62,23 @@ static void fps_stop(void) {
         fclose(fps.log);
     }
     memset(&fps,0,sizeof fps);
+}
+/* A save state keeps the loop as it is (fps_keep). Its log is this
+ * process's, opened again where the loop is running; and in real time its
+ * clock starts again, since the saving process's wall time means nothing
+ * here. Headless, the display clock is the loop's own count and carries on. */
+static int fps_state_load(psp_state_reader *r, char *why, size_t size) {
+    (void)r; (void)why; (void)size;
+    if (psp_clock_is_realtime()) { fps.deadline=0; fps.clock.started=0; }
+    const char *path=getenv("PSPRECOMP_FPS_LOG");
+    fps.log=fps.active && path && *path?fopen(path,"a"):NULL;
+    if (fps.log) setvbuf(fps.log,NULL,_IOLBF,0);
+    return 0;
+}
+static void fps_keep(void) {
+    static const psp_state_part part={"fps",NULL,NULL,fps_state_load};
+    PSP_STATE_KEEP(fps);
+    psp_state_register(&part);
 }
 static void fps_frame_begin(void) {
     uint64_t now;

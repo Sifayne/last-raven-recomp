@@ -1165,3 +1165,15 @@ void psp_func_00279A50(void) {
     }
     r_v0 = bits;
 }
+
+/* What these replacements carry from one poll to the next, named to a save
+ * state (psprecomp/state.h) by boot.c, with the mission loop's own. */
+void lr_replacements_keep(void) {
+    PSP_STATE_KEEP(g_ac_update_poll);
+    PSP_STATE_KEEP(g_walk);
+    PSP_STATE_KEEP(g_move_gate);
+    PSP_STATE_KEEP(g_turn_gate);
+    PSP_STATE_KEEP(g_mouse_hold);
+    PSP_STATE_KEEP(g_extra_pad);
+    fps_aclr_keep();
+}

@@ -36,6 +36,7 @@
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
 #include "psprecomp/render.h"
+#include "psprecomp/state.h"
 #include "psprecomp/vfpu.h"
 
 #include <setjmp.h>
@@ -47,6 +48,10 @@
 #include <string.h>
 
 void psp_recomp_register(void);
+/* The title's replacements (host/replacements*.c): what they carry from one
+ * poll to the next, and the mission loop they resume, named to a save state
+ * (psprecomp/state.h). */
+void lr_replacements_keep(void);
 
 /* The guest's user-mode stack. PSP puts it at the top of user RAM and grows it
  * down; the exact value matters less than leaving room below for the heap. */
@@ -764,17 +769,21 @@ static int report_cplinit(const psp_blob *b, const elf_info *e) {
 /* ---- entry ----------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
-    const char *module = NULL, *iso = NULL, *config = NULL, *preset = NULL;
+    const char *module = NULL, *iso = NULL, *config = NULL, *preset = NULL, *load_state = NULL;
     int inspect = 0, force_window = 0;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--config") || !strcmp(argv[i], "--preset")) {
-            int is_config = !strcmp(argv[i], "--config");
+        if (!strcmp(argv[i], "--config") || !strcmp(argv[i], "--preset") ||
+            !strcmp(argv[i], "--load-state")) {
+            const char *option = argv[i];
             if (++i == argc) { fprintf(stderr, "missing option value\n"); return 2; }
-            if (is_config) config = argv[i]; else preset = argv[i];
+            if (!strcmp(option, "--config")) config = argv[i];
+            else if (!strcmp(option, "--preset")) preset = argv[i];
+            else load_state = argv[i];
         } else if (!strcmp(argv[i], "--print-settings")) inspect = 1;
         else if (!strcmp(argv[i], "--window")) force_window = 1;
         else if (!strcmp(argv[i], "--help")) {
-            puts("boot [module.elf] [disc.iso] [--config FILE] [--preset NAME] [--print-settings] [--window]");
+            puts("boot [module.elf] [disc.iso] [--config FILE] [--preset NAME] [--print-settings] [--window]\n"
+                 "     [--load-state FILE]");
             return 0;
         } else if (argv[i][0] == '-') { fprintf(stderr,"unknown option: %s\n",argv[i]); return 2; }
         else if (!module) module = argv[i];
@@ -836,6 +845,7 @@ int main(int argc, char **argv) {
     if (iso) psp_io_set_umd_image(iso);
     psp_hle_register(0x8F2DF740u, "ModuleMgrForUser", "StopUnloadSelfModule",
                      hle_stop_unload_self);
+    lr_replacements_keep();
     printf("  [2] runtime   %u functions registered\n", psp_dispatch_count());
 
     /* Presentation, before the module loads: the real-time clock anchors to
@@ -933,6 +943,21 @@ int main(int argc, char **argv) {
     psp_sched_set_thread_hook(install_alt_stack);
     printf("      disc      %s\n", iso ? iso : "(none -- raw umd: opens will fail)");
 
+    /* A save state replaces steps 3 to 5: its threads are already past
+     * module_start, each continuing where the state left it once the drain
+     * below lets them run (psprecomp/state.h). */
+    int ctors_ok = 0, entry_ok = 0;
+    if (load_state) {
+        char why[512];
+        if (psp_state_load(load_state, why, sizeof why) != 0) {
+            fprintf(stderr, "state: %s\n", why);
+            return 1;
+        }
+        printf("  [3] state     %s: guest time %.6f s, poll %u\n", load_state,
+               psp_clock_peek() / 1e6, psp_ctrl_polls());
+        goto threads;
+    }
+
     /* 3 — machine state. $k0 points at a thread control block; the allocator
      *     reaches through it for the reent structure, so it has to be real
      *     before any allocation, not just before the first C++ object. */
@@ -973,12 +998,13 @@ int main(int argc, char **argv) {
      *
      * Kept as a report so the table is still visible at boot. */
     printf("  [4] ctors\n");
-    const int ctors_ok = report_cplinit(&b, &e);
+    ctors_ok = report_cplinit(&b, &e);
 
     /* 5 — module_start. */
     printf("  [5] entry     0x%08X\n", e.entry);
-    const int entry_ok = guarded_call(e.entry, 10, "module_start");
+    entry_ok = guarded_call(e.entry, 10, "module_start");
 
+threads:
     /* 6 — the threads module_start left behind.
      *
      * The usual shape is that module_start creates a thread, starts it, and
@@ -1046,6 +1072,7 @@ int main(int argc, char **argv) {
     printf("---\n");
     printf("ctors:    %s\n", ctors_ok == 0 ? "ok" : "incomplete");
     if (g_guest_exited) printf("entry:    guest exited with status %u\n", g_exit_status);
+    else if (load_state) printf("entry:    a loaded state (%s)\n", load_state);
     else                printf("entry:    %s\n", entry_ok == 0 ? "returned" : "stopped");
     /* A force-stopped run also leaves zero threads alive -- stop_all marks them
      * dead -- so "all finished" would be printed for a run the host just
