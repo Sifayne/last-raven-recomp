@@ -123,9 +123,13 @@ int main(void) {
     assert(!strcmp(s.value[LR_WINDOW_MODE],"windowed") && s.width==1280 && s.height==720);
     assert(!s.number[LR_HIGH_FPS] && s.number[LR_FPS_CAP]==60);
     assert(!strcmp(s.value[LR_DISPLAY],"primary"));
+    /* A key this version does not know is a newer one's: skipped, the rest
+     * read (psprecomp src/host/settings.c), so a build kept for an older
+     * save state reads what a newer launcher wrote. */
+    putfile(path,"version=2\n[pack last-raven]\nCAPTURE=oops\nINPUT=classic\n");
+    assert(!psp_settings_load(&s,path,error) && !strcmp(s.value[LR_INPUT],"classic"));
     const char *invalid[]={
         "version=2\n[pack last-raven]\nINPUT=dual\nINPUT=classic\n",
-        "version=2\n[pack last-raven]\nCAPTURE=oops\n",
         "version=2\n[pack last-raven]\nLOOK_EXPO=NaN\n",
         "version=2\n[pack last-raven]\nRENDER=gl\n",
         "version=2\n[player]\nINPUT=dual\n",
